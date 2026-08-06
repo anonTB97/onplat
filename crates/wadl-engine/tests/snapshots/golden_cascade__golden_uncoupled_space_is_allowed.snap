@@ -1,0 +1,9 @@
+---
+source: crates/wadl-engine/tests/golden_cascade.rs
+expression: "decide(\"1-100-0-L\")"
+---
+{
+  "state": "ALLOW",
+  "trace": [],
+  "earliest_clear": null
+}

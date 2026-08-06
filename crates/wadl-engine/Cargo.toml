@@ -13,10 +13,13 @@ publish.workspace = true
 [dependencies]
 wadl-domain.workspace = true
 serde.workspace = true
+# Base features only (parse/format/serde). NOT `v7`: that pulls an RNG needing a
+# wasm entropy source. The engine wraps rule-version ids, it never mints them.
+uuid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-uuid.workspace = true
+insta.workspace = true
 
 [lints]
 workspace = true

@@ -40,9 +40,11 @@
 pub mod coupling;
 pub mod decision;
 pub mod evaluate;
+pub mod rules;
 pub mod traversal;
 
-pub use coupling::{AdjacencyGraph, CouplingEdge, Direction, Propagation};
+pub use coupling::{AdjacencyGraph, CouplingCode, CouplingEdge, Direction, Propagation};
 pub use decision::DecisionState;
 pub use evaluate::{evaluate, Decision, EvaluationRequest, Hazard, HazardKind, TraceStep};
+pub use rules::{Applies, RuleEntry, RuleSet};
 pub use traversal::{CascadeHit, TraversalBound};

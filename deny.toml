@@ -27,12 +27,29 @@ allow = [
   "MPL-2.0",
 ]
 confidence-threshold = 0.9
+# The workspace's own crates carry `license = "UNLICENSED"` (proprietary, and
+# every one is `publish = false`). That is not an SPDX expression, so the gate
+# would otherwise report our own crates as unlicensed and drown the real signal
+# — third-party licences. Skipping private crates keeps the check about the
+# dependency tree, which is what it is for.
+private = { ignore = true }
+# The allow list above is the reviewed policy, not a description of the current
+# tree; an entry that no dependency happens to use today is intentional, so it
+# should not be reported as an unused allowance.
+unused-allowed-license = "allow"
 
 [bans]
 # Multiple versions of the same crate bloat the vendored set and the audit
 # surface; warn so duplicates are visible and can be unified.
 multiple-versions = "warn"
-wildcard-dependencies = "deny"
+# A wildcard version on a REGISTRY dependency is unpinnable and therefore
+# unreproducible, so it is refused.
+wildcards = "deny"
+# ...but the workspace's own crates depend on each other by `path`, which cargo
+# records without a version and cargo-deny therefore reads as a wildcard. A path
+# dependency is not fetched from a registry and cannot drift, so it is exempt —
+# without this, the rule fires on our own crate graph and never on a real one.
+allow-wildcard-paths = true
 # Nothing in the engine or its dependencies may reach for the network or a
 # clock behind our back. Add specific bans here as the tree is audited.
 deny = []

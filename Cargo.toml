@@ -40,6 +40,9 @@ uuid = { version = "1", default-features = false, features = ["serde", "std"] }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 thiserror = "1"
+# Already in the tree via axum; used to make the Repositories trait async while
+# staying dyn-compatible (native async fn in trait is not object-safe).
+async-trait = "0.1"
 
 # Internal crates
 wadl-domain = { path = "crates/wadl-domain" }

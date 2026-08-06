@@ -17,20 +17,21 @@ use crate::scope::TenantScope;
 /// code, and the PostgreSQL implementation will do so via row-level security
 /// plus an assignment filter.
 ///
-/// Synchronous by design in milestone 1: the working implementation is
-/// in-memory, and keeping the trait object-safe without a boxed-future dance
-/// keeps the API and the leak test simple. The async PostgreSQL repositories
-/// wrap this shape when they land.
+/// Async because the real implementation talks to PostgreSQL. `#[async_trait]`
+/// rather than native `async fn` in a trait: the API holds an
+/// `Arc<dyn Repositories>`, and a native async fn in a trait is not
+/// object-safe, so the futures have to be boxed either way.
+#[async_trait::async_trait]
 pub trait Repositories: Send + Sync {
     /// The hulls visible to `scope`: in-tenant AND assigned.
-    fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary>;
+    async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary>;
 
     /// One hull, or [`StoreError::NotFound`] if it is out of tenant or not
     /// assigned. A hull in another tenant is `NotFound`, never "forbidden".
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn get_vessel(
+    async fn get_vessel(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -40,7 +41,7 @@ pub trait Repositories: Send + Sync {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn list_compartments(
+    async fn list_compartments(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -50,7 +51,7 @@ pub trait Repositories: Send + Sync {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn list_work_orders(
+    async fn list_work_orders(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -60,7 +61,7 @@ pub trait Repositories: Send + Sync {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn stranded_hours(
+    async fn stranded_hours(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -71,7 +72,7 @@ pub trait Repositories: Send + Sync {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn list_decks(
+    async fn list_decks(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -82,7 +83,7 @@ pub trait Repositories: Send + Sync {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn adjacency_graph(
+    async fn adjacency_graph(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -93,7 +94,7 @@ pub trait Repositories: Send + Sync {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn live_hazards(
+    async fn live_hazards(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -105,13 +106,17 @@ pub trait Repositories: Send + Sync {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn rules_in_force(&self, scope: &TenantScope, vessel: VesselId) -> Result<RuleSet, StoreError>;
+    async fn rules_in_force(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<RuleSet, StoreError>;
 
     /// The distributed packages on a hull.
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
-    fn list_packages(
+    async fn list_packages(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -123,7 +128,7 @@ pub trait Repositories: Send + Sync {
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`, or no package
     /// on it carries `code`.
-    fn get_package(
+    async fn get_package(
         &self,
         scope: &TenantScope,
         vessel: VesselId,

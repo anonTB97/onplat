@@ -58,7 +58,7 @@ enum Command {
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Migrate { database_url } => migrate(database_url).await,
-        Command::Seed => seed(),
+        Command::Seed => seed().await,
         Command::VerifyLedger { input } => verify_ledger(&input),
         Command::SupportBundle {
             out,
@@ -77,11 +77,12 @@ async fn migrate(database_url: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn seed() -> Result<()> {
+async fn seed() -> Result<()> {
     let (store, world) = InMemoryStore::demo();
-    let vessels = store.list_vessels(&world.yard_scope());
+    let vessels = store.list_vessels(&world.yard_scope()).await;
     let stranded = store
         .stranded_hours(&world.yard_scope(), world.cvn73)
+        .await
         .context("computing stranded hours")?;
     let summary = serde_json::json!({
         "note": "illustrative / notional data — decision support only",

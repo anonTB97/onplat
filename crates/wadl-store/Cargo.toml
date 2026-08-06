@@ -13,6 +13,7 @@ wadl-engine.workspace = true
 wadl-plan.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 chrono.workspace = true
 sqlx.workspace = true

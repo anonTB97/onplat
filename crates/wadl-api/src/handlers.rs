@@ -23,7 +23,7 @@ pub(crate) async fn list_vessels(
     State(state): State<AppState>,
     Caller(scope): Caller,
 ) -> Json<Value> {
-    Json(json!(state.store.list_vessels(&scope)))
+    Json(json!(state.store.list_vessels(&scope).await))
 }
 
 pub(crate) async fn get_vessel(
@@ -31,7 +31,10 @@ pub(crate) async fn get_vessel(
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let vessel = state.store.get_vessel(&scope, VesselId::from_uuid(id))?;
+    let vessel = state
+        .store
+        .get_vessel(&scope, VesselId::from_uuid(id))
+        .await?;
     Ok(Json(json!(vessel)))
 }
 
@@ -42,7 +45,8 @@ pub(crate) async fn list_compartments(
 ) -> Result<Json<Value>, ApiError> {
     let compartments = state
         .store
-        .list_compartments(&scope, VesselId::from_uuid(id))?;
+        .list_compartments(&scope, VesselId::from_uuid(id))
+        .await?;
     Ok(Json(json!(compartments)))
 }
 
@@ -53,7 +57,8 @@ pub(crate) async fn list_work_orders(
 ) -> Result<Json<Value>, ApiError> {
     let orders = state
         .store
-        .list_work_orders(&scope, VesselId::from_uuid(id))?;
+        .list_work_orders(&scope, VesselId::from_uuid(id))
+        .await?;
     Ok(Json(json!(orders)))
 }
 
@@ -64,7 +69,8 @@ pub(crate) async fn stranded_hours(
 ) -> Result<Json<Value>, ApiError> {
     let report = state
         .store
-        .stranded_hours(&scope, VesselId::from_uuid(id))?;
+        .stranded_hours(&scope, VesselId::from_uuid(id))
+        .await?;
     Ok(Json(json!(report)))
 }
 
@@ -74,7 +80,10 @@ pub(crate) async fn list_decks(
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let decks = state.store.list_decks(&scope, VesselId::from_uuid(id))?;
+    let decks = state
+        .store
+        .list_decks(&scope, VesselId::from_uuid(id))
+        .await?;
     Ok(Json(json!(decks)))
 }
 
@@ -91,7 +100,7 @@ pub(crate) async fn compartment_state(
     Path((id, compartment)): Path<(Uuid, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
-    let decision = decide(&state, &scope, vessel, &compartment)?;
+    let decision = decide(&state, &scope, vessel, &compartment).await?;
     Ok(Json(
         json!({ "compartment": compartment, "decision": decision }),
     ))
@@ -105,10 +114,10 @@ pub(crate) async fn deck_states(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
-    let compartments = state.store.list_compartments(&scope, vessel)?;
-    let graph = state.store.adjacency_graph(&scope, vessel)?;
-    let hazards = state.store.live_hazards(&scope, vessel)?;
-    let rules = state.store.rules_in_force(&scope, vessel)?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let rules = state.store.rules_in_force(&scope, vessel).await?;
     let at = state.clock.now();
 
     let rows: Vec<Value> = compartments
@@ -139,7 +148,10 @@ pub(crate) async fn list_packages(
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let packages = state.store.list_packages(&scope, VesselId::from_uuid(id))?;
+    let packages = state
+        .store
+        .list_packages(&scope, VesselId::from_uuid(id))
+        .await?;
     Ok(Json(json!(packages)))
 }
 
@@ -156,13 +168,13 @@ pub(crate) async fn get_package(
     Path((id, code)): Path<(Uuid, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
-    let package = state.store.get_package(&scope, vessel, &code)?;
+    let package = state.store.get_package(&scope, vessel, &code).await?;
     let analysis = package.analyse();
 
     // The engine's inputs, loaded once for the whole footprint.
-    let graph = state.store.adjacency_graph(&scope, vessel)?;
-    let hazards = state.store.live_hazards(&scope, vessel)?;
-    let rules = state.store.rules_in_force(&scope, vessel)?;
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let rules = state.store.rules_in_force(&scope, vessel).await?;
     let at = state.clock.now();
     let decide_space = |compartment: &CompartmentNo| {
         evaluate(&EvaluationRequest {
@@ -222,16 +234,16 @@ pub(crate) async fn get_package(
 }
 
 /// Shared evaluation path: assembles the engine's inputs for one compartment.
-fn decide(
+async fn decide(
     state: &AppState,
     scope: &wadl_store::TenantScope,
     vessel: VesselId,
     compartment: &str,
 ) -> Result<Decision, ApiError> {
     // Scope is enforced by each store call; the first failure short-circuits.
-    let graph = state.store.adjacency_graph(scope, vessel)?;
-    let hazards = state.store.live_hazards(scope, vessel)?;
-    let rules = state.store.rules_in_force(scope, vessel)?;
+    let graph = state.store.adjacency_graph(scope, vessel).await?;
+    let hazards = state.store.live_hazards(scope, vessel).await?;
+    let rules = state.store.rules_in_force(scope, vessel).await?;
     let subject = CompartmentNo::new(compartment);
     Ok(evaluate(&EvaluationRequest {
         subject: &subject,

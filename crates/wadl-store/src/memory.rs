@@ -812,8 +812,9 @@ fn summarise_vessel(v: &VesselRow) -> VesselSummary {
     }
 }
 
+#[async_trait::async_trait]
 impl Repositories for InMemoryStore {
-    fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary> {
+    async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary> {
         self.vessels
             .iter()
             .filter(|v| v.org == scope.org && scope.is_assigned(v.id))
@@ -821,7 +822,7 @@ impl Repositories for InMemoryStore {
             .collect()
     }
 
-    fn get_vessel(
+    async fn get_vessel(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -829,7 +830,7 @@ impl Repositories for InMemoryStore {
         self.scoped_vessel(scope, vessel).map(summarise_vessel)
     }
 
-    fn list_compartments(
+    async fn list_compartments(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -850,7 +851,7 @@ impl Repositories for InMemoryStore {
             .collect())
     }
 
-    fn list_work_orders(
+    async fn list_work_orders(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -875,7 +876,7 @@ impl Repositories for InMemoryStore {
             .collect())
     }
 
-    fn stranded_hours(
+    async fn stranded_hours(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -913,7 +914,7 @@ impl Repositories for InMemoryStore {
         Ok(StrandedReport { total, items })
     }
 
-    fn list_packages(
+    async fn list_packages(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -939,7 +940,7 @@ impl Repositories for InMemoryStore {
             .collect())
     }
 
-    fn get_package(
+    async fn get_package(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -954,7 +955,7 @@ impl Repositories for InMemoryStore {
         Ok(self.build_package(row))
     }
 
-    fn list_decks(
+    async fn list_decks(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -980,7 +981,7 @@ impl Repositories for InMemoryStore {
             .collect())
     }
 
-    fn adjacency_graph(
+    async fn adjacency_graph(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -1002,7 +1003,7 @@ impl Repositories for InMemoryStore {
         ))
     }
 
-    fn live_hazards(
+    async fn live_hazards(
         &self,
         scope: &TenantScope,
         vessel: VesselId,
@@ -1021,7 +1022,11 @@ impl Repositories for InMemoryStore {
             .collect())
     }
 
-    fn rules_in_force(&self, scope: &TenantScope, vessel: VesselId) -> Result<RuleSet, StoreError> {
+    async fn rules_in_force(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<RuleSet, StoreError> {
         self.scoped_vessel(scope, vessel)?;
         // The development seed. In production this is a query over `rule_binding`
         // joined to `rule_version`, filtered to the versions whose effective
@@ -1047,23 +1052,23 @@ fn deck_label(code: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn assignment_gate_hides_unassigned_hulls() {
+    #[tokio::test]
+    async fn assignment_gate_hides_unassigned_hulls() {
         let (store, w) = InMemoryStore::demo();
         let scope = w.yard_scope();
         // Three assigned carriers are visible.
-        assert_eq!(store.list_vessels(&scope).len(), 3);
+        assert_eq!(store.list_vessels(&scope).await.len(), 3);
         // The unassigned DDG is NotFound even though it is in-tenant.
         assert!(matches!(
-            store.get_vessel(&scope, w.ddg),
+            store.get_vessel(&scope, w.ddg).await,
             Err(StoreError::NotFound)
         ));
     }
 
-    #[test]
-    fn decks_are_ordered_downward() {
+    #[tokio::test]
+    async fn decks_are_ordered_downward() {
         let (store, w) = InMemoryStore::demo();
-        let decks = store.list_decks(&w.yard_scope(), w.cvn73).unwrap();
+        let decks = store.list_decks(&w.yard_scope(), w.cvn73).await.unwrap();
         let ordinals: Vec<i32> = decks.iter().map(|d| d.ordinal).collect();
         let mut sorted = ordinals.clone();
         sorted.sort_unstable();
@@ -1075,63 +1080,77 @@ mod tests {
         assert!(decks.iter().all(|d| d.compartment_count > 0));
     }
 
-    #[test]
-    fn engine_inputs_are_scoped_like_everything_else() {
+    #[tokio::test]
+    async fn engine_inputs_are_scoped_like_everything_else() {
         let (store, w) = InMemoryStore::demo();
         // The unassigned hull refuses the engine's inputs too — a cascade cannot
         // be used as a side channel to read another hull's topology.
         let scope = w.yard_scope();
         assert!(matches!(
-            store.adjacency_graph(&scope, w.ddg),
+            store.adjacency_graph(&scope, w.ddg).await,
             Err(StoreError::NotFound)
         ));
         assert!(matches!(
-            store.live_hazards(&scope, w.ddg),
+            store.live_hazards(&scope, w.ddg).await,
             Err(StoreError::NotFound)
         ));
         assert!(matches!(
-            store.rules_in_force(&scope, w.ddg),
+            store.rules_in_force(&scope, w.ddg).await,
             Err(StoreError::NotFound)
         ));
         assert!(matches!(
-            store.list_decks(&scope, w.ddg),
+            store.list_decks(&scope, w.ddg).await,
             Err(StoreError::NotFound)
         ));
     }
 
-    #[test]
-    fn the_seeded_hull_has_live_hazards_and_a_graph() {
+    #[tokio::test]
+    async fn the_seeded_hull_has_live_hazards_and_a_graph() {
         let (store, w) = InMemoryStore::demo();
         let scope = w.yard_scope();
-        let hazards = store.live_hazards(&scope, w.cvn73).unwrap();
+        let hazards = store.live_hazards(&scope, w.cvn73).await.unwrap();
         // A curing coat in the passage, and a live bus in the switchgear room.
         assert_eq!(hazards.len(), 2);
         let origins: Vec<&str> = hazards.iter().map(|h| h.origin.as_str()).collect();
         assert!(origins.contains(&"3-160-2-Q"));
         assert!(origins.contains(&"3-148-2-E"));
-        assert!(store.adjacency_graph(&scope, w.cvn73).unwrap().edge_count() > 0);
+        assert!(
+            store
+                .adjacency_graph(&scope, w.cvn73)
+                .await
+                .unwrap()
+                .edge_count()
+                > 0
+        );
         // A hull with no seeded topology returns an empty graph, not an error —
         // "nothing is coupled here" is a valid answer.
         assert_eq!(
-            store.adjacency_graph(&scope, w.cvn71).unwrap().edge_count(),
+            store
+                .adjacency_graph(&scope, w.cvn71)
+                .await
+                .unwrap()
+                .edge_count(),
             0
         );
     }
 
-    #[test]
-    fn tenant_gate_hides_other_tenants_hull() {
+    #[tokio::test]
+    async fn tenant_gate_hides_other_tenants_hull() {
         let (store, w) = InMemoryStore::demo();
         // Even assigned to every yard hull, the yard never sees the navy hull.
         assert!(matches!(
-            store.get_vessel(&w.yard_scope_all(), w.navy_hull),
+            store.get_vessel(&w.yard_scope_all(), w.navy_hull).await,
             Err(StoreError::NotFound)
         ));
     }
 
-    #[test]
-    fn stranded_hours_count_only_hours_held_downstream() {
+    #[tokio::test]
+    async fn stranded_hours_count_only_hours_held_downstream() {
         let (store, w) = InMemoryStore::demo();
-        let report = store.stranded_hours(&w.yard_scope(), w.cvn73).unwrap();
+        let report = store
+            .stranded_hours(&w.yard_scope(), w.cvn73)
+            .await
+            .unwrap();
 
         // Every reported item is holding real hours somewhere else — a
         // compartment with only its own work left is outstanding, not stranded.
@@ -1153,11 +1172,12 @@ mod tests {
             .all(|p| p[0].stranded_downstream >= p[1].stranded_downstream));
     }
 
-    #[test]
-    fn a_finished_branch_is_still_held_by_its_open_trunk() {
+    #[tokio::test]
+    async fn a_finished_branch_is_still_held_by_its_open_trunk() {
         let (store, w) = InMemoryStore::demo();
         let package = store
             .get_package(&w.yard_scope(), w.cvn73, "WI-2201")
+            .await
             .unwrap();
         let analysis = package.analyse();
         assert!(
@@ -1188,23 +1208,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn packages_are_scoped_and_unknown_codes_are_not_found() {
+    #[tokio::test]
+    async fn packages_are_scoped_and_unknown_codes_are_not_found() {
         let (store, w) = InMemoryStore::demo();
         let scope = w.yard_scope();
-        assert_eq!(store.list_packages(&scope, w.cvn73).unwrap().len(), 2);
+        assert_eq!(store.list_packages(&scope, w.cvn73).await.unwrap().len(), 2);
         // Out of scope hull: no packages, and no package detail.
         assert!(matches!(
-            store.list_packages(&scope, w.ddg),
+            store.list_packages(&scope, w.ddg).await,
             Err(StoreError::NotFound)
         ));
         assert!(matches!(
-            store.get_package(&scope, w.ddg, "WI-2201"),
+            store.get_package(&scope, w.ddg, "WI-2201").await,
             Err(StoreError::NotFound)
         ));
         // In-scope hull, unknown package.
         assert!(matches!(
-            store.get_package(&scope, w.cvn73, "WI-9999"),
+            store.get_package(&scope, w.cvn73, "WI-9999").await,
             Err(StoreError::NotFound)
         ));
     }

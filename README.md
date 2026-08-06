@@ -34,9 +34,12 @@ docs/adr/        Architecture decision records.
 1. **The engine is a library, not a service.** `wadl-engine` is pure and builds
    for `wasm32-unknown-unknown` (CI job + ADR 0001). The same decision code runs
    on the server and in the browser.
-2. **Rules are versioned data.** No threshold in code; every decision carries a
-   `rule_version_id` slot (ADR 0002). Milestone-1 outcomes are seeded and marked
-   as such.
+2. **Rules are versioned data.** `evaluate()` holds no threshold, reach or
+   outcome of its own — it is handed a `RuleSet` and applies it, and every trace
+   step records the `rule_version_id` that produced it (ADR 0002). The seed rule
+   set is transcribed from the prototype's cascade scenarios and anchored to the
+   standards in `handoff/01-rule-table.csv`; the store loads it today and will
+   load it from `rule_binding` unchanged.
 3. **Never grant offline / nothing is deleted.** The audit ledger is append-only
    (privilege-enforced) and hash-chained; `wadl verify-ledger` detects tampering.
 4. **Row-level security from the first migration.** Every tenant table; validated
@@ -98,10 +101,37 @@ seam:
 - R15/R20: which rules are waivable, and may any persona override a live BLOCK?
   (The build assumes hazard cascades are not waivable and no override exists.)
 
+## The worked example — a live cascade
+
+The demo hull carries one live hazard: coating ticket `CT-3160-4`, a final coat
+curing in `3-160-2-Q`. From that single fact, the engine decides the whole
+neighbourhood, and the reach and outcome of each path come from the rule set, not
+from code:
+
+| Space | State | Rule | Why |
+| --- | --- | --- | --- |
+| `3-160-2-Q` | **BLOCK** | R03 (same space) | It *is* the flammable-vapour space |
+| `2-160-2-Q` | **BLOCK** | R03 (deck penetration, 1 hop) | Directly above — heat path into vapour |
+| `4-160-2-Q` | **BLOCK** | R03 (deck penetration, 1 hop) | Directly below — vapour is heavier than air |
+| `3-156-2-Q` | **WARN** | R06 (shared bulkhead, 1 hop) | Permitted with the boundary posted |
+| `3-164-2-Q` | **SUSPEND** | R09 (exhaust trunk, 1 hop) | Resumes when the vent zone clears |
+| `4-164-2-Q` | **SUSPEND** | R09 (exhaust trunk, 2 hops) | The condition follows the air, not the deck plan |
+
+Every one of those is reproduced as an `insta` golden snapshot of the **full
+decision trace** in `crates/wadl-engine/tests/golden_cascade.rs`, asserting both
+what lights and what must not. Deck Explorer renders it, and clicking a
+compartment shows the rule, the path, the governing standard, who may clear it,
+and the rule version.
+
 ## Status
 
-Milestone 1 lays the foundation and the seams: workspace, lints, the engine
-traversal, the typestate, the validated RLS migrations, the store/API/ingest/CLI,
-and the cross-tenant leak test. The shell modules (Daily Ops, Deck Explorer,
-Sequence Board, …) build out on top of these seams; the rule engine, WADL field
-app/console, ITP, offline sync and schedule ingest are later milestones.
+Done: the workspace and lint gate; the engine (rules-as-data, property-tested
+traversal, golden traces, wasm build); the domain typestate; the eight RLS
+migrations validated against PostgreSQL; store/API/ingest/CLI; the generated
+cross-tenant leak test; Deck Explorer end to end.
+
+Next: the remaining shell modules (Daily Ops, Sequence Board, Work Orders,
+Conflicts & Risk, Distributed Packages) on the same seams, the PostgreSQL
+repositories behind `Repositories`, and the `wasm-bindgen` wrapper so the browser
+pre-checks with the same engine build. Then the WADL field app and console, ITP
+and dispositions, offline sync, and schedule ingest.

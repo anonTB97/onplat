@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A warning is a build failure — enforced from the first commit, because
+# retrofitting a lint across a codebase is how standards die.
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (pinned by rust-toolchain.toml)
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy (all targets, all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test --workspace
+
+  leak-tests:
+    name: cross-tenant leak tests are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # Fails if an endpoint was added to the route inventory without
+      # regenerating its leak test.
+      - name: leak-test codegen up to date
+        run: cargo run -p xtask -- gen-leak-tests --check
+      - name: run leak tests
+        run: cargo test -p wadl-api --test generated_leak_test
+
+  wasm:
+    name: wadl-engine builds for wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add wasm target
+        run: |
+          rustup show
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # The engine must stay free of tokio/sqlx/std::time. If a dependency
+      # creeps in that breaks the wasm build, this job fails — which is exactly
+      # what it exists to catch.
+      - name: build engine for wasm
+        run: cargo build -p wadl-engine --target wasm32-unknown-unknown
+
+  migrations:
+    name: migrations apply on PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: apply migrations via the CLI
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cargo run -p wadl-cli -- migrate
+
+  supply-chain:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

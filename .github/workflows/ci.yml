@@ -4,6 +4,10 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  # Manual trigger. Also the only way to start a run for commits pushed with an
+  # app/installation token: GitHub deliberately does not raise `push` events for
+  # those, to stop workflows recursing on their own commits.
+  workflow_dispatch:
 
 # A warning is a build failure — enforced from the first commit, because
 # retrofitting a lint across a codebase is how standards die.

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::VesselId;
-use wadl_engine::{evaluate, AdjacencyGraph, EvaluationRequest};
+use wadl_engine::{evaluate, Decision, EvaluationRequest};
 
 use crate::auth::Caller;
 use crate::error::ApiError;
@@ -67,29 +67,88 @@ pub(crate) async fn stranded_hours(
     Ok(Json(json!(report)))
 }
 
-/// Reads a compartment's authorization state **through the engine** — the seam
-/// that milestone 3 replaces with the real rule evaluation. The adjacency graph
-/// and hazard set are empty in milestone 1 (couplings are not yet seeded in the
-/// store), so this returns ALLOW today; the point is that the shell never
-/// computes authorization itself.
+/// The hull's decks, ordered downward.
+pub(crate) async fn list_decks(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let decks = state.store.list_decks(&scope, VesselId::from_uuid(id))?;
+    Ok(Json(json!(decks)))
+}
+
+/// Reads one compartment's authorization state **through the engine**.
+///
+/// The handler's whole job is to assemble the engine's inputs — the hull's
+/// resolved adjacency graph, the live hazards, the rules in force, and the
+/// evaluation instant from the injected clock — and to persist/return what comes
+/// back. It computes no authorization itself, which is the seam that lets the
+/// same engine build run in the browser and on a phone.
 pub(crate) async fn compartment_state(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    state.store.get_vessel(&scope, VesselId::from_uuid(id))?;
-    let subject = CompartmentNo::new(compartment.clone());
-    let graph = AdjacencyGraph::default();
-    let request = EvaluationRequest {
+    let vessel = VesselId::from_uuid(id);
+    let decision = decide(&state, &scope, vessel, &compartment)?;
+    Ok(Json(
+        json!({ "compartment": compartment, "decision": decision }),
+    ))
+}
+
+/// Every compartment on the hull with its current authorization state — the
+/// query Deck Explorer draws a deck sheet from.
+pub(crate) async fn deck_states(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let compartments = state.store.list_compartments(&scope, vessel)?;
+    let graph = state.store.adjacency_graph(&scope, vessel)?;
+    let hazards = state.store.live_hazards(&scope, vessel)?;
+    let rules = state.store.rules_in_force(&scope, vessel)?;
+    let at = state.clock.now();
+
+    let rows: Vec<Value> = compartments
+        .into_iter()
+        .map(|compartment| {
+            let decision = evaluate(&EvaluationRequest {
+                subject: &compartment.compartment_no,
+                graph: &graph,
+                rules: &rules,
+                hazards: &hazards,
+                at,
+            });
+            json!({
+                "compartment": compartment,
+                "state": decision.state,
+                "permits_work": decision.permits_work(),
+                "rules_fired": decision.trace.iter().map(|s| &s.rule_code).collect::<Vec<_>>(),
+                "earliest_clear": decision.earliest_clear,
+            })
+        })
+        .collect();
+    Ok(Json(json!(rows)))
+}
+
+/// Shared evaluation path: assembles the engine's inputs for one compartment.
+fn decide(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    compartment: &str,
+) -> Result<Decision, ApiError> {
+    // Scope is enforced by each store call; the first failure short-circuits.
+    let graph = state.store.adjacency_graph(scope, vessel)?;
+    let hazards = state.store.live_hazards(scope, vessel)?;
+    let rules = state.store.rules_in_force(scope, vessel)?;
+    let subject = CompartmentNo::new(compartment);
+    Ok(evaluate(&EvaluationRequest {
         subject: &subject,
         graph: &graph,
-        hazards: &[],
+        rules: &rules,
+        hazards: &hazards,
         at: state.clock.now(),
-    };
-    let decision = evaluate(&request);
-    Ok(Json(json!({
-        "compartment": compartment,
-        "state": decision.state,
-        "trace_len": decision.trace.len(),
-    })))
+    }))
 }

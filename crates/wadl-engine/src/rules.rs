@@ -209,8 +209,23 @@ impl RuleSet {
                 hold: Some(Minutes::new(30)), // post-work fire watch hold
                 waivable: false,
             },
-            // R07 — intrusive work inside an electrical envelope whose bus is
-            // not in a verified zero-energy state. BLOCK.
+            // R07/same-space — the rule's own wording is "any intrusive work
+            // INSIDE an electrical envelope whose bus is not in a verified
+            // zero-energy state". The envelope's own compartment is the primary
+            // case, so it needs a same-space entry; the coupled entry below
+            // extends it along bus topology.
+            RuleEntry {
+                rule_code: "R07".to_owned(),
+                rule_version: version(0x0700),
+                hazard: HazardKind::EnergisedBus,
+                applies: Applies::SameSpace,
+                state: DecisionState::Block,
+                authority: "NSTM Ch. 300; NAVSEA S9086-KC-STM-010".to_owned(),
+                clearing_authority: "isolation_authority".to_owned(),
+                hold: None, // cleared by verified isolation, not by elapsed time
+                waivable: false,
+            },
+            // R07 — the same hazard reaching a coupled bus segment.
             //
             // OPEN QUESTION (rule table R07): does a coupled bus two
             // switchboards away require isolation, or notification only? Left at

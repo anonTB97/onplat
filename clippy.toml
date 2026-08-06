@@ -1,0 +1,10 @@
+# The Clock trait in wadl-domain is the ONLY sanctioned source of wall-clock
+# time. Reading the clock directly makes a decision non-deterministic and
+# unreproducible for a board of inquiry, so these calls are banned everywhere
+# except inside SystemClock (which carries a reasoned #[allow]).
+disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "inject a wadl_domain::Clock; only SystemClock may read wall time" },
+  { path = "chrono::Utc::now", reason = "inject a wadl_domain::Clock; only SystemClock may read wall time" },
+  { path = "chrono::Local::now", reason = "inject a wadl_domain::Clock; only SystemClock may read wall time" },
+  { path = "std::time::Instant::now", reason = "inject a wadl_domain::Clock; only SystemClock may read wall time" },
+]

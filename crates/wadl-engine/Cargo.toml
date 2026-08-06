@@ -1,0 +1,22 @@
+[package]
+name = "wadl-engine"
+description = "THE core decision engine. Pure: no I/O, no async, no time source. Native + wasm32 + UniFFI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# This crate must compile with --no-default-features on wasm32-unknown-unknown.
+# It may depend ONLY on pure crates. tokio, sqlx, std::time, filesystem and
+# network dependencies are forbidden here; the CI wasm job exists to enforce it.
+[dependencies]
+wadl-domain.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

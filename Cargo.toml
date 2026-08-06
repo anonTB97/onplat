@@ -1,0 +1,95 @@
+# =============================================================================
+# Shipyard AI Onboard + WADL — Cargo workspace
+#
+# The crate boundaries below follow the ARCHITECTURE's service boundaries, not
+# domain nouns. `wadl-engine` is the load-bearing invariant: it is pure, has no
+# I/O, no async, no time source, and must compile on wasm32-unknown-unknown so
+# the browser runs the same decision code as the server.
+# =============================================================================
+
+[workspace]
+resolver = "2"
+members = [
+  "crates/wadl-domain",
+  "crates/wadl-engine",
+  "crates/wadl-store",
+  "crates/wadl-api",
+  "crates/wadl-ingest",
+  "crates/wadl-cli",
+  "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "UNLICENSED"
+publish = false
+
+# -----------------------------------------------------------------------------
+# Shared dependency versions. A crate opts in by writing `dep.workspace = true`,
+# so every crate uses one version and the air-gapped vendor set stays small.
+# -----------------------------------------------------------------------------
+[workspace.dependencies]
+# Pure / shared
+# Base uuid: parse/format/serde only. The v7 generator pulls an RNG that needs
+# a wasm entropy source, so it is added *only* in the crates that mint IDs
+# (store/api/ingest/cli) — never in the pure engine, which just wraps UUIDs.
+uuid = { version = "1", default-features = false, features = ["serde", "std"] }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+thiserror = "1"
+
+# Internal crates
+wadl-domain = { path = "crates/wadl-domain" }
+wadl-engine = { path = "crates/wadl-engine" }
+wadl-store = { path = "crates/wadl-store" }
+wadl-ingest = { path = "crates/wadl-ingest" }
+wadl-api = { path = "crates/wadl-api" }
+
+# Backend (never pulled into wadl-engine or wadl-domain)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "tower-log"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "timeout", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros", "migrate"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+sha2 = "0.10"
+csv = "1"
+
+# Test / bench
+proptest = "1"
+insta = { version = "1", features = ["json"] }
+criterion = { version = "0.5", default-features = false }
+
+# =============================================================================
+# Lints — enforced in CI from the first commit. A warning is a build failure.
+# No #[allow] without a comment naming the reason.
+# =============================================================================
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"        # scoped off in tests via #![cfg_attr(test, allow(...))]
+panic = "deny"
+todo = "deny"
+indexing_slicing = "deny"   # a panic in the engine is a stopped shipyard
+float_arithmetic = "warn"   # money and man-hours are not floats
+disallowed_methods = "deny" # see clippy.toml: Utc::now, SystemTime::now
+
+[profile.release]
+# Reproducible, auditable release builds.
+debug = 1
+lto = "thin"
+codegen-units = 1

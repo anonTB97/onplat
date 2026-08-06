@@ -1,0 +1,4 @@
+# The machine-generated leak test carries its own `#![rustfmt::skip]`, so it
+# stays byte-identical to `cargo run -p xtask -- gen-leak-tests` output and the
+# CI `--check` comparison is meaningful.
+max_width = 100

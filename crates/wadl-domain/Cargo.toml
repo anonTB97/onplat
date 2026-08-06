@@ -1,0 +1,15 @@
+[package]
+name = "wadl-domain"
+description = "Newtypes, IDs, value objects, and the permit lifecycle typestate. No I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+uuid.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

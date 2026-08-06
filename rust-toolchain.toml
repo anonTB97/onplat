@@ -1,0 +1,7 @@
+# MSRV is pinned so an air-gapped, reproducible build uses one known compiler.
+# Raising it is a deliberate, reviewed change, not a drift.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy", "rust-src"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

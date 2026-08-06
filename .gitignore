@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Frontend
+shell-web/node_modules
+shell-web/dist
+shell-web/.vite
+# tsc -b build artifacts
+*.tsbuildinfo
+shell-web/vite.config.js
+shell-web/vite.config.d.ts
+
+# Local env / secrets — never committed. The platform makes no outbound calls.
+.env
+*.local
+
+# Generated, not source
+/sbom.json
+/support-bundle-*.json

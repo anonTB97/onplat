@@ -1,0 +1,100 @@
+//! The adjacency model — the semantics of "coupled", not the geometry.
+//!
+//! What counts as coupled is a safety judgement (a shared bulkhead, a deck
+//! penetration, a shared ventilation branch), so coupling *types* are data. The
+//! engine consumes a flat, directed [`AdjacencyGraph`]: symmetric couplings are
+//! present as two directed edges, and each edge already carries the properties
+//! the traversal needs (direction, hop reach) denormalised from the coupling
+//! type, so the traversal never has to remember which way a row was stored.
+
+use wadl_domain::compartment::CompartmentNo;
+use wadl_domain::ids::CouplingTypeId;
+use wadl_domain::units::HopDepth;
+
+/// What a coupling can carry between spaces. A single coupling may propagate
+/// several of these at once (a deck penetration carries heat *and* is an egress
+/// path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Propagation {
+    /// Radiant or conducted heat.
+    Heat,
+    /// Flammable or toxic vapour.
+    Vapour,
+    /// Electrical energy.
+    Energy,
+    /// Structural load path.
+    Load,
+    /// Egress / access path.
+    Egress,
+}
+
+/// Whether a coupling carries in one direction or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// The hazard flows only from `from` to `to` (e.g. a deck penetration
+    /// carries heat downward; ventilation flows source→sink).
+    Directional,
+    /// The hazard flows both ways (a shared bulkhead has no preferred sense);
+    /// such a coupling is represented as two [`Directional`](Self::Directional)
+    /// edges so the traversal only ever walks `from → to`.
+    Symmetric,
+}
+
+/// One directed coupling edge, ready for traversal.
+///
+/// Direction is baked in as `from → to`: a symmetric coupling contributes two
+/// edges. `max_reach` is the hop budget this coupling type allows, copied from
+/// the coupling type so the traversal input is self-describing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CouplingEdge {
+    /// Source compartment (where the hazard is).
+    pub from: CompartmentNo,
+    /// Destination compartment (the coupled space).
+    pub to: CompartmentNo,
+    /// The coupling type this edge came from — part of the traversal's visited
+    /// key, so a space may be reached again via a *different* coupling type.
+    pub coupling_type: CouplingTypeId,
+    /// What this coupling carries.
+    pub propagates: Vec<Propagation>,
+    /// Hop budget for this coupling type.
+    pub max_reach: HopDepth,
+}
+
+impl CouplingEdge {
+    /// Whether this edge carries the given propagation kind.
+    #[must_use]
+    pub fn carries(&self, propagation: Propagation) -> bool {
+        self.propagates.contains(&propagation)
+    }
+}
+
+/// A directed adjacency graph for one hull, resolved from the class template
+/// plus per-hull overrides. The engine treats this as immutable input.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdjacencyGraph {
+    edges: Vec<CouplingEdge>,
+}
+
+impl AdjacencyGraph {
+    /// Builds a graph from directed edges.
+    #[must_use]
+    pub fn new(edges: Vec<CouplingEdge>) -> Self {
+        Self { edges }
+    }
+
+    /// All edges leaving `from`.
+    pub fn out_edges<'a>(
+        &'a self,
+        from: &'a CompartmentNo,
+    ) -> impl Iterator<Item = &'a CouplingEdge> + 'a {
+        self.edges.iter().filter(move |e| &e.from == from)
+    }
+
+    /// Total edge count.
+    #[must_use]
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+}

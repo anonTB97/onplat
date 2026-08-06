@@ -1,0 +1,45 @@
+# cargo-deny — supply-chain gate. Run: `cargo deny check`.
+# This platform ships to air-gapped, accredited environments, so the dependency
+# set is a security artifact, not an afterthought.
+
+[advisories]
+version = 2
+# Fail on any known vulnerability. yanked crates are refused.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses only. A copyleft dependency is a licensing finding in a
+# delivered binary, so it must be a deliberate, reviewed addition — not a
+# transitive surprise.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Multiple versions of the same crate bloat the vendored set and the audit
+# surface; warn so duplicates are visible and can be unified.
+multiple-versions = "warn"
+wildcard-dependencies = "deny"
+# Nothing in the engine or its dependencies may reach for the network or a
+# clock behind our back. Add specific bans here as the tree is audited.
+deny = []
+
+[sources]
+# Only crates.io. No git dependencies, no unknown registries — an air-gapped
+# build mirrors one known source.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

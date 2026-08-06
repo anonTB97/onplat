@@ -9,6 +9,7 @@ use uuid::Uuid;
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::VesselId;
 use wadl_engine::{evaluate, Decision, EvaluationRequest};
+use wadl_plan::governing_constraint;
 
 use crate::auth::Caller;
 use crate::error::ApiError;
@@ -130,6 +131,94 @@ pub(crate) async fn deck_states(
         })
         .collect();
     Ok(Json(json!(rows)))
+}
+
+/// The distributed packages on a hull.
+pub(crate) async fn list_packages(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let packages = state.store.list_packages(&scope, VesselId::from_uuid(id))?;
+    Ok(Json(json!(packages)))
+}
+
+/// One package: its segment topology, the authorization state of every
+/// compartment in its footprint, and the single constraint pacing it.
+///
+/// This is where the module's two central facts are made visible:
+/// authorization state is a **distribution over the footprint**, not a value; and
+/// a segment cannot be tested until it *and everything upstream* is complete, so
+/// one held compartment strands man-hours it does not contain.
+pub(crate) async fn get_package(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path((id, code)): Path<(Uuid, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let package = state.store.get_package(&scope, vessel, &code)?;
+    let analysis = package.analyse();
+
+    // The engine's inputs, loaded once for the whole footprint.
+    let graph = state.store.adjacency_graph(&scope, vessel)?;
+    let hazards = state.store.live_hazards(&scope, vessel)?;
+    let rules = state.store.rules_in_force(&scope, vessel)?;
+    let at = state.clock.now();
+    let decide_space = |compartment: &CompartmentNo| {
+        evaluate(&EvaluationRequest {
+            subject: compartment,
+            graph: &graph,
+            rules: &rules,
+            hazards: &hazards,
+            at,
+        })
+    };
+
+    // Authorization as a distribution over the footprint.
+    let footprint: Vec<Value> = package
+        .spaces
+        .iter()
+        .map(|(compartment, work)| {
+            let decision = decide_space(compartment);
+            json!({
+                "compartment_no": compartment,
+                "budget_hours": work.budget,
+                "earned_hours": work.earned,
+                "remaining_hours": work.remaining(),
+                "complete": work.is_complete(),
+                "state": decision.state,
+                "permits_work": decision.permits_work(),
+                "rules_fired": decision.trace.iter().map(|s| &s.rule_code).collect::<Vec<_>>(),
+                "earliest_clear": decision.earliest_clear,
+            })
+        })
+        .collect();
+
+    // The governing constraint needs both halves: the topology (what is held) and
+    // the engine (whether anything refuses the work).
+    let governing = governing_constraint(&analysis, &|c| Some(decide_space(c)));
+
+    Ok(Json(json!({
+        "package": {
+            "work_order_id": analysis.work_order_id,
+            "code": analysis.code,
+            "name": analysis.name,
+            "test_verb": analysis.test_verb,
+            "budget_hours": analysis.budget,
+            "earned_hours": analysis.earned,
+            "compartment_count": analysis.compartment_count,
+            "open_compartment_count": analysis.open_compartment_count,
+            "segment_count": analysis.segment_count,
+            "testable_segment_count": analysis.testable_segment_count,
+            "total_stranded_hours": analysis.total_stranded(),
+        },
+        "segments": analysis.segments,
+        "footprint": footprint,
+        "stranding": analysis.stranding,
+        "governing": governing,
+        // Empty for well-formed data; a named fault beats a silent wrong answer.
+        "faults": analysis.faults,
+    })))
 }
 
 /// Shared evaluation path: assembles the engine's inputs for one compartment.

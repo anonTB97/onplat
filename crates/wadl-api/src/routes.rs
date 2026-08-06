@@ -69,6 +69,16 @@ pub fn inventory() -> Vec<RouteSpec> {
             path: "/api/vessels/:id/deck-states",
             tenant_scoped: true,
         },
+        RouteSpec {
+            method: "GET",
+            path: "/api/vessels/:id/packages",
+            tenant_scoped: true,
+        },
+        RouteSpec {
+            method: "GET",
+            path: "/api/vessels/:id/packages/:no",
+            tenant_scoped: true,
+        },
     ]
 }
 

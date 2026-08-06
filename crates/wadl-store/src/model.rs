@@ -8,6 +8,20 @@ use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::{VesselId, WorkOrderId};
 use wadl_domain::units::ManHours;
 
+/// A deck level, ordered. `ordinal` ascends *downward*, which is what makes
+/// "the space directly above" a comparison rather than a guess at a label.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeckSummary {
+    /// Deck code as printed, e.g. `03`, `Main`, `4th`.
+    pub code: String,
+    /// Human label, e.g. `Fourth Deck`.
+    pub label: String,
+    /// Ordering key, ascending downward.
+    pub ordinal: i32,
+    /// How many compartments in the register sit on this deck.
+    pub compartment_count: usize,
+}
+
 /// A hull as it appears in the portfolio and breadcrumb.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VesselSummary {

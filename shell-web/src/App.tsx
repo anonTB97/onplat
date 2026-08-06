@@ -2,18 +2,25 @@ import { useEffect, useMemo, useState } from "react";
 import { listVessels, type VesselSummary } from "./api";
 import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
+import DistributedPackages from "./DistributedPackages";
+import WorkOrders from "./WorkOrders";
 
 // Module rail — mirrors the prototype's grouping. Modules without a view yet say
 // so rather than rendering an empty shell.
-type ModuleId = "portfolio" | "deckExplorer" | "placeholder";
+type ModuleId =
+  | "portfolio"
+  | "deckExplorer"
+  | "workOrders"
+  | "distPackages"
+  | "placeholder";
 const MODULES: Array<{ group: string; label: string; id: ModuleId }> = [
   { group: "Operate", label: "Daily Ops", id: "placeholder" },
   { group: "", label: "Deck Explorer", id: "deckExplorer" },
   { group: "Plan", label: "Sequence Board", id: "placeholder" },
-  { group: "", label: "Work Orders", id: "placeholder" },
+  { group: "", label: "Work Orders", id: "workOrders" },
   { group: "Decide", label: "Conflicts & Risk", id: "placeholder" },
   { group: "Yard", label: "Portfolio", id: "portfolio" },
-  { group: "Authorization", label: "Distributed Packages", id: "placeholder" },
+  { group: "Authorization", label: "Distributed Packages", id: "distPackages" },
   { group: "", label: "Deconfliction Cascade", id: "placeholder" },
 ];
 
@@ -123,6 +130,14 @@ export default function App() {
 
           {activeModule === "deckExplorer" && !error && (
             <DeckExplorer identity={DEMO_IDENTITY} vesselId={selected} hullLabel={hullLabel} />
+          )}
+
+          {activeModule === "workOrders" && !error && (
+            <WorkOrders identity={DEMO_IDENTITY} vesselId={selected} hullLabel={hullLabel} />
+          )}
+
+          {activeModule === "distPackages" && !error && (
+            <DistributedPackages identity={DEMO_IDENTITY} vesselId={selected} hullLabel={hullLabel} />
           )}
 
           {activeModule === "portfolio" && !error && (

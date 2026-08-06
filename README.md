@@ -18,6 +18,7 @@ where a written spec disagrees).
 ```
 crates/
   wadl-engine/   THE core. Pure — no I/O, no async, no time source. Native + wasm32.
+  wadl-plan/     Planning derivations: package topology, testability, stranded MH. Pure.
   wadl-domain/   Newtypes, units, the Clock trait, the permit lifecycle typestate.
   wadl-store/    Repositories + read models; the tenant scope; the PostgreSQL seam.
   wadl-api/      axum router, the caller/scope extractor, problem+json errors.
@@ -52,7 +53,7 @@ docs/adr/        Architecture decision records.
 ```
 cargo test --workspace                                   # unit + property + leak tests
 cargo clippy --workspace --all-targets -- -D warnings    # a warning is a build failure
-cargo build -p wadl-engine --target wasm32-unknown-unknown
+cargo build -p wadl-engine --target wasm32-unknown-unknown  # and -p wadl-plan
 cargo run -p xtask -- gen-leak-tests --check             # leak tests match the route inventory
 cargo run -p wadl-cli -- migrate                         # applies migrations (needs DATABASE_URL)
 cargo run -p wadl-api --bin serve                        # demo API on 127.0.0.1:8080
@@ -77,12 +78,13 @@ decisions are sound. Two things to raise, neither a blocker:
   question. The domain type `ManHours` is already an integer. Flagged, not
   changed, pending your call.
 
-**3. Crate graph.** `wadl-engine → wadl-domain` only; `wadl-store →
-{domain, engine}`; `wadl-api → {domain, engine, store}`; `wadl-cli →
-{domain, engine, ingest, store}`; `xtask → wadl-api`. Yes — `wadl-engine` stays
-free of `tokio` and `sqlx`; the wasm CI job enforces it, and the `uuid` v7
-generator (which needs an RNG) is kept off the engine's dependency and added
-only in the crates that mint ids.
+**3. Crate graph.** `wadl-engine → wadl-domain` only; `wadl-plan →
+{domain, engine}`; `wadl-store → {domain, engine, plan}`; `wadl-api →
+{domain, engine, plan, store}`; `wadl-cli → {domain, engine, ingest, store}`;
+`xtask → wadl-api`. Yes — `wadl-engine` stays free of `tokio` and `sqlx`; the
+wasm CI job enforces it (for `wadl-plan` too), and the `uuid` v7 generator
+(which needs an RNG) is kept off both pure crates and added only in the crates
+that mint ids.
 
 **4. Permit lifecycle.** A compile-time typestate: `Permit<Draft>`,
 `Permit<Approved>`, `Permit<Active>`, … are distinct types and a transition
@@ -123,15 +125,36 @@ what lights and what must not. Deck Explorer renders it, and clicking a
 compartment shows the rule, the path, the governing standard, who may clear it,
 and the rule version.
 
+## Stranded man-hours — the most persuasive number in the product
+
+A distributed package is one work order spread over many compartments whose
+segments form a network. **A segment cannot be tested until it *and everything
+upstream of it* is complete**, so one held compartment strands man-hours it does
+not contain. `wadl-plan` computes that, and the demo shows it:
+
+`WI-2201` (AC Plant No. 2 supply & return) has 11 compartments and 6 segments.
+The trunk `T1` is open at `3-160-2-Q` — the same passage where the coating cure
+lands. That single compartment, with 80 MH of its own work left, holds **1,489 MH
+across five downstream segments** (`B1, B2, B3, R1, T2`) that cannot be
+leak-tested until it clears. Nothing in the package is testable.
+
+The surface distinguishes two kinds of pacing item, and refuses to conflate them:
+
+- an **authorization constraint** — a rule refuses the work; a named person must
+  clear it, and adding crew does nothing;
+- a **completion constraint** — nothing refuses it, there is simply work left;
+  no earliest-clear, because there is nothing to clear, and crew does help.
+
 ## Status
 
 Done: the workspace and lint gate; the engine (rules-as-data, property-tested
-traversal, golden traces, wasm build); the domain typestate; the eight RLS
-migrations validated against PostgreSQL; store/API/ingest/CLI; the generated
-cross-tenant leak test; Deck Explorer end to end.
+traversal, golden traces, wasm build); the planning math (`wadl-plan`, with
+cycle-safe topology and property-tested stranding); the domain typestate; the
+eight RLS migrations validated against PostgreSQL; store/API/ingest/CLI; the
+generated cross-tenant leak test; and Deck Explorer, Work Orders and Distributed
+Packages end to end.
 
-Next: the remaining shell modules (Daily Ops, Sequence Board, Work Orders,
-Conflicts & Risk, Distributed Packages) on the same seams, the PostgreSQL
-repositories behind `Repositories`, and the `wasm-bindgen` wrapper so the browser
-pre-checks with the same engine build. Then the WADL field app and console, ITP
-and dispositions, offline sync, and schedule ingest.
+Next: Daily Ops, Sequence Board and Conflicts & Risk on the same seams; the
+PostgreSQL repositories behind `Repositories`; and the `wasm-bindgen` wrapper so
+the browser pre-checks with the same engine build. Then the WADL field app and
+console, ITP and dispositions, offline sync, and schedule ingest.

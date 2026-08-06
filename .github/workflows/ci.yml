@@ -44,7 +44,7 @@ jobs:
         run: cargo test -p wadl-api --test generated_leak_test
 
   wasm:
-    name: wadl-engine builds for wasm32
+    name: pure crates build for wasm32
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,11 +53,13 @@ jobs:
           rustup show
           rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # The engine must stay free of tokio/sqlx/std::time. If a dependency
-      # creeps in that breaks the wasm build, this job fails — which is exactly
-      # what it exists to catch.
+      # The engine and the planning math must stay free of tokio/sqlx/std::time.
+      # If a dependency creeps in that breaks the wasm build, this job fails —
+      # which is exactly what it exists to catch.
       - name: build engine for wasm
         run: cargo build -p wadl-engine --target wasm32-unknown-unknown
+      - name: build planning math for wasm
+        run: cargo build -p wadl-plan --target wasm32-unknown-unknown
 
   migrations:
     name: migrations apply on PostgreSQL

@@ -6,27 +6,13 @@ import {
   type Deck,
   type DeckStateRow,
   type Decision,
-  type DecisionState,
   type Identity,
 } from "./api";
+import { C, fmtClear, STATE_STYLE } from "./theme";
 
-// One palette for authorization state, used by the plan view, the legend and
-// the trace, so a colour means exactly one thing across the surface.
-const STATE_STYLE: Record<DecisionState, { fg: string; bg: string; border: string }> = {
-  ALLOW: { fg: "#22c55e", bg: "rgba(34,197,94,0.10)", border: "rgba(34,197,94,0.45)" },
-  WARN: { fg: "#f59e0b", bg: "rgba(245,158,11,0.12)", border: "rgba(245,158,11,0.50)" },
-  SUSPEND: { fg: "#c4b5fd", bg: "rgba(167,139,250,0.14)", border: "rgba(167,139,250,0.55)" },
-  BLOCK: { fg: "#f87171", bg: "rgba(220,38,38,0.14)", border: "rgba(220,38,38,0.55)" },
-};
-
-const DIM = "#94a3b8";
-const LINE = "#2b2d36";
-const TEXT = "#f2f3f6";
-
-function fmtClear(ms: number | null): string {
-  if (ms === null) return "on verification, not on a clock";
-  return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + "Z";
-}
+const DIM = C.dim;
+const LINE = C.line;
+const TEXT = C.text;
 
 export default function DeckExplorer({
   identity,

@@ -76,6 +76,116 @@ export interface DeckStateRow {
   earliest_clear: number | null;
 }
 
+export interface WorkOrder {
+  work_order_id: string;
+  code: string;
+  title: string;
+  trade: string;
+  system: string;
+  compartment_no: string;
+  budget_hours: number;
+  earned_hours: number;
+  source_ref: string;
+  source_verified: boolean;
+}
+
+export interface PackageSummary {
+  work_order_id: string;
+  code: string;
+  name: string;
+  system: string;
+  segment_count: number;
+  compartment_count: number;
+  budget_hours: number;
+  earned_hours: number;
+}
+
+export interface SegmentStatus {
+  code: string;
+  kind: string;
+  name: string;
+  budget: number;
+  earned: number;
+  complete: boolean;
+  open_compartments: string[];
+  testable: boolean;
+  held_by: string[];
+}
+
+export interface FootprintSpace {
+  compartment_no: string;
+  budget_hours: number;
+  earned_hours: number;
+  remaining_hours: number;
+  complete: boolean;
+  state: DecisionState;
+  permits_work: boolean;
+  rules_fired: string[];
+  earliest_clear: number | null;
+}
+
+export type Constraint =
+  | {
+      kind: "authorization";
+      state: DecisionState;
+      rules: string[];
+      clearing_authority: string;
+      earliest_clear: number | null;
+    }
+  | { kind: "completion" };
+
+export interface Governing {
+  compartment: string;
+  constraint: Constraint;
+  own_remaining: number;
+  stranded_downstream: number;
+  downstream_segments: string[];
+  consequence: string;
+}
+
+export interface PackageDetail {
+  package: {
+    code: string;
+    name: string;
+    test_verb: string;
+    budget_hours: number;
+    earned_hours: number;
+    compartment_count: number;
+    open_compartment_count: number;
+    segment_count: number;
+    testable_segment_count: number;
+    total_stranded_hours: number;
+  };
+  segments: SegmentStatus[];
+  footprint: FootprintSpace[];
+  governing: Governing | null;
+  faults: unknown[];
+}
+
+export async function listWorkOrders(id: Identity, vesselId: string): Promise<WorkOrder[]> {
+  const res = await fetch(`/api/vessels/${vesselId}/work-orders`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`work-orders → ${res.status}`);
+  return (await res.json()) as WorkOrder[];
+}
+
+export async function listPackages(id: Identity, vesselId: string): Promise<PackageSummary[]> {
+  const res = await fetch(`/api/vessels/${vesselId}/packages`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`packages → ${res.status}`);
+  return (await res.json()) as PackageSummary[];
+}
+
+export async function getPackage(
+  id: Identity,
+  vesselId: string,
+  code: string,
+): Promise<PackageDetail> {
+  const res = await fetch(`/api/vessels/${vesselId}/packages/${encodeURIComponent(code)}`, {
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`package ${code} → ${res.status}`);
+  return (await res.json()) as PackageDetail;
+}
+
 export async function listDecks(id: Identity, vesselId: string): Promise<Deck[]> {
   const res = await fetch(`/api/vessels/${vesselId}/decks`, { headers: headers(id) });
   if (!res.ok) throw new Error(`decks → ${res.status}`);

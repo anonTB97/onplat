@@ -67,8 +67,24 @@ impl Sum for ManHours {
 }
 
 impl fmt::Display for ManHours {
+    /// Thousands-grouped, e.g. `1,489 MH`. Man-hour totals in this domain run to
+    /// four and five figures and are read aloud in production meetings, so the
+    /// grouping is part of the unit's presentation, not a caller's concern —
+    /// otherwise the same figure appears grouped in one place and not another.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} MH", self.0)
+        let magnitude = self.0.unsigned_abs();
+        let digits = magnitude.to_string();
+        let mut grouped = String::with_capacity(digits.len() + digits.len() / 3 + 4);
+        if self.0 < 0 {
+            grouped.push('-');
+        }
+        for (offset, digit) in digits.chars().enumerate() {
+            if offset > 0 && (digits.len() - offset).is_multiple_of(3) {
+                grouped.push(',');
+            }
+            grouped.push(digit);
+        }
+        write!(f, "{grouped} MH")
     }
 }
 
@@ -200,6 +216,17 @@ mod tests {
             ManHours::new(i64::MAX) + ManHours::new(1),
             ManHours::new(i64::MAX)
         );
+    }
+
+    #[test]
+    fn man_hours_display_groups_thousands() {
+        assert_eq!(ManHours::new(0).to_string(), "0 MH");
+        assert_eq!(ManHours::new(80).to_string(), "80 MH");
+        assert_eq!(ManHours::new(960).to_string(), "960 MH");
+        assert_eq!(ManHours::new(1_489).to_string(), "1,489 MH");
+        assert_eq!(ManHours::new(12_345).to_string(), "12,345 MH");
+        assert_eq!(ManHours::new(1_234_567).to_string(), "1,234,567 MH");
+        assert_eq!(ManHours::new(-1_489).to_string(), "-1,489 MH");
     }
 
     #[test]

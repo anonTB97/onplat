@@ -1,0 +1,23 @@
+[package]
+name = "wadl-plan"
+description = "Planning derivations: package topology, testability, stranded man-hours. Pure, no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Pure like wadl-engine: no I/O, no async, no clock. The stranded-hours number is
+# the most persuasive figure in the product, so it is computed somewhere it can be
+# property-tested in isolation.
+[dependencies]
+wadl-domain.workspace = true
+wadl-engine.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

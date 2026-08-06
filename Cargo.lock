@@ -2158,6 +2158,7 @@ dependencies = [
  "uuid",
  "wadl-domain",
  "wadl-engine",
+ "wadl-plan",
  "wadl-store",
 ]
 
@@ -2206,6 +2207,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wadl-plan"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "uuid",
+ "wadl-domain",
+ "wadl-engine",
+]
+
+[[package]]
 name = "wadl-store"
 version = "0.1.0"
 dependencies = [
@@ -2219,6 +2231,7 @@ dependencies = [
  "uuid",
  "wadl-domain",
  "wadl-engine",
+ "wadl-plan",
 ]
 
 [[package]]

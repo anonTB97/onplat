@@ -66,7 +66,7 @@ jobs:
         run: cargo build -p wadl-plan --target wasm32-unknown-unknown
 
   migrations:
-    name: migrations apply on PostgreSQL
+    name: migrations + RLS on PostgreSQL
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -87,6 +87,16 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: cargo run -p wadl-cli -- migrate
+      - name: seed the demo world
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cargo run -p wadl-cli -- seed
+      # The queries under test carry no org_id clause — the database supplies the
+      # filter — so a dropped or mis-written policy fails here and nowhere else.
+      - name: prove row-level security on a real database
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cargo test -p wadl-store --test pg_rls
 
   supply-chain:
     name: cargo-deny

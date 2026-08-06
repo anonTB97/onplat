@@ -8,11 +8,11 @@
 //! platform's first invariant) depends on this being a transaction, not a
 //! connection setting.
 //!
-//! The compile-time-checked `query_as!` repositories that implement
-//! [`crate::Repositories`] over this pool are the next step; they need a dev
-//! database or an offline query cache to compile, which is why the working
-//! milestone-1 store is [`crate::InMemoryStore`]. The count query below is a
-//! deliberately small proof that a scoped query runs end to end.
+//! The tenancy and taxonomy reads live in [`crate::pg_repo`] and are exercised
+//! against a real database by `tests/pg_rls.rs`. The remaining
+//! [`crate::Repositories`] methods are still served by
+//! [`crate::InMemoryStore`] — see that module's gap list for what each one needs
+//! from the schema before it can move.
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -80,17 +80,36 @@ impl PgStore {
         Ok(())
     }
 
-    /// Opens a transaction with `app.org_id` set transaction-locally, so every
-    /// statement in it is filtered by the row-level-security policies. This is
-    /// the ONLY sanctioned way to read or write tenant data over Postgres.
+    /// Opens a transaction that is scoped to one tenant and runs as the
+    /// application role, so every statement in it is filtered by the
+    /// row-level-security policies. This is the ONLY sanctioned way to read or
+    /// write tenant data over Postgres.
     ///
-    /// `set_config(..., true)` is used rather than `SET LOCAL` so the tenant id
-    /// is a bound parameter, never interpolated into SQL.
+    /// Two statements, and both matter:
+    ///
+    /// * `SET LOCAL ROLE wadl_app` — **PostgreSQL does not apply RLS to a
+    ///   table's owner.** A deployment that connected as the owner (or as a
+    ///   superuser, which is easy to do by accident in development) would get
+    ///   silent full access to every tenant's rows, with the policies present and
+    ///   doing nothing. Switching role inside the transaction makes the isolation
+    ///   guarantee a property of this function rather than of whatever credentials
+    ///   happen to be in `DATABASE_URL`. It is transaction-local, so it cannot
+    ///   leak to the next borrower of the pooled connection.
+    /// * `set_config('app.org_id', …, true)` — the tenant the policies read.
+    ///   Used rather than `SET LOCAL` so the tenant id is a bound parameter and
+    ///   never interpolated into SQL.
+    ///
+    /// The connecting role must be `wadl_app` or a member of it (a superuser
+    /// qualifies); migrations and seeding deliberately run *outside* this scope,
+    /// as the owner.
     ///
     /// # Errors
     /// [`StoreError::Backend`] if the transaction cannot be opened or scoped.
     pub async fn with_tenant(&self, org: OrgId) -> Result<Transaction<'_, Postgres>, StoreError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE wadl_app")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("SELECT set_config('app.org_id', $1, true)")
             .bind(org.as_uuid().to_string())
             .execute(&mut *tx)

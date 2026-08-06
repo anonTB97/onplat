@@ -45,8 +45,13 @@ docs/adr/        Architecture decision records.
    load it from `rule_binding` unchanged.
 3. **Never grant offline / nothing is deleted.** The audit ledger is append-only
    (privilege-enforced) and hash-chained; `wadl verify-ledger` detects tampering.
-4. **Row-level security from the first migration.** Every tenant table; validated
-   against PostgreSQL in CI and by the generated cross-tenant leak test (ADR 0003).
+4. **Row-level security from the first migration.** Every tenant table, and the
+   policies are *proved* against a real PostgreSQL by
+   `crates/wadl-store/tests/pg_rls.rs` — the queries carry no `org_id` clause, so
+   a dropped policy fails the test. `with_tenant()` also does
+   `SET LOCAL ROLE wadl_app`, because **Postgres does not apply RLS to a table's
+   owner**: without it, connecting as the owner silently sees every tenant's rows
+   with the policies present and doing nothing (ADR 0003).
 5. **Class holds the template, hull holds the truth.** The schema models per-hull
    divergence as deltas, never forks.
 
@@ -74,10 +79,12 @@ dropdown → an *(unassigned)* hull to see the RBAC refusal.
 
 ```
 cargo test --workspace                                   # unit + property + leak tests
+DATABASE_URL=… cargo test -p wadl-store --test pg_rls    # RLS proved on real PostgreSQL
 cargo clippy --workspace --all-targets -- -D warnings    # a warning is a build failure
 cargo build -p wadl-engine --target wasm32-unknown-unknown  # and -p wadl-plan
 cargo run -p xtask -- gen-leak-tests --check             # leak tests match the route inventory
 cargo run -p wadl-cli -- migrate                         # applies migrations (needs DATABASE_URL)
+cargo run -p wadl-cli -- seed --database-url …            # seeds the demo world into PostgreSQL
 cargo deny check                                         # supply chain (licences, bans, sources)
 ```
 
@@ -176,7 +183,15 @@ eight RLS migrations validated against PostgreSQL; store/API/ingest/CLI; the
 generated cross-tenant leak test; and Deck Explorer, Work Orders and Distributed
 Packages end to end.
 
-Next: Daily Ops, Sequence Board and Conflicts & Risk on the same seams; the
-PostgreSQL repositories behind `Repositories`; and the `wasm-bindgen` wrapper so
-the browser pre-checks with the same engine build. Then the WADL field app and
+The store is now async and PostgreSQL-backed for tenancy and taxonomy (vessels,
+decks, the class-inherited compartment register), with RLS proved against a live
+database. The other four `Repositories` methods still run in-memory; each needs a
+modelling decision rather than a query, and
+`crates/wadl-store/src/pg_repo.rs` lists exactly what — the schema has **no
+hazard table** (hazards are derived facts) and nothing yet defines the shape of
+`rule_version.trigger_expr`.
+
+Next: settle those two, finish the remaining repositories, then Daily Ops,
+Sequence Board and Conflicts & Risk on the same seams; and the `wasm-bindgen`
+wrapper so the browser pre-checks with the same engine build. Then the WADL field app and
 console, ITP and dispositions, offline sync, and schedule ingest.

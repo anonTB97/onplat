@@ -36,6 +36,7 @@ pub mod ledger;
 pub mod memory;
 pub mod model;
 pub mod pg;
+pub mod pg_repo;
 pub mod repo;
 pub mod scope;
 

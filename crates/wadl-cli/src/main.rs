@@ -35,8 +35,14 @@ enum Command {
         #[arg(long)]
         database_url: Option<String>,
     },
-    /// Print the seeded demo world as JSON (no database required).
-    Seed,
+    /// Print the seeded demo world as JSON, or apply it to a database.
+    Seed {
+        /// Apply the SQL seed to this PostgreSQL instead of printing JSON.
+        /// Falls back to `DATABASE_URL`; without either, prints the in-memory
+        /// world so the command is useful with no database at all.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
     /// Verify the audit ledger's hash chain from a JSON export.
     VerifyLedger {
         /// Path to a JSON array of ledger entries.
@@ -58,7 +64,7 @@ enum Command {
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Migrate { database_url } => migrate(database_url).await,
-        Command::Seed => seed().await,
+        Command::Seed { database_url } => seed(database_url).await,
         Command::VerifyLedger { input } => verify_ledger(&input),
         Command::SupportBundle {
             out,
@@ -77,7 +83,18 @@ async fn migrate(database_url: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn seed() -> Result<()> {
+async fn seed(database_url: Option<String>) -> Result<()> {
+    // Seeding a database runs as the CONNECTING role (the owner), deliberately
+    // outside the tenant-scoped path: a seed able to write across tenants would
+    // defeat the row-level security it exists to demonstrate.
+    if let Some(url) = database_url.or_else(|| std::env::var("DATABASE_URL").ok()) {
+        let store = PgStore::connect(&url).await.context("connecting")?;
+        store.migrate().await.context("applying migrations")?;
+        store.seed_demo().await.context("applying the demo seed")?;
+        println!("demo world seeded (illustrative / notional data)");
+        return Ok(());
+    }
+
     let (store, world) = InMemoryStore::demo();
     let vessels = store.list_vessels(&world.yard_scope()).await;
     let stranded = store

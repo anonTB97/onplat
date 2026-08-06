@@ -25,6 +25,8 @@ crates/
   wadl-ingest/   Provenance-stamped P6 ingest.
   wadl-cli/      wadl {migrate, seed, verify-ledger, support-bundle}.
 xtask/           gen-leak-tests: generates the cross-tenant leak test from the route inventory.
+scripts/dev.sh   Runs the API and the shell together — the one command to see it working.
+.devcontainer/   Codespaces setup, so the above works with nothing installed locally.
 migrations/      Forward-only PostgreSQL migrations; RLS from the first one.
 shell-web/       The TypeScript + React + Vite shell (skeleton).
 docs/adr/        Architecture decision records.
@@ -48,6 +50,26 @@ docs/adr/        Architecture decision records.
 5. **Class holds the template, hull holds the truth.** The schema models per-hull
    divergence as deltas, never forks.
 
+## Run the demo
+
+```
+scripts/dev.sh
+```
+
+That builds and starts the API on `127.0.0.1:8080` (loopback only), waits until it
+is actually healthy, then starts the shell on `5173`. Open
+<http://localhost:5173>. Ctrl-C stops both. No database is needed — the demo runs
+on the seeded in-memory store.
+
+**In a Codespace:** *Code ▾ → Codespaces → Create codespace*. The devcontainer
+pre-installs the toolchain, the wasm target and the shell's dependencies, so
+`scripts/dev.sh` is the only command you need; click the forwarded **5173** link
+in the Ports tab.
+
+Worth a look once it is up: **Deck Explorer** → Fourth Deck → `4-164-2-Q` for a
+decision trace; **Distributed Packages** for the stranded man-hours; and the hull
+dropdown → an *(unassigned)* hull to see the RBAC refusal.
+
 ## Build and check
 
 ```
@@ -56,7 +78,7 @@ cargo clippy --workspace --all-targets -- -D warnings    # a warning is a build 
 cargo build -p wadl-engine --target wasm32-unknown-unknown  # and -p wadl-plan
 cargo run -p xtask -- gen-leak-tests --check             # leak tests match the route inventory
 cargo run -p wadl-cli -- migrate                         # applies migrations (needs DATABASE_URL)
-cargo run -p wadl-api --bin serve                        # demo API on 127.0.0.1:8080
+cargo deny check                                         # supply chain (licences, bans, sources)
 ```
 
 ## Milestone-1 first response (from the build prompt)

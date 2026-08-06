@@ -7,14 +7,17 @@ context with the OUT OF SCOPE banner, module rail) rendering live data from
 
 ## Run
 
-```
-# 1. start the API (from the repo root)
-cargo run -p wadl-api --bin serve   # serves on 127.0.0.1:8080
+From the repo root, one command starts the API and this shell together:
 
-# 2. start the shell
-cd shell-web
-npm install
-npm run dev                      # Vite proxies /api and /health to :8080
+```
+scripts/dev.sh                   # → http://localhost:5173
+```
+
+Or by hand, in two terminals:
+
+```
+cargo run -p wadl-api --bin serve   # 1. the API, on 127.0.0.1:8080
+cd shell-web && npm install && npm run dev   # 2. Vite proxies /api and /health to :8080
 ```
 
 ## Notes

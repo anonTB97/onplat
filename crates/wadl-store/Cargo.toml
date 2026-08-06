@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 wadl-domain.workspace = true
 wadl-engine.workspace = true
+wadl-plan.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }

@@ -2,10 +2,12 @@
 
 use wadl_domain::ids::VesselId;
 use wadl_engine::{AdjacencyGraph, Hazard, RuleSet};
+use wadl_plan::Package;
 
 use crate::error::StoreError;
 use crate::model::{
-    CompartmentSummary, DeckSummary, StrandedReport, VesselSummary, WorkOrderSummary,
+    CompartmentSummary, DeckSummary, PackageSummary, StrandedReport, VesselSummary,
+    WorkOrderSummary,
 };
 use crate::scope::TenantScope;
 
@@ -104,4 +106,27 @@ pub trait Repositories: Send + Sync {
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
     fn rules_in_force(&self, scope: &TenantScope, vessel: VesselId) -> Result<RuleSet, StoreError>;
+
+    /// The distributed packages on a hull.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    fn list_packages(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<PackageSummary>, StoreError>;
+
+    /// One package with its full segment topology and per-compartment work,
+    /// ready to hand to [`wadl_plan`] for analysis.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`, or no package
+    /// on it carries `code`.
+    fn get_package(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        code: &str,
+    ) -> Result<Package, StoreError>;
 }

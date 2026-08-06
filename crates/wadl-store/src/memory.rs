@@ -8,19 +8,21 @@
 //! identity assigned to three of the yard's five hulls so RBAC refusal is
 //! visible on the other two.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use uuid::Uuid;
 use wadl_domain::compartment::CompartmentNo;
-use wadl_domain::ids::{CouplingTypeId, OrgId, VesselId, WorkOrderId};
+use wadl_domain::ids::{CouplingTypeId, OrgId, SegmentId, VesselId, WorkOrderId};
 use wadl_domain::time::Timestamp;
 use wadl_domain::units::{HopDepth, ManHours};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
+use wadl_plan::{Package, Segment, SpaceWork};
 
 use crate::error::StoreError;
 use crate::model::{
-    CompartmentSummary, DeckSummary, StrandedItem, StrandedReport, VesselSummary, WorkOrderSummary,
+    CompartmentSummary, DeckSummary, PackageSummary, StrandedItem, StrandedReport, VesselSummary,
+    WorkOrderSummary,
 };
 use crate::repo::Repositories;
 use crate::scope::TenantScope;
@@ -60,9 +62,6 @@ struct WorkOrderRow {
     compartment: &'static str,
     budget: i64,
     earned: i64,
-    /// A *different* compartment that must be complete before this order's work
-    /// can be tested. `None` where there is no upstream dependency.
-    upstream_compartment: Option<&'static str>,
     source_ref: &'static str,
     source_verified: bool,
 }
@@ -91,6 +90,39 @@ struct HazardRow {
     label: &'static str,
 }
 
+/// A distributed package: one work order spread over many compartments.
+struct PackageRow {
+    vessel: VesselId,
+    work_order_id: u128,
+    code: &'static str,
+    name: &'static str,
+    system: &'static str,
+    /// The verb this package's segments are tested with. Carried as data because
+    /// an HVAC package's gates are not interchangeable with a cableway's.
+    test_verb: &'static str,
+}
+
+/// One segment of a package, with its upstream pointer — the topology that makes
+/// "cannot be tested until everything upstream is complete" a query.
+struct SegmentRow {
+    package_code: &'static str,
+    segment_id: u128,
+    code: &'static str,
+    kind: &'static str,
+    name: &'static str,
+    /// The segment code immediately upstream; empty for a root.
+    upstream_code: &'static str,
+    compartments: &'static [&'static str],
+}
+
+/// Work booked in one compartment of one package.
+struct PackageSpaceRow {
+    package_code: &'static str,
+    compartment: &'static str,
+    budget: i64,
+    earned: i64,
+}
+
 /// The seeded in-memory store.
 pub struct InMemoryStore {
     vessels: Vec<VesselRow>,
@@ -98,6 +130,9 @@ pub struct InMemoryStore {
     work_orders: Vec<WorkOrderRow>,
     couplings: Vec<CouplingRow>,
     hazards: Vec<HazardRow>,
+    packages: Vec<PackageRow>,
+    segments: Vec<SegmentRow>,
+    package_spaces: Vec<PackageSpaceRow>,
 }
 
 /// The identifiers of the seeded demo world, handed back so the API and tests
@@ -171,8 +206,161 @@ impl InMemoryStore {
             work_orders: Self::seed_work_orders(&world),
             couplings: Self::seed_couplings(&world),
             hazards: Self::seed_hazards(&world),
+            packages: Self::seed_packages(&world),
+            segments: Self::seed_segments(),
+            package_spaces: Self::seed_package_spaces(),
         };
         (store, world)
+    }
+
+    /// The two distributed packages from the prototype. They deliberately share
+    /// compartments (`3-140-0-Q`, `3-148-2-E`): the cableway must clear the
+    /// overhead before HVAC can hang duct there, and both need the same isolation
+    /// window on bus 3-SG-2.
+    fn seed_packages(w: &DemoWorld) -> Vec<PackageRow> {
+        vec![
+            PackageRow {
+                vessel: w.cvn73,
+                work_order_id: 0x2201,
+                code: "WI-2201",
+                name: "AC Plant No. 2 — supply & return distribution",
+                system: "Ventilation & air conditioning · Zone 3 forward and aft",
+                test_verb: "leak-tested",
+            },
+            PackageRow {
+                vessel: w.cvn73,
+                work_order_id: 0x3310,
+                code: "WI-3310",
+                name: "Zone 3 overhead cableway — power and IC pulls",
+                system: "Electrical distribution and interior communications",
+                test_verb: "continuity- and megger-tested",
+            },
+        ]
+    }
+
+    fn seed_segments() -> Vec<SegmentRow> {
+        vec![
+            // HVAC: T1 is the trunk feeding everything. B1/B2 hang off it, T2
+            // continues aft and feeds B3 and the hangar riser R1.
+            SegmentRow {
+                package_code: "WI-2201",
+                segment_id: 0x2201_0001,
+                code: "T1",
+                kind: "Trunk",
+                name: "Main supply trunk — AC-2 to Fr 148",
+                upstream_code: "",
+                compartments: &["3-172-0-M", "3-160-2-Q", "3-148-0-L"],
+            },
+            SegmentRow {
+                package_code: "WI-2201",
+                segment_id: 0x2201_0002,
+                code: "B1",
+                kind: "Branch",
+                name: "Branch 1 — Zone 3 upper, mess and scullery",
+                upstream_code: "T1",
+                compartments: &["2-160-1-Q", "2-152-0-Q"],
+            },
+            SegmentRow {
+                package_code: "WI-2201",
+                segment_id: 0x2201_0003,
+                code: "B2",
+                kind: "Branch",
+                name: "Branch 2 — switchgear and berthing",
+                upstream_code: "T1",
+                compartments: &["3-148-2-E", "3-140-0-Q"],
+            },
+            SegmentRow {
+                package_code: "WI-2201",
+                segment_id: 0x2201_0004,
+                code: "T2",
+                kind: "Trunk",
+                name: "Aft supply trunk — Fr 176 to Fr 192",
+                upstream_code: "T1",
+                compartments: &["3-184-0-Q", "3-192-2-E"],
+            },
+            SegmentRow {
+                package_code: "WI-2201",
+                segment_id: 0x2201_0005,
+                code: "B3",
+                kind: "Branch",
+                name: "Branch 3 — wardroom terminal",
+                upstream_code: "T2",
+                compartments: &["2-176-0-Q"],
+            },
+            SegmentRow {
+                package_code: "WI-2201",
+                segment_id: 0x2201_0006,
+                code: "R1",
+                kind: "Riser",
+                name: "Riser — Hangar Bay 2 supply",
+                upstream_code: "T2",
+                compartments: &["1-160-0-Q"],
+            },
+            // Cableway: one main run with two branch runs.
+            SegmentRow {
+                package_code: "WI-3310",
+                segment_id: 0x3310_0001,
+                code: "C1",
+                kind: "Run",
+                name: "Main run — Fr 140 to Fr 160, overhead 3rd deck",
+                upstream_code: "",
+                compartments: &["3-148-0-L", "3-152-0-Q"],
+            },
+            SegmentRow {
+                package_code: "WI-3310",
+                segment_id: 0x3310_0002,
+                code: "C2",
+                kind: "Run",
+                name: "Berthing overhead — Fr 140",
+                upstream_code: "C1",
+                compartments: &["3-140-0-Q"],
+            },
+            SegmentRow {
+                package_code: "WI-3310",
+                segment_id: 0x3310_0003,
+                code: "C3",
+                kind: "Run",
+                name: "Switchgear terminations",
+                upstream_code: "C1",
+                compartments: &["3-148-2-E"],
+            },
+        ]
+    }
+
+    fn seed_package_spaces() -> Vec<PackageSpaceRow> {
+        let hvac = |compartment, budget, earned| PackageSpaceRow {
+            package_code: "WI-2201",
+            compartment,
+            budget,
+            earned,
+        };
+        let cable = |compartment, budget, earned| PackageSpaceRow {
+            package_code: "WI-3310",
+            compartment,
+            budget,
+            earned,
+        };
+        vec![
+            // HVAC footprint — 11 compartments. The trunk (T1) is open at
+            // 3-160-2-Q, which is also where the coating cascade lands, so the
+            // authorization hold and the completion hold meet in one space.
+            hvac("3-172-0-M", 620, 620),
+            hvac("3-160-2-Q", 380, 300),
+            hvac("3-148-0-L", 240, 240),
+            hvac("2-160-1-Q", 560, 410),
+            hvac("2-152-0-Q", 400, 180),
+            hvac("3-148-2-E", 320, 96),
+            hvac("3-140-0-Q", 480, 0),
+            hvac("3-184-0-Q", 340, 300),
+            hvac("3-192-2-E", 210, 210),
+            hvac("2-176-0-Q", 300, 165),
+            hvac("1-160-0-Q", 300, 60),
+            // Cableway footprint — 4 compartments.
+            cable("3-148-0-L", 410, 410),
+            cable("3-152-0-Q", 260, 240),
+            cable("3-140-0-Q", 520, 310),
+            cable("3-148-2-E", 300, 40),
+        ]
     }
 
     /// The CVN-73 adjacency around the coated space, as the prototype draws it.
@@ -232,13 +420,25 @@ impl InMemoryStore {
     /// The hazards live on the demo hull. One open coating ticket, which is what
     /// makes the Deck Explorer light up.
     fn seed_hazards(w: &DemoWorld) -> Vec<HazardRow> {
-        vec![HazardRow {
-            vessel: w.cvn73,
-            origin: "3-160-2-Q",
-            kind: HazardKind::CoatingOpen,
-            since_ms: DEMO_COAT_OPENED_AT,
-            label: "CT-3160-4 · final coat, curing",
-        }]
+        vec![
+            HazardRow {
+                vessel: w.cvn73,
+                origin: "3-160-2-Q",
+                kind: HazardKind::CoatingOpen,
+                since_ms: DEMO_COAT_OPENED_AT,
+                label: "CT-3160-4 · final coat, curing",
+            },
+            // Bus 3-SG-2 is live in the switchgear room. Duct penetration and
+            // cable termination work inside that envelope both need a verified
+            // zero-energy state, so this one hazard holds two packages.
+            HazardRow {
+                vessel: w.cvn73,
+                origin: "3-148-2-E",
+                kind: HazardKind::EnergisedBus,
+                since_ms: DEMO_COAT_OPENED_AT,
+                label: "Bus 3-SG-2 energised — no verified zero-energy state",
+            },
+        ]
     }
 
     fn seed_vessels(w: &DemoWorld) -> Vec<VesselRow> {
@@ -456,7 +656,6 @@ impl InMemoryStore {
                 compartment: "4-110-2-W",
                 budget: 680,
                 earned: 512,
-                upstream_compartment: None,
                 source_ref: "AWR 73-26-3318",
                 source_verified: true,
             },
@@ -470,7 +669,6 @@ impl InMemoryStore {
                 compartment: "4-110-2-W",
                 budget: 240,
                 earned: 0,
-                upstream_compartment: None,
                 source_ref: "AWR 73-26-3402",
                 source_verified: true,
             },
@@ -484,7 +682,6 @@ impl InMemoryStore {
                 compartment: "1-136-0-Q",
                 budget: 410,
                 earned: 12,
-                upstream_compartment: None,
                 source_ref: "AWR 73-26-4471",
                 source_verified: true,
             },
@@ -498,7 +695,6 @@ impl InMemoryStore {
                 compartment: "4-141-0-C",
                 budget: 340,
                 earned: 0,
-                upstream_compartment: None,
                 source_ref: "AWR 73-26-3905",
                 source_verified: false,
             },
@@ -514,7 +710,6 @@ impl InMemoryStore {
                 compartment: "4-102-2-E",
                 budget: 160,
                 earned: 0,
-                upstream_compartment: Some("4-141-0-C"),
                 source_ref: "AWR 73-26-1905",
                 source_verified: false,
             },
@@ -529,7 +724,6 @@ impl InMemoryStore {
                 compartment: "4-120-4-Q",
                 budget: 140,
                 earned: 0,
-                upstream_compartment: Some("4-141-0-C"),
                 source_ref: "AWR 73-26-5571",
                 source_verified: true,
             },
@@ -549,13 +743,61 @@ impl InMemoryStore {
             .ok_or(StoreError::NotFound)
     }
 
-    fn compartment_complete(&self, vessel: VesselId, compartment: &str) -> bool {
-        // Complete when every work order in the compartment has earned its full
-        // budget. A compartment with no orders is trivially complete.
-        self.work_orders
+    /// Assembles a [`Package`] from the seed rows: segments with their upstream
+    /// pointers resolved from codes to ids, plus the work booked per compartment.
+    /// This is the shape [`wadl_plan`] analyses, and the shape the PostgreSQL
+    /// repositories will produce from `work_segment` / `work_segment_space`.
+    fn build_package(&self, row: &PackageRow) -> Package {
+        let segment_id = |code: &str| {
+            self.segments
+                .iter()
+                .find(|s| s.package_code == row.code && s.code == code)
+                .map(|s| SegmentId::from_uuid(id(s.segment_id)))
+        };
+        let segments = self
+            .segments
             .iter()
-            .filter(|w| w.vessel == vessel && w.compartment == compartment)
-            .all(|w| w.earned >= w.budget)
+            .filter(|s| s.package_code == row.code)
+            .map(|s| Segment {
+                id: SegmentId::from_uuid(id(s.segment_id)),
+                code: s.code.to_owned(),
+                kind: s.kind.to_owned(),
+                name: s.name.to_owned(),
+                // An empty upstream code marks a root, not a missing pointer.
+                upstream: if s.upstream_code.is_empty() {
+                    None
+                } else {
+                    segment_id(s.upstream_code)
+                },
+                compartments: s
+                    .compartments
+                    .iter()
+                    .map(|c| CompartmentNo::new(*c))
+                    .collect(),
+            })
+            .collect();
+        let spaces = self
+            .package_spaces
+            .iter()
+            .filter(|s| s.package_code == row.code)
+            .map(|s| {
+                (
+                    CompartmentNo::new(s.compartment),
+                    SpaceWork {
+                        budget: ManHours::new(s.budget),
+                        earned: ManHours::new(s.earned),
+                    },
+                )
+            })
+            .collect();
+        Package {
+            work_order_id: WorkOrderId::from_uuid(id(row.work_order_id)),
+            code: row.code.to_owned(),
+            name: row.name.to_owned(),
+            test_verb: row.test_verb.to_owned(),
+            segments,
+            spaces,
+        }
     }
 }
 
@@ -639,36 +881,77 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<StrandedReport, StoreError> {
         self.scoped_vessel(scope, vessel)?;
+        // Derived from real segment topology by wadl-plan, per package, rather
+        // than from a single upstream pointer: the hours that matter are the ones
+        // in DOWNSTREAM segments a given compartment is holding.
         let mut items: Vec<StrandedItem> = Vec::new();
-        let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
-        for order in self.work_orders.iter().filter(|w| w.vessel == vessel) {
-            let Some(upstream) = order.upstream_compartment else {
-                continue;
-            };
-            let remaining = order.budget - order.earned;
-            if remaining <= 0 || upstream == order.compartment {
-                continue;
-            }
-            if self.compartment_complete(vessel, upstream) {
-                continue;
-            }
-            // De-duplicate on (blocked, blocker) so two orders in the same
-            // compartment blocked by the same room aggregate cleanly.
-            if seen.insert((order.compartment, upstream)) {
-                items.push(StrandedItem {
-                    compartment_no: CompartmentNo::new(order.compartment),
-                    hours: ManHours::new(remaining),
-                    blocked_by: CompartmentNo::new(upstream),
-                });
-            } else if let Some(existing) = items
-                .iter_mut()
-                .find(|i| i.compartment_no.as_str() == order.compartment)
-            {
-                existing.hours = existing.hours + ManHours::new(remaining);
-            }
+        let mut total = ManHours::ZERO;
+        for row in self.packages.iter().filter(|p| p.vessel == vessel) {
+            let analysis = self.build_package(row).analyse();
+            total = total + analysis.total_stranded();
+            items.extend(analysis.stranding.into_iter().filter_map(|s| {
+                // Only a compartment actually holding downstream scope belongs in
+                // a *stranding* report; a compartment with merely its own work
+                // left is outstanding work, not stranded work.
+                if s.stranded_downstream == ManHours::ZERO {
+                    return None;
+                }
+                Some(StrandedItem {
+                    package_code: row.code.to_owned(),
+                    compartment_no: s.compartment,
+                    own_remaining: s.own_remaining,
+                    stranded_downstream: s.stranded_downstream,
+                    downstream_segments: s.downstream_segments,
+                })
+            }));
         }
-        let total = items.iter().map(|i| i.hours).sum();
+        items.sort_by(|a, b| {
+            b.stranded_downstream
+                .cmp(&a.stranded_downstream)
+                .then(a.compartment_no.cmp(&b.compartment_no))
+        });
         Ok(StrandedReport { total, items })
+    }
+
+    fn list_packages(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<PackageSummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .packages
+            .iter()
+            .filter(|p| p.vessel == vessel)
+            .map(|row| {
+                let package = self.build_package(row);
+                PackageSummary {
+                    work_order_id: WorkOrderId::from_uuid(id(row.work_order_id)),
+                    code: row.code.to_owned(),
+                    name: row.name.to_owned(),
+                    system: row.system.to_owned(),
+                    segment_count: package.segments.len(),
+                    compartment_count: package.spaces.len(),
+                    budget_hours: package.spaces.values().map(|w| w.budget).sum(),
+                    earned_hours: package.spaces.values().map(|w| w.earned).sum(),
+                }
+            })
+            .collect())
+    }
+
+    fn get_package(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        code: &str,
+    ) -> Result<Package, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let row = self
+            .packages
+            .iter()
+            .find(|p| p.vessel == vessel && p.code == code)
+            .ok_or(StoreError::NotFound)?;
+        Ok(self.build_package(row))
     }
 
     fn list_decks(
@@ -817,12 +1100,15 @@ mod tests {
     }
 
     #[test]
-    fn the_seeded_hull_has_a_live_coating_hazard_and_a_graph() {
+    fn the_seeded_hull_has_live_hazards_and_a_graph() {
         let (store, w) = InMemoryStore::demo();
         let scope = w.yard_scope();
         let hazards = store.live_hazards(&scope, w.cvn73).unwrap();
-        assert_eq!(hazards.len(), 1);
-        assert_eq!(hazards[0].origin.as_str(), "3-160-2-Q");
+        // A curing coat in the passage, and a live bus in the switchgear room.
+        assert_eq!(hazards.len(), 2);
+        let origins: Vec<&str> = hazards.iter().map(|h| h.origin.as_str()).collect();
+        assert!(origins.contains(&"3-160-2-Q"));
+        assert!(origins.contains(&"3-148-2-E"));
         assert!(store.adjacency_graph(&scope, w.cvn73).unwrap().edge_count() > 0);
         // A hull with no seeded topology returns an empty graph, not an error —
         // "nothing is coupled here" is a valid answer.
@@ -843,15 +1129,83 @@ mod tests {
     }
 
     #[test]
-    fn stranded_hours_are_cross_compartment_only() {
+    fn stranded_hours_count_only_hours_held_downstream() {
         let (store, w) = InMemoryStore::demo();
         let report = store.stranded_hours(&w.yard_scope(), w.cvn73).unwrap();
-        // WI-1905 (160) + WI-5571 (140), both blocked by 4-141-0-C.
-        assert_eq!(report.total, ManHours::new(300));
-        assert_eq!(report.items.len(), 2);
+
+        // Every reported item is holding real hours somewhere else — a
+        // compartment with only its own work left is outstanding, not stranded.
+        assert!(!report.items.is_empty());
+        for item in &report.items {
+            assert!(item.stranded_downstream > ManHours::ZERO);
+            assert!(!item.downstream_segments.is_empty());
+            assert!(item.own_remaining > ManHours::ZERO);
+        }
+
+        // Worst offender first, and it is on the HVAC trunk: 3-160-2-Q has 80 MH
+        // of its own left and sits on T1, so it holds every branch below it.
+        let worst = report.items.first().unwrap();
+        assert_eq!(worst.package_code, "WI-2201");
+        assert_eq!(worst.compartment_no.as_str(), "3-160-2-Q");
         assert!(report
             .items
-            .iter()
-            .all(|i| i.blocked_by.as_str() == "4-141-0-C"));
+            .windows(2)
+            .all(|p| p[0].stranded_downstream >= p[1].stranded_downstream));
+    }
+
+    #[test]
+    fn a_finished_branch_is_still_held_by_its_open_trunk() {
+        let (store, w) = InMemoryStore::demo();
+        let package = store
+            .get_package(&w.yard_scope(), w.cvn73, "WI-2201")
+            .unwrap();
+        let analysis = package.analyse();
+        assert!(
+            analysis.faults.is_empty(),
+            "seed topology must be well formed"
+        );
+
+        // 3-192-2-E is complete, so segment T2's own compartments are not all
+        // done (3-184-0-Q still has 40 MH) — but the key case is B3/R1 below T2.
+        let by = |code: &str| {
+            analysis
+                .segments
+                .iter()
+                .find(|s| s.code == code)
+                .unwrap()
+                .clone()
+        };
+        // T1 is open at 3-160-2-Q, so nothing in the package is testable.
+        assert!(!by("T1").complete);
+        assert_eq!(analysis.testable_segment_count, 0);
+        // And every other segment names T1 among its blockers.
+        for code in ["B1", "B2", "T2", "B3", "R1"] {
+            assert!(
+                by(code).held_by.contains(&"T1".to_owned()),
+                "{code} must be held by T1, got {:?}",
+                by(code).held_by
+            );
+        }
+    }
+
+    #[test]
+    fn packages_are_scoped_and_unknown_codes_are_not_found() {
+        let (store, w) = InMemoryStore::demo();
+        let scope = w.yard_scope();
+        assert_eq!(store.list_packages(&scope, w.cvn73).unwrap().len(), 2);
+        // Out of scope hull: no packages, and no package detail.
+        assert!(matches!(
+            store.list_packages(&scope, w.ddg),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.get_package(&scope, w.ddg, "WI-2201"),
+            Err(StoreError::NotFound)
+        ));
+        // In-scope hull, unknown package.
+        assert!(matches!(
+            store.get_package(&scope, w.cvn73, "WI-9999"),
+            Err(StoreError::NotFound)
+        ));
     }
 }

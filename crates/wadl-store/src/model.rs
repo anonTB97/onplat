@@ -91,24 +91,50 @@ impl WorkOrderSummary {
     }
 }
 
-/// One compartment's stranded hours and the compartment that is stranding them.
+/// One compartment's outstanding work and what it is holding downstream.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StrandedItem {
-    /// The compartment that is ready but blocked.
+    /// The package this stranding belongs to.
+    pub package_code: String,
+    /// The compartment whose outstanding work is the cause.
     pub compartment_no: CompartmentNo,
-    /// The remaining man-hours stranded there.
-    pub hours: ManHours,
-    /// The *different* compartment upstream that is not complete.
-    pub blocked_by: CompartmentNo,
+    /// Man-hours left in this compartment.
+    pub own_remaining: ManHours,
+    /// Man-hours in *downstream* segments that cannot be tested until this
+    /// compartment clears — hours this compartment does not contain.
+    pub stranded_downstream: ManHours,
+    /// The downstream segment codes affected.
+    pub downstream_segments: Vec<String>,
 }
 
-/// The stranded-man-hours report for an availability — "the most persuasive
-/// number in the product": hours in compartments that are ready but blocked by
-/// a *different* compartment upstream.
+/// The stranded-man-hours report for a hull — "the most persuasive number in the
+/// product". Derived from real segment topology by [`wadl_plan`]: hours that
+/// cannot be tested because a *different* compartment upstream is open.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StrandedReport {
-    /// The total stranded man-hours.
+    /// The total stranded man-hours across every package on the hull.
     pub total: ManHours,
-    /// Per-compartment breakdown.
+    /// Per-compartment breakdown, worst first.
     pub items: Vec<StrandedItem>,
+}
+
+/// A distributed package as it appears in a list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PackageSummary {
+    /// The work order this package is.
+    pub work_order_id: WorkOrderId,
+    /// WI / WO code.
+    pub code: String,
+    /// Package title.
+    pub name: String,
+    /// The system it belongs to.
+    pub system: String,
+    /// Segments in the package.
+    pub segment_count: usize,
+    /// Compartments in the footprint.
+    pub compartment_count: usize,
+    /// Total budgeted man-hours.
+    pub budget_hours: ManHours,
+    /// Total earned man-hours.
+    pub earned_hours: ManHours,
 }

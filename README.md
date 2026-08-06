@@ -5,6 +5,11 @@ Rust. This repository is **milestone 1**: the planning-and-operating shell, buil
 so that the five invariants that are expensive to retrofit are honoured from the
 first commit.
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/tannerblacklidge-bot/shipyardaionboard)
+
+**To see it running:** click the badge, wait for setup, then run `scripts/dev.sh`
+and open the forwarded port **5173**. Nothing to install.
+
 > **Decision support, not automation.** The shell flags, ranks, prices and
 > proposes. It never modifies the schedule of record and never grants an
 > authorization. All data in the demo is illustrative / notional.

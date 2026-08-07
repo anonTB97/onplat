@@ -53,6 +53,9 @@ export interface Decision {
 }
 
 export interface Compartment {
+  frame: number | null;
+  side: string;
+  geometry_source: string;
   compartment_no: string;
   name: string;
   deck_code: string;
@@ -69,6 +72,9 @@ export interface Deck {
 }
 
 export interface DeckStateRow {
+  trades: string[];
+  work_order_codes: string[];
+  remaining_hours: number;
   compartment: Compartment;
   state: DecisionState;
   permits_work: boolean;

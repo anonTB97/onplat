@@ -840,13 +840,28 @@ impl Repositories for InMemoryStore {
             .compartments
             .iter()
             .filter(|c| c.vessel == vessel)
-            .map(|c| CompartmentSummary {
-                compartment_no: CompartmentNo::new(c.no),
-                name: c.name.to_owned(),
-                deck_code: c.deck_code.to_owned(),
-                deck_ordinal: c.deck_ordinal,
-                zone: c.zone.to_owned(),
-                category: c.category.to_owned(),
+            .map(|c| {
+                let compartment_no = CompartmentNo::new(c.no);
+                // This seed's class declares the USN deck-frame-side-usage
+                // scheme, so the placard number carries the geometry. The
+                // PostgreSQL store prefers the register's own columns; here the
+                // parse IS the register, and it is labelled `parsed` so the
+                // surface never presents a derived position as an authored one.
+                let usn = compartment_no.parse_usn();
+                CompartmentSummary {
+                    frame: usn.as_ref().map(|u| u.frame.get()),
+                    side: usn.as_ref().map_or_else(
+                        || "unknown".to_owned(),
+                        |u| format!("{:?}", u.side).to_lowercase(),
+                    ),
+                    geometry_source: if usn.is_some() { "parsed" } else { "unknown" }.to_owned(),
+                    compartment_no,
+                    name: c.name.to_owned(),
+                    deck_code: c.deck_code.to_owned(),
+                    deck_ordinal: c.deck_ordinal,
+                    zone: c.zone.to_owned(),
+                    category: c.category.to_owned(),
+                }
             })
             .collect())
     }

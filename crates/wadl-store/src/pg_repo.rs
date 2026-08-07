@@ -224,7 +224,11 @@ impl PgStore {
                     COALESCE(d.code, '—')                          AS deck_code,
                     COALESCE(d.ordinal, 0)                         AS ordinal,
                     COALESCE(cc.zone, '—')                         AS zone,
-                    COALESCE(dl.category, cc.category, '—')        AS category
+                    COALESCE(dl.category, cc.category, '—')        AS category,
+                    -- Cast in SQL: numeric would need a decimal crate for one
+                    -- integer frame station, and frames are whole numbers.
+                    cc.frame_fwd::int AS frame_fwd,
+                    cc.side
                FROM class_compartment cc
                JOIN vessel v            ON v.class_id = cc.class_id
                LEFT JOIN class_deck d   ON d.deck_id  = cc.deck_id
@@ -240,13 +244,39 @@ impl PgStore {
 
         Ok(rows
             .into_iter()
-            .map(|row| CompartmentSummary {
-                compartment_no: CompartmentNo::new(row.get::<String, _>("compartment_no")),
-                name: row.get("name"),
-                deck_code: row.get("deck_code"),
-                deck_ordinal: row.get("ordinal"),
-                zone: row.get("zone"),
-                category: row.get("category"),
+            .map(|row| {
+                let compartment_no = CompartmentNo::new(row.get::<String, _>("compartment_no"));
+                // The register is authoritative where it carries the geometry.
+                // Only fall back to parsing the placard number when it does not
+                // — and record which happened, because a parsed position is a
+                // convenience for a scheme we understand, not an authored fact.
+                let stored_frame: Option<i32> = row.get("frame_fwd");
+                let stored_side: Option<String> = row.get("side");
+                let parsed = compartment_no.parse_usn();
+                let from_register = stored_frame.is_some() && stored_side.is_some();
+                CompartmentSummary {
+                    frame: stored_frame.or_else(|| parsed.as_ref().map(|u| u.frame.get())),
+                    side: stored_side.unwrap_or_else(|| {
+                        parsed.as_ref().map_or_else(
+                            || "unknown".to_owned(),
+                            |u| format!("{:?}", u.side).to_lowercase(),
+                        )
+                    }),
+                    geometry_source: if from_register {
+                        "register"
+                    } else if parsed.is_some() {
+                        "parsed"
+                    } else {
+                        "unknown"
+                    }
+                    .to_owned(),
+                    compartment_no,
+                    name: row.get("name"),
+                    deck_code: row.get("deck_code"),
+                    deck_ordinal: row.get("ordinal"),
+                    zone: row.get("zone"),
+                    category: row.get("category"),
+                }
             })
             .collect())
     }

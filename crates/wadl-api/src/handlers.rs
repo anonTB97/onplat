@@ -118,6 +118,7 @@ pub(crate) async fn deck_states(
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
     let hazards = state.store.live_hazards(&scope, vessel).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
+    let orders = state.store.list_work_orders(&scope, vessel).await?;
     let at = state.clock.now();
 
     let rows: Vec<Value> = compartments
@@ -130,12 +131,27 @@ pub(crate) async fn deck_states(
                 hazards: &hazards,
                 at,
             });
+            // The work booked in this space. Deck Explorer's trade lens asks
+            // "where can my crews work", which needs the trades present and the
+            // hours left, not just the authorization state.
+            let in_space: Vec<_> = orders
+                .iter()
+                .filter(|o| o.compartment_no == compartment.compartment_no)
+                .collect();
+            let mut trades: Vec<&str> = in_space.iter().map(|o| o.trade.as_str()).collect();
+            trades.sort_unstable();
+            trades.dedup();
+            let remaining: i64 = in_space.iter().map(|o| o.remaining_hours().get()).sum();
+
             json!({
                 "compartment": compartment,
                 "state": decision.state,
                 "permits_work": decision.permits_work(),
                 "rules_fired": decision.trace.iter().map(|s| &s.rule_code).collect::<Vec<_>>(),
                 "earliest_clear": decision.earliest_clear,
+                "trades": trades,
+                "work_order_codes": in_space.iter().map(|o| &o.code).collect::<Vec<_>>(),
+                "remaining_hours": remaining,
             })
         })
         .collect();

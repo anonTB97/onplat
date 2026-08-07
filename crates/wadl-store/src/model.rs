@@ -56,6 +56,18 @@ pub struct CompartmentSummary {
     pub zone: String,
     /// Category (decides secure status and hazard defaults).
     pub category: String,
+    /// Longitudinal frame station, used to place the space fore-and-aft on a
+    /// deck plan. `None` when the register does not carry it and the number
+    /// cannot be parsed — the plan view must then say so rather than guess a
+    /// position.
+    pub frame: Option<i32>,
+    /// Athwartships side: `port`, `starboard` or `centreline`.
+    pub side: String,
+    /// Where the geometry came from — `register` when the class register stores
+    /// it, `parsed` when it was read out of the placard number. A parsed
+    /// position is a convenience for a scheme the platform understands, never a
+    /// substitute for an authored register, and the surface labels it as such.
+    pub geometry_source: String,
 }
 
 /// A work order with its provenance and, where distributed, its footprint.

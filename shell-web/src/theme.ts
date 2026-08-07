@@ -47,6 +47,62 @@ export const READINESS_STYLE: Record<
   },
 };
 
+/**
+ * The readiness overlay's buckets — the prototype's GO / WAIT / STOP.
+ *
+ * WAIT and STOP are both "held", and the difference between them is the most
+ * actionable thing on the screen: a hold with an `earliest_clear` timestamp
+ * releases itself on a clock, so a planner can sequence around it. A hold with
+ * no clock releases only when a named authority verifies the space, so somebody
+ * has to be sent. Collapsing the two into one red would hide which of those two
+ * completely different jobs the day actually needs.
+ */
+export type OverlayBucket = "go" | "wait" | "stop" | "none";
+
+export const OVERLAY_STYLE: Record<
+  OverlayBucket,
+  { fg: string; bg: string; border: string; label: string; gloss: string }
+> = {
+  go: {
+    fg: "#22c55e",
+    bg: "rgba(34,197,94,0.12)",
+    border: "rgba(34,197,94,0.5)",
+    label: "GO",
+    gloss: "ready to work now",
+  },
+  wait: {
+    fg: "#f59e0b",
+    bg: "rgba(245,158,11,0.13)",
+    border: "rgba(245,158,11,0.55)",
+    label: "WAIT",
+    gloss: "held, but it clears on a clock — sequence around it",
+  },
+  stop: {
+    fg: "#dc2626",
+    bg: "rgba(220,38,38,0.14)",
+    border: "rgba(220,38,38,0.55)",
+    label: "STOP",
+    gloss: "held until an authority verifies the space — someone has to go",
+  },
+  none: {
+    fg: "#6e7480",
+    bg: "rgba(110,116,128,0.10)",
+    border: "rgba(110,116,128,0.4)",
+    label: "NO WORK",
+    gloss: "nothing booked here",
+  },
+};
+
+/** Buckets a served row for the overlay. Presentational — nothing is derived. */
+export function overlayBucket(row: {
+  readiness: ReadinessState;
+  earliest_clear: number | null;
+}): OverlayBucket {
+  if (row.readiness === "go") return "go";
+  if (row.readiness !== "held") return "none";
+  return row.earliest_clear === null ? "stop" : "wait";
+}
+
 export const C = {
   bg: "#0b0c0e",
   panel: "#121316",

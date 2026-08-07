@@ -11,7 +11,7 @@ use wadl_domain::ids::VesselId;
 use wadl_domain::units::ManHours;
 use wadl_engine::{evaluate, Decision, EvaluationRequest};
 use wadl_plan::governing_constraint;
-use wadl_plan::readiness::{roll_up, SpaceReadiness};
+use wadl_plan::readiness::{roll_up, Readiness, SpaceReadiness};
 
 use crate::auth::Caller;
 use crate::error::ApiError;
@@ -108,6 +108,73 @@ pub(crate) async fn compartment_state(
     ))
 }
 
+/// The work booked in one compartment: hours left, the orders, and the trades.
+///
+/// **One implementation, two callers.** A distributed package books its hours per
+/// *segment*, so a compartment inside a package footprint has no work order of
+/// its own; the per-compartment package hours come from the stranded report,
+/// which derives them from real segment topology. When `deck_states` counted only
+/// work orders and `readiness` counted both, the deck plan showed a space as
+/// having nothing booked while the ship board billed it as 80 held man-hours.
+/// Two readings of "is anyone working here" is not a rounding difference — it is
+/// the screen contradicting itself.
+struct BookedWork {
+    remaining: ManHours,
+    stranded_downstream: ManHours,
+    order_codes: Vec<String>,
+    trades: Vec<String>,
+}
+
+fn booked_work(
+    compartment: &CompartmentNo,
+    orders: &[wadl_store::model::WorkOrderSummary],
+    packages: &[wadl_store::model::PackageSummary],
+    stranded: &wadl_store::model::StrandedReport,
+) -> BookedWork {
+    let in_space: Vec<_> = orders
+        .iter()
+        .filter(|o| &o.compartment_no == compartment)
+        .collect();
+    let in_packages: Vec<_> = stranded
+        .items
+        .iter()
+        .filter(|i| &i.compartment_no == compartment)
+        .collect();
+
+    let mut trades: Vec<String> = in_space.iter().map(|o| o.trade.clone()).collect();
+    // A package's trade is the package's own — its owning order is not in the
+    // work-order list, so looking there leaves every package space reading "no
+    // trade recorded", which is exactly the work the trade lens most needs named.
+    for item in &in_packages {
+        if let Some(owner) = packages.iter().find(|p| p.code == item.package_code) {
+            trades.push(owner.trade.clone());
+        }
+    }
+    trades.sort_unstable();
+    trades.dedup();
+
+    let mut order_codes: Vec<String> = in_space.iter().map(|o| o.code.clone()).collect();
+    for item in &in_packages {
+        order_codes.push(item.package_code.clone());
+    }
+    order_codes.sort_unstable();
+    order_codes.dedup();
+
+    BookedWork {
+        remaining: in_space
+            .iter()
+            .map(|o| o.remaining_hours())
+            .chain(in_packages.iter().map(|i| i.own_remaining))
+            .fold(ManHours::ZERO, |a, b| a + b),
+        stranded_downstream: in_packages
+            .iter()
+            .map(|i| i.stranded_downstream)
+            .fold(ManHours::ZERO, |a, b| a + b),
+        order_codes,
+        trades,
+    }
+}
+
 /// Every compartment on the hull with its current authorization state — the
 /// query Deck Explorer draws a deck sheet from.
 pub(crate) async fn deck_states(
@@ -121,6 +188,8 @@ pub(crate) async fn deck_states(
     let hazards = state.store.live_hazards(&scope, vessel).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
     let orders = state.store.list_work_orders(&scope, vessel).await?;
+    let packages = state.store.list_packages(&scope, vessel).await?;
+    let stranded = state.store.stranded_hours(&scope, vessel).await?;
     let at = state.clock.now();
 
     let rows: Vec<Value> = compartments
@@ -133,17 +202,8 @@ pub(crate) async fn deck_states(
                 hazards: &hazards,
                 at,
             });
-            // The work booked in this space. Deck Explorer's trade lens asks
-            // "where can my crews work", which needs the trades present and the
-            // hours left, not just the authorization state.
-            let in_space: Vec<_> = orders
-                .iter()
-                .filter(|o| o.compartment_no == compartment.compartment_no)
-                .collect();
-            let mut trades: Vec<&str> = in_space.iter().map(|o| o.trade.as_str()).collect();
-            trades.sort_unstable();
-            trades.dedup();
-            let remaining: i64 = in_space.iter().map(|o| o.remaining_hours().get()).sum();
+            let work = booked_work(&compartment.compartment_no, &orders, &packages, &stranded);
+            let remaining = work.remaining.get();
 
             json!({
                 "compartment": compartment,
@@ -151,9 +211,22 @@ pub(crate) async fn deck_states(
                 "permits_work": decision.permits_work(),
                 "rules_fired": decision.trace.iter().map(|s| &s.rule_code).collect::<Vec<_>>(),
                 "earliest_clear": decision.earliest_clear,
-                "trades": trades,
-                "work_order_codes": in_space.iter().map(|o| &o.code).collect::<Vec<_>>(),
+                "trades": work.trades,
+                "work_order_codes": work.order_codes,
                 "remaining_hours": remaining,
+                "stranded_hours": work.stranded_downstream.get(),
+                // Served rather than re-derived in the browser. The four-way
+                // taxonomy is `wadl_plan::readiness`'s, and having two
+                // implementations of it — one here, one in the shell — is how the
+                // ship board and the deck plan start disagreeing about which
+                // spaces are costing money.
+                "readiness": Readiness::of(decision.permits_work(), remaining > 0),
+                // Who can release it, for the readiness overlay's tooltip. From
+                // the line that decided the state, not the first line reached.
+                "clearing_authority": decision
+                    .governing_step()
+                    .map(|s| s.clearing_authority.as_str())
+                    .unwrap_or_default(),
             })
         })
         .collect();
@@ -220,42 +293,15 @@ pub(crate) async fn readiness(
                 hazards: &hazards,
                 at,
             });
-            let in_space: Vec<_> = orders
-                .iter()
-                .filter(|o| o.compartment_no == compartment.compartment_no)
-                .collect();
-            let in_packages: Vec<_> = stranded
-                .items
-                .iter()
-                .filter(|i| i.compartment_no == compartment.compartment_no)
-                .collect();
-
-            let mut trades: Vec<String> = in_space.iter().map(|o| o.trade.clone()).collect();
-            for item in &in_packages {
-                if let Some(owner) = packages.iter().find(|p| p.code == item.package_code) {
-                    trades.push(owner.trade.clone());
-                }
-            }
-            trades.sort_unstable();
-            trades.dedup();
-
-            let remaining = in_space
-                .iter()
-                .map(|o| o.remaining_hours())
-                .chain(in_packages.iter().map(|i| i.own_remaining))
-                .fold(ManHours::ZERO, |a, b| a + b);
-            let stranded_downstream = in_packages
-                .iter()
-                .map(|i| i.stranded_downstream)
-                .fold(ManHours::ZERO, |a, b| a + b);
+            let work = booked_work(&compartment.compartment_no, &orders, &packages, &stranded);
 
             SpaceReadiness {
                 compartment_no: compartment.compartment_no.as_str().to_owned(),
                 zone: compartment.zone.clone(),
                 deck_code: compartment.deck_code.clone(),
                 permits_work: decision.permits_work(),
-                remaining,
-                trades,
+                remaining: work.remaining,
+                trades: work.trades,
                 // Empty rather than "unspecified" when nothing is holding: the
                 // rollup groups by this string, and inventing a holder for an
                 // unheld space would put a phantom name on the ship board.
@@ -263,7 +309,7 @@ pub(crate) async fn readiness(
                     .governing_step()
                     .map(|s| s.clearing_authority.clone())
                     .unwrap_or_default(),
-                stranded_downstream,
+                stranded_downstream: work.stranded_downstream,
             }
         })
         .collect();

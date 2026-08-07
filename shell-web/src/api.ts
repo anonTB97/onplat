@@ -80,6 +80,14 @@ export interface DeckStateRow {
   permits_work: boolean;
   rules_fired: string[];
   earliest_clear: number | null;
+  /**
+   * Served, not derived here. The taxonomy is wadl-plan's; two implementations
+   * of it is how the ship board and the deck plan start disagreeing about which
+   * spaces are costing money.
+   */
+  readiness: ReadinessState;
+  /** Who can release the hold, from the trace line that decided the state. */
+  clearing_authority: string;
 }
 
 // Readiness is not authorization. The engine says whether work MAY proceed;

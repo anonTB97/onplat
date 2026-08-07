@@ -11,6 +11,7 @@ import {
   type Rollup,
 } from "./api";
 import { ShipBoard, ZoneBoard, type Drill } from "./ReadinessBoards";
+import { SelectorRail } from "./DeckRail";
 import { framesPerSpan, frameToX, layoutPlan, packLanes, xToFrame } from "./deckGeometry";
 import {
   halfBeamAt,
@@ -21,7 +22,7 @@ import {
   SHEET_SOURCE,
   type DeckSheet,
 } from "./deckSheets";
-import { C, fmtClear, STATE_STYLE } from "./theme";
+import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, READINESS_STYLE, STATE_STYLE } from "./theme";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -29,8 +30,10 @@ const TEXT = C.text;
 
 /** By space = colour by authorization. By trade = colour by who works here. */
 type Lens = "space" | "trade";
-/** The real drawing, the schematic strip, or the three-deck vertical section. */
-type View = "sheet" | "plan" | "vertical";
+/** What you are looking at: one deck, or three decks stacked. */
+type View = "single" | "vertical";
+/** How it is drawn: the real general-arrangement plate, or a schematic strip. */
+type Mode = "drawing" | "schematic";
 /**
  * How high above the hull you are reading from.
  *
@@ -73,21 +76,26 @@ export default function DeckExplorer({
 }) {
   const [decks, setDecks] = useState<Deck[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
+  const [rollup, setRollup] = useState<Rollup | null>(null);
   const [selectedDeck, setSelectedDeck] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [decision, setDecision] = useState<Decision | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [rollup, setRollup] = useState<Rollup | null>(null);
-
-  // Prototype controls.
   const [altitude, setAltitude] = useState<Altitude>("compartment");
   const [zoneFilter, setZoneFilter] = useState<string | null>(null);
   const [lens, setLens] = useState<Lens>("space");
-  const [view, setView] = useState<View>("sheet");
+  // Two independent axes, as in the prototype. What you are looking at (one deck
+  // or a vertical trace) is a different question from how it is drawn (the real
+  // plate or a schematic), and folding them into one three-way control made
+  // "schematic vertical trace" unreachable.
+  const [view, setView] = useState<View>("single");
+  const [mode, setMode] = useState<Mode>("drawing");
+  const [overlay, setOverlay] = useState(false);
+  const [fullScreen, setFullScreen] = useState(false);
   const [restrictedOnly, setRestrictedOnly] = useState(false);
   const [tradeFilter, setTradeFilter] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [hoverFrame, setHoverFrame] = useState<number | null>(null);
   const dragging = useRef<{ x: number; y: number } | null>(null);
@@ -105,7 +113,7 @@ export default function DeckExplorer({
         setDecks(d);
         setRows(r);
         setRollup(roll);
-        setSelectedDeck(d[0]?.code ?? null);
+        setSelectedDeck(d.find((x) => x.compartment_count > 0)?.code ?? d[0]?.code ?? null);
       })
       .catch((e: unknown) => {
         setDecks([]);
@@ -124,10 +132,21 @@ export default function DeckExplorer({
       .catch(() => setDecision(null));
   }, [identity, vesselId, selected]);
 
+  // Esc leaves full screen. Expected of anything that takes over the viewport,
+  // and the only way out if the toggle scrolls off.
+  useEffect(() => {
+    if (!fullScreen) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullScreen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullScreen]);
+
   // The hops the hazard actually took, deduped across every rule that fired.
-  // Drawn on both views: on the plan it shows the path across a deck, and in
-  // the section it shows the part a single deck sheet can never show — the
-  // penetration that carried it to another deck.
+  // Drawn on every view: on a deck it shows the path across that deck, and in
+  // the vertical trace it shows the part a single deck sheet can never show —
+  // the penetration that carried it to another deck.
   const cascadeEdges = useMemo(() => {
     const seen = new Set<string>();
     const edges: [string, string][] = [];
@@ -144,6 +163,29 @@ export default function DeckExplorer({
     }
     return edges;
   }, [decision]);
+
+  // Where a cascade leaves this deck. Computed here because it needs every row
+  // on the hull, not just the deck on screen — the point of the badge is to name
+  // a deck you are not currently looking at.
+  const deckJumps = useMemo(() => {
+    const byNo = new Map(rows.map((r) => [r.compartment.compartment_no, r.compartment]));
+    const ordinalOf = (code: string) => decks.find((d) => d.code === code)?.ordinal ?? 0;
+    const labelOf = (code: string) => decks.find((d) => d.code === code)?.label ?? code;
+    const out = new Map<string, { deck: string; label: string; up: boolean }>();
+    for (const [a, b] of cascadeEdges) {
+      const ca = byNo.get(a);
+      const cb = byNo.get(b);
+      if (!ca || !cb || ca.deck_code === cb.deck_code) continue;
+      // Both ends get a badge: a cascade is followed in either direction.
+      if (!out.has(a)) {
+        out.set(a, { deck: cb.deck_code, label: labelOf(cb.deck_code), up: ordinalOf(cb.deck_code) < ordinalOf(ca.deck_code) });
+      }
+      if (!out.has(b)) {
+        out.set(b, { deck: ca.deck_code, label: labelOf(ca.deck_code), up: ordinalOf(ca.deck_code) < ordinalOf(cb.deck_code) });
+      }
+    }
+    return out;
+  }, [rows, decks, cascadeEdges]);
 
   const allTrades = useMemo(() => {
     const set = new Set<string>();
@@ -168,27 +210,41 @@ export default function DeckExplorer({
   );
 
   const deckOrdinal = decks.find((d) => d.code === selectedDeck)?.ordinal ?? 0;
+  const deckLabel = decks.find((d) => d.code === selectedDeck)?.label ?? "—";
   const selectedRow = rows.find((r) => r.compartment.compartment_no === selected);
   const sheet = sheetForDeck(selectedDeck);
 
-  // Zoom and pan are per-deck-per-view; carrying them across a deck change
-  // leaves you looking at empty sheet and wondering where the ship went.
-  //
-  // Zero means "no zoom chosen" and only the sheet view understands it — that
-  // view picks a readable default from the plate's own aspect, which fit-to-width
-  // cannot give on a 9:1 drawing. The schematic strip has no such problem, so it
-  // starts at 1.
+  // Reset the framing on any change that moves the camera. Zero means "not
+  // framed" and the sheet view resolves it to a readable default.
   useEffect(() => {
-    setZoom(view === "sheet" ? 0 : 1);
+    setZoom(0);
     setPan({ x: 0, y: 0 });
-  }, [selectedDeck, view]);
+  }, [selectedDeck, view, mode, fullScreen]);
 
-  // Colour for a marker under the current lens.
+  // The drawing needs a plate; fall back to the schematic rather than showing an
+  // empty frame for a deck whose plate has no frame axis.
+  const effMode: Mode = sheet ? mode : "schematic";
+
+  /**
+   * Marker colour. Three colourings, and they answer different questions:
+   * authorization (may work proceed), trade (whose crews are here), and the
+   * readiness overlay (is anybody actually held up, and does the hold clear on
+   * a clock or on a signature). The overlay wins when it is on, because it is
+   * the only one of the three that is explicitly a temporary lens.
+   */
   const toneOf = (r: DeckStateRow) => {
+    if (overlay) {
+      const b = OVERLAY_STYLE[overlayBucket(r)];
+      return { fg: b.fg, bg: b.bg, border: b.border };
+    }
     if (lens === "trade") {
       const t = r.trades[0];
       return t
-        ? { fg: tradeColour(t, allTrades), bg: `${tradeColour(t, allTrades)}22`, border: tradeColour(t, allTrades) }
+        ? {
+            fg: tradeColour(t, allTrades),
+            bg: `${tradeColour(t, allTrades)}22`,
+            border: tradeColour(t, allTrades),
+          }
         : { fg: "#6e7480", bg: "#1a1c22", border: "#353842" };
     }
     return STATE_STYLE[r.state];
@@ -202,323 +258,391 @@ export default function DeckExplorer({
     );
   }
 
-  const restricted = rows.filter((r) => r.state !== "ALLOW");
+  const heldCount = rows.filter((r) => r.readiness === "held").length;
   const parsedGeometry = rows.some((r) => r.compartment.geometry_source === "parsed");
 
-  const seg = (active: boolean) => ({
+  const seg = (active: boolean, disabled = false) => ({
     padding: "5px 11px",
     borderRadius: 6,
-    cursor: "pointer",
+    cursor: disabled ? "not-allowed" : "pointer",
     font: "inherit" as const,
     fontSize: 11.5,
+    opacity: disabled ? 0.45 : 1,
     background: active ? "#20222b" : "transparent",
     color: active ? TEXT : DIM,
     border: `1px solid ${active ? C.accent : LINE}`,
   });
 
+  /** A segment with the prototype's second line — the role it is meant for. */
+  const altBtn = (id: Altitude, label: string, sub: string) => (
+    <button
+      key={id}
+      // The visible label is two lines, so without this the accessible name
+      // becomes "Zone Section · superintendent" — which is what a screen reader
+      // would read out and what a keyboard user would have to search for.
+      aria-label={`${label} altitude — ${sub}`}
+      style={{ ...seg(altitude === id), textAlign: "left", padding: "4px 10px" }}
+      onClick={() => setAltitude(id)}
+    >
+      <div style={{ fontSize: 11.5, fontWeight: altitude === id ? 600 : 400 }}>{label}</div>
+      <div style={{ fontSize: 9.5, color: altitude === id ? DIM : "#5a6070" }}>{sub}</div>
+    </button>
+  );
+
+  const drill = (d: Drill) => {
+    if (d.zone) setZoneFilter(d.zone);
+    if (d.deck) setSelectedDeck(d.deck);
+    if (d.compartment) setSelected(d.compartment);
+    setAltitude("compartment");
+  };
+
   return (
     <div>
+      {/* Title from the prototype. The question is the point of the screen, so it
+          is the subtitle rather than a description of the data model. */}
       <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
         Deck Explorer · {hullLabel}
       </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>Compartment authorization</h1>
-      <p style={{ color: DIM, fontSize: 12.5, margin: "0 0 12px", maxWidth: 760 }}>
-        State is computed by the rule engine and read through the API — the shell never
-        derives it. {restricted.length} of {rows.length} compartments are currently
-        restricted by a live hazard.
+      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>
+        Where can people work — and what&rsquo;s stopping them?
+      </h1>
+      <p style={{ color: DIM, fontSize: 12.5, margin: "0 0 12px", maxWidth: 820 }}>
+        Authorization is computed by the rule engine and read through the API — the shell
+        never derives it. {heldCount} of {rows.length} compartments have work booked that
+        the engine currently refuses.
       </p>
 
-      {/* altitude first: it decides what the rest of the chrome even means */}
-      <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>Altitude</span>
-          {(
-            [
-              ["ship", "Ship", "Leadership board — the hull on one screen"],
-              ["zone", "Zone", "Section — zone superintendent"],
-              ["compartment", "Compartment", "Deck plan — foreman"],
-            ] as const
-          ).map(([id, label, title]) => (
-            <button key={id} style={seg(altitude === id)} onClick={() => setAltitude(id)} title={title}>
-              {label}
-            </button>
-          ))}
+      <div
+        style={{
+          display: "flex",
+          gap: 14,
+          alignItems: "flex-start",
+          flexWrap: "wrap",
+          marginBottom: 12,
+        }}
+      >
+        <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+          <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM, paddingTop: 6 }}>
+            Altitude
+          </span>
+          {altBtn("ship", "Ship", "Leadership board")}
+          {altBtn("zone", "Zone", "Section · superintendent")}
+          {altBtn("compartment", "Compartment", "Foreman · deck plan")}
         </div>
-        {zoneFilter && (
+
+        <div style={{ display: "flex", gap: 6, alignItems: "center", paddingTop: 3 }}>
+          <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>Lens</span>
+          <button style={seg(lens === "space" && !overlay, overlay)} onClick={() => setLens("space")} title="Show me my zone">
+            By space
+          </button>
+          <button style={seg(lens === "trade" && !overlay, overlay)} onClick={() => setLens("trade")} title="Where can my crews work">
+            By trade
+          </button>
+          {/* The prototype's readiness overlay. A toggle, not a third lens: it
+              answers "is anyone held up", which is a different axis from what the
+              two lenses colour, and it is meant to be switched on and back off. */}
           <button
-            style={{ ...seg(true), borderColor: C.accent }}
-            onClick={() => setZoneFilter(null)}
-            title="Clear the zone filter"
+            style={{
+              ...seg(overlay),
+              borderColor: overlay ? OVERLAY_STYLE.wait.fg : LINE,
+              color: overlay ? TEXT : DIM,
+            }}
+            onClick={() => setOverlay(!overlay)}
+            title="Overlay GO / WAIT / STOP instead of authorization state"
           >
+            Readiness overlay
+          </button>
+        </div>
+
+        {zoneFilter && (
+          <button style={{ ...seg(true), marginTop: 3 }} onClick={() => setZoneFilter(null)} title="Clear the zone filter">
             Zone {zoneFilter} ✕
           </button>
         )}
       </div>
 
-      {/* controls: lens · view · filters — the prototype's chrome */}
-      <div
-        style={{
-          display: altitude === "compartment" ? "flex" : "none",
-          gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 12,
-        }}
-      >
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>Lens</span>
-          <button style={seg(lens === "space")} onClick={() => setLens("space")} title="Show me my zone">
-            By space
-          </button>
-          <button style={seg(lens === "trade")} onClick={() => setLens("trade")} title="Where can my crews work">
-            By trade
-          </button>
-        </div>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>View</span>
-          <button
-            style={seg(view === "sheet")}
-            onClick={() => setView("sheet")}
-            disabled={!sheet}
-            title={sheet ? "The general-arrangement plate for this deck" : "No plate for this deck"}
-          >
-            Sheet
-          </button>
-          <button style={seg(view === "plan")} onClick={() => setView("plan")}>Schematic</button>
-          <button
-            style={seg(view === "vertical")}
-            onClick={() => setView("vertical")}
-            title="Three decks at once — how a cascade travels between them"
-          >
-            Vertical section
-          </button>
-        </div>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: DIM, cursor: "pointer" }}>
-          <input type="checkbox" checked={restrictedOnly} onChange={(e) => setRestrictedOnly(e.target.checked)} />
-          Restricted only
-        </label>
-        {lens === "trade" && allTrades.length > 0 && (
-          <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
-            <button style={seg(tradeFilter === null)} onClick={() => setTradeFilter(null)}>All trades</button>
-            {allTrades.map((t) => (
-              <button
-                key={t}
-                style={{ ...seg(tradeFilter === t), borderColor: tradeColour(t, allTrades) }}
-                onClick={() => setTradeFilter(tradeFilter === t ? null : t)}
-              >
-                <span style={{ color: tradeColour(t, allTrades) }}>■</span> {t}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* The upper two altitudes. A click on either drills down and carries its
-          context with it — the zone it came from, the deck, the compartment — so
-          the space the board named worst is the space that opens. */}
-      {altitude !== "compartment" &&
-        (rollup ? (
-          <ReadinessAltitude
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+        {!fullScreen && (
+          <SelectorRail
             altitude={altitude}
+            decks={decks}
+            rows={rows}
             rollup={rollup}
-            onDrill={(d: Drill) => {
-              if (d.zone) setZoneFilter(d.zone);
-              if (d.deck) setSelectedDeck(d.deck);
-              if (d.compartment) setSelected(d.compartment);
+            selectedDeck={selectedDeck}
+            zoneFilter={zoneFilter}
+            onDeck={(code) => {
+              setSelectedDeck(code);
               setAltitude("compartment");
             }}
+            onZone={(z) => setZoneFilter(zoneFilter === z ? null : z)}
           />
-        ) : (
-          <p style={{ color: DIM, fontSize: 12.5 }}>Reading the hull…</p>
-        ))}
+        )}
 
-      {altitude !== "compartment" ? null : (
-      <>
-      {/* deck rail — ordered downward, which is what makes "directly above" real */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
-        {decks.map((d) => {
-          const isSel = d.code === selectedDeck;
-          const n = rows.filter((r) => r.compartment.deck_code === d.code && r.state !== "ALLOW").length;
-          return (
-            <button
-              key={d.code}
-              onClick={() => setSelectedDeck(d.code)}
-              style={{
-                display: "flex", alignItems: "center", gap: 8, padding: "6px 11px",
-                background: isSel ? "#20222b" : "transparent", color: isSel ? TEXT : DIM,
-                border: `1px solid ${isSel ? C.accent : LINE}`, borderRadius: 6,
-                cursor: "pointer", font: "inherit", fontSize: 12,
-              }}
-            >
-              <span style={{ fontFamily: "monospace", opacity: 0.6 }}>{d.ordinal}</span>
-              <span style={{ fontWeight: 600 }}>{d.label}</span>
-              {n > 0 && (
-                <span style={{
-                  minWidth: 16, height: 16, borderRadius: 8, padding: "0 4px",
-                  background: STATE_STYLE.BLOCK.fg, color: "#0b0c0e",
-                  fontSize: 10, fontWeight: 700, display: "flex",
-                  alignItems: "center", justifyContent: "center",
-                }}>{n}</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <div style={{ flex: "1 1 560px", minWidth: 380 }}>
-          {view === "vertical" ? (
-            <VerticalSection
-              decks={decks}
-              rows={visible}
-              centreOrdinal={deckOrdinal}
-              selected={selected}
-              onSelect={setSelected}
-              toneOf={toneOf}
-              cascadeEdges={cascadeEdges}
-            />
-          ) : view === "sheet" && sheet ? (
-            <SheetView
-              sheet={sheet}
-              rows={onDeck}
-              selected={selected}
-              onSelect={setSelected}
-              toneOf={toneOf}
-              zoom={zoom}
-              setZoom={setZoom}
-              pan={pan}
-              setPan={setPan}
-              dragging={dragging}
-              hoverFrame={hoverFrame}
-              setHoverFrame={setHoverFrame}
-              cascadeEdges={cascadeEdges}
-            />
+        <div style={{ flex: "1 1 640px", minWidth: 380 }}>
+          {altitude !== "compartment" ? (
+            rollup ? (
+              <ReadinessAltitude altitude={altitude} rollup={rollup} onDrill={drill} />
+            ) : (
+              <p style={{ color: DIM, fontSize: 12.5 }}>Reading the hull…</p>
+            )
           ) : (
-            <PlanView
-              rows={onDeck}
-              selected={selected}
-              onSelect={setSelected}
-              toneOf={toneOf}
-              zoom={zoom}
-              setZoom={setZoom}
-              pan={pan}
-              setPan={setPan}
-              dragging={dragging}
-              hoverFrame={hoverFrame}
-              setHoverFrame={setHoverFrame}
-              deckLabel={decks.find((d) => d.code === selectedDeck)?.label ?? "—"}
-              cascadeEdges={cascadeEdges}
-            />
-          )}
+            <>
+              {/* controls bar — view axis, draw mode, filters, full screen */}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  marginBottom: 10,
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{deckLabel}</div>
+                  <div style={{ fontSize: 10.5, color: DIM }}>
+                    {onDeck.length} of {rows.filter((r) => r.compartment.deck_code === selectedDeck).length} shown
+                    {onDeck.filter((r) => r.readiness === "held").length > 0 &&
+                      ` · ${onDeck.filter((r) => r.readiness === "held").length} held`}
+                  </div>
+                </div>
 
-          {parsedGeometry && (
-            <p style={{ fontSize: 10.5, color: DIM, marginTop: 8 }}>
-              Positions derived from the placard numbers — this class uses the USN
-              deck-frame-side scheme. A hull whose register carries authored frame
-              and side data uses that instead, and says <b>register</b>.
-            </p>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button style={seg(view === "single")} onClick={() => setView("single")}>
+                    Single deck
+                  </button>
+                  <button
+                    style={seg(view === "vertical")}
+                    onClick={() => setView("vertical")}
+                    title="Three decks at once — how a cascade travels between them"
+                  >
+                    Vertical trace
+                  </button>
+                </div>
+
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    style={seg(effMode === "drawing", !sheet)}
+                    onClick={() => sheet && setMode("drawing")}
+                    title={sheet ? "The general-arrangement plate for this deck" : "No plate with a frame axis for this deck"}
+                  >
+                    Drawing
+                  </button>
+                  <button style={seg(effMode === "schematic")} onClick={() => setMode("schematic")}>
+                    Schematic
+                  </button>
+                </div>
+
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: DIM, cursor: "pointer" }}>
+                  <input type="checkbox" checked={restrictedOnly} onChange={(e) => setRestrictedOnly(e.target.checked)} />
+                  Restricted only
+                </label>
+
+                {lens === "trade" && !overlay && allTrades.length > 0 && (
+                  <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
+                    <button style={seg(tradeFilter === null)} onClick={() => setTradeFilter(null)}>
+                      All trades
+                    </button>
+                    {allTrades.map((t) => (
+                      <button
+                        key={t}
+                        style={{ ...seg(tradeFilter === t), borderColor: tradeColour(t, allTrades) }}
+                        onClick={() => setTradeFilter(tradeFilter === t ? null : t)}
+                      >
+                        <span style={{ color: tradeColour(t, allTrades) }}>■</span> {t}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <button
+                  style={{ ...seg(fullScreen), marginLeft: "auto" }}
+                  onClick={() => setFullScreen(!fullScreen)}
+                  title="Expand the canvas (Esc to exit)"
+                >
+                  {fullScreen ? "↙ Exit full screen" : "↗ Full screen"}
+                </button>
+              </div>
+
+              {view === "vertical" ? (
+                <VerticalSection
+                  decks={decks}
+                  rows={visible}
+                  centreOrdinal={deckOrdinal}
+                  selected={selected}
+                  onSelect={setSelected}
+                  toneOf={toneOf}
+                  cascadeEdges={cascadeEdges}
+                  onDeck={setSelectedDeck}
+                />
+              ) : effMode === "drawing" && sheet ? (
+                <SheetView
+                  sheet={sheet}
+                  rows={onDeck}
+                  selected={selected}
+                  onSelect={setSelected}
+                  deckJumps={deckJumps}
+                  onDeckJump={setSelectedDeck}
+                  toneOf={toneOf}
+                  zoom={zoom}
+                  setZoom={setZoom}
+                  pan={pan}
+                  setPan={setPan}
+                  dragging={dragging}
+                  hoverFrame={hoverFrame}
+                  setHoverFrame={setHoverFrame}
+                  cascadeEdges={cascadeEdges}
+                  overlay={overlay}
+                  tall={fullScreen}
+                />
+              ) : (
+                <PlanView
+                  rows={onDeck}
+                  selected={selected}
+                  onSelect={setSelected}
+                  toneOf={toneOf}
+                  zoom={zoom || 1}
+                  setZoom={setZoom}
+                  pan={pan}
+                  setPan={setPan}
+                  dragging={dragging}
+                  hoverFrame={hoverFrame}
+                  setHoverFrame={setHoverFrame}
+                  deckLabel={deckLabel}
+                  cascadeEdges={cascadeEdges}
+                />
+              )}
+
+              {parsedGeometry && (
+                <p style={{ fontSize: 10.5, color: DIM, marginTop: 8 }}>
+                  Positions derived from the placard numbers — this class uses the USN
+                  deck-frame-side scheme. A hull whose register carries authored frame
+                  and side data uses that instead, and says <b>register</b>.
+                </p>
+              )}
+
+              {/* legend — whichever colouring is actually in force */}
+              <div style={{ display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap", fontSize: 11, color: DIM }}>
+                {overlay
+                  ? (["go", "wait", "stop", "none"] as const).map((b) => (
+                      <span key={b} style={{ display: "flex", alignItems: "center", gap: 5 }} title={OVERLAY_STYLE[b].gloss}>
+                        <span style={{ width: 9, height: 9, borderRadius: 2, background: OVERLAY_STYLE[b].fg }} />
+                        {OVERLAY_STYLE[b].label} — {OVERLAY_STYLE[b].gloss}
+                      </span>
+                    ))
+                  : lens === "space"
+                    ? (["ALLOW", "WARN", "SUSPEND", "BLOCK"] as const).map((s) => (
+                        <span key={s} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                          <span style={{ width: 9, height: 9, borderRadius: 2, background: STATE_STYLE[s].fg }} />
+                          {s}
+                        </span>
+                      ))
+                    : allTrades.map((t) => (
+                        <span key={t} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                          <span style={{ width: 9, height: 9, borderRadius: 2, background: tradeColour(t, allTrades) }} />
+                          {t}
+                        </span>
+                      ))}
+              </div>
+            </>
           )}
         </div>
 
         {/* the decision trace — the contract with the safety authority */}
-        <aside style={{ flex: "0 1 380px", minWidth: 320, border: `1px solid ${LINE}`, borderRadius: 8, padding: 14, background: "#121316" }}>
-          <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: DIM }}>
-            Decision trace
-          </div>
-          {!selectedRow && (
-            <p style={{ color: DIM, fontSize: 12.5, marginTop: 8 }}>
-              Select a compartment to see why it is in its current state — every rule that
-              fired, the path the hazard took, and who may clear it.
-            </p>
-          )}
-          {selectedRow && (
-            <>
-              <div style={{ marginTop: 6, display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-                <span style={{ fontFamily: "monospace" }}>{selectedRow.compartment.compartment_no}</span>
-                <span style={{ color: STATE_STYLE[selectedRow.state].fg, fontWeight: 700, fontSize: 12 }}>
-                  {selectedRow.state}
-                </span>
-              </div>
-              <div style={{ fontSize: 12.5, color: DIM }}>{selectedRow.compartment.name}</div>
-              <div style={{ fontSize: 11, color: DIM, marginTop: 2 }}>
-                {selectedRow.compartment.zone} · {selectedRow.compartment.category}
-                {selectedRow.compartment.frame !== null && ` · Fr ${selectedRow.compartment.frame}`}
-                {` · ${selectedRow.compartment.side}`}
-              </div>
-
-              {/* work booked here — what the trade lens is about */}
-              {selectedRow.work_order_codes.length > 0 && (
-                <div style={{ marginTop: 9, paddingTop: 9, borderTop: `1px solid ${LINE}` }}>
-                  <div style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>
-                    Work in this space
-                  </div>
-                  <div style={{ fontSize: 12, marginTop: 3 }}>
-                    {selectedRow.work_order_codes.join(", ")}
-                  </div>
-                  <div style={{ fontSize: 11, color: DIM }}>
-                    {selectedRow.trades.join(" · ")} — {selectedRow.remaining_hours.toLocaleString()} MH remaining
-                  </div>
+        {altitude === "compartment" && !fullScreen && (
+          <aside
+            style={{
+              flex: "0 1 360px",
+              minWidth: 300,
+              border: `1px solid ${LINE}`,
+              borderRadius: 8,
+              padding: 14,
+              background: "#121316",
+            }}
+          >
+            <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: DIM }}>
+              Decision trace
+            </div>
+            {!selectedRow && (
+              <p style={{ color: DIM, fontSize: 12.5, marginTop: 8 }}>
+                Select a compartment to see why it is in its current state — every rule that
+                fired, the path the hazard took, and who may clear it.
+              </p>
+            )}
+            {selectedRow && (
+              <>
+                <div style={{ marginTop: 6, display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontFamily: "monospace" }}>{selectedRow.compartment.compartment_no}</span>
+                  <span style={{ color: STATE_STYLE[selectedRow.state].fg, fontWeight: 700, fontSize: 12 }}>
+                    {selectedRow.state}
+                  </span>
+                  <span
+                    style={{ fontSize: 10, fontWeight: 700, color: OVERLAY_STYLE[overlayBucket(selectedRow)].fg }}
+                    title={OVERLAY_STYLE[overlayBucket(selectedRow)].gloss}
+                  >
+                    {OVERLAY_STYLE[overlayBucket(selectedRow)].label}
+                  </span>
                 </div>
-              )}
+                <div style={{ fontSize: 12.5, color: DIM }}>{selectedRow.compartment.name}</div>
+                <div style={{ fontSize: 11, color: DIM, marginTop: 2 }}>
+                  {selectedRow.compartment.zone} · {selectedRow.compartment.category}
+                  {selectedRow.compartment.frame !== null && ` · Fr ${selectedRow.compartment.frame}`}
+                  {` · ${selectedRow.compartment.side}`}
+                </div>
 
-              {decision?.trace.length === 0 && (
-                <p style={{ color: DIM, fontSize: 12.5, marginTop: 10 }}>
-                  No rule applies here. This is an explicit “nothing restricts this space”,
-                  not an absence of information.
-                </p>
-              )}
-              {decision?.trace.map((step, i) => {
-                const s = STATE_STYLE[step.state];
-                return (
-                  <div key={`${step.rule_code}-${i}`} style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                      <span style={{ fontWeight: 700, color: s.fg, fontSize: 12 }}>{step.state}</span>
-                      <span style={{ fontFamily: "monospace", fontSize: 11 }}>{step.rule_code}</span>
-                      <span style={{ fontSize: 11, color: DIM }}>{step.depth} hop</span>
+                {selectedRow.work_order_codes.length > 0 && (
+                  <div style={{ marginTop: 9, paddingTop: 9, borderTop: `1px solid ${LINE}` }}>
+                    <div style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>
+                      Work in this space
                     </div>
-                    <div style={{ fontSize: 12.5, marginTop: 4 }}>{step.reason}</div>
-                    <div style={{ fontSize: 11, color: DIM, marginTop: 4, fontFamily: "monospace" }}>
-                      {step.path.join(" → ")}
-                    </div>
-                    {step.via.length > 0 && (
-                      <div style={{ fontSize: 11, color: DIM }}>via {step.via.join(", ")}</div>
-                    )}
-                    <div style={{ fontSize: 11, color: DIM, marginTop: 4 }}>
-                      {step.authority}
-                    </div>
+                    <div style={{ fontSize: 12, marginTop: 3 }}>{selectedRow.work_order_codes.join(", ")}</div>
                     <div style={{ fontSize: 11, color: DIM }}>
-                      Cleared by <b style={{ color: "#ccd1da" }}>{step.clearing_authority}</b> · earliest{" "}
-                      {fmtClear(step.earliest_clear)}
-                    </div>
-                    <div style={{ fontSize: 10, color: "#5a6070", marginTop: 3, fontFamily: "monospace" }}>
-                      rule version {step.rule_version}
+                      {selectedRow.trades.join(" · ")} — {selectedRow.remaining_hours.toLocaleString()} MH remaining
                     </div>
                   </div>
-                );
-              })}
-            </>
-          )}
-        </aside>
-      </div>
+                )}
 
-      {/* legend */}
-      <div style={{ display: "flex", gap: 14, marginTop: 12, flexWrap: "wrap", fontSize: 11, color: DIM }}>
-        {lens === "space"
-          ? (["ALLOW", "WARN", "SUSPEND", "BLOCK"] as const).map((s) => (
-              <span key={s} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                <span style={{ width: 9, height: 9, borderRadius: 2, background: STATE_STYLE[s].fg }} />
-                {s}
-              </span>
-            ))
-          : allTrades.map((t) => (
-              <span key={t} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                <span style={{ width: 9, height: 9, borderRadius: 2, background: tradeColour(t, allTrades) }} />
-                {t}
-              </span>
-            ))}
+                {decision?.trace.length === 0 && (
+                  <p style={{ color: DIM, fontSize: 12.5, marginTop: 10 }}>
+                    No rule applies here. This is an explicit “nothing restricts this space”,
+                    not an absence of information.
+                  </p>
+                )}
+                {decision?.trace.map((step, i) => {
+                  const s = STATE_STYLE[step.state];
+                  return (
+                    <div key={`${step.rule_code}-${i}`} style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <span style={{ fontWeight: 700, color: s.fg, fontSize: 12 }}>{step.state}</span>
+                        <span style={{ fontFamily: "monospace", fontSize: 11 }}>{step.rule_code}</span>
+                        <span style={{ fontSize: 11, color: DIM }}>{step.depth} hop</span>
+                      </div>
+                      <div style={{ fontSize: 12.5, marginTop: 4 }}>{step.reason}</div>
+                      <div style={{ fontSize: 11, color: DIM, marginTop: 4, fontFamily: "monospace" }}>
+                        {step.path.join(" → ")}
+                      </div>
+                      {step.via.length > 0 && (
+                        <div style={{ fontSize: 11, color: DIM }}>via {step.via.join(", ")}</div>
+                      )}
+                      <div style={{ fontSize: 11, color: DIM, marginTop: 4 }}>{step.authority}</div>
+                      <div style={{ fontSize: 11, color: DIM }}>
+                        Cleared by <b style={{ color: "#ccd1da" }}>{step.clearing_authority}</b> · earliest{" "}
+                        {fmtClear(step.earliest_clear)}
+                      </div>
+                      <div style={{ fontSize: 10, color: "#5a6070", marginTop: 3, fontFamily: "monospace" }}>
+                        rule version {step.rule_version}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+          </aside>
+        )}
       </div>
-      </>
-      )}
     </div>
   );
 }
+
 
 /**
  * Ship and zone altitudes, with the one sentence that keeps them honest.
@@ -571,13 +695,16 @@ function ReadinessAltitude({
  * labels, and drawing them all would hide the drawing they are annotating.
  */
 function SheetView({
-  sheet, rows, selected, onSelect, toneOf, zoom, setZoom, pan, setPan, dragging,
-  hoverFrame, setHoverFrame, cascadeEdges,
+  sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
+  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, tall,
 }: {
   sheet: DeckSheet;
   rows: DeckStateRow[];
   selected: string | null;
   onSelect: (n: string) => void;
+  /** Compartment → the other deck its cascade reaches, for the jump badge. */
+  deckJumps: Map<string, { deck: string; label: string; up: boolean }>;
+  onDeckJump: (code: string) => void;
   toneOf: (r: DeckStateRow) => { fg: string; bg: string; border: string };
   zoom: number;
   setZoom: (z: number) => void;
@@ -587,8 +714,11 @@ function SheetView({
   hoverFrame: number | null;
   setHoverFrame: (f: number | null) => void;
   cascadeEdges: [string, string][];
+  overlay: boolean;
+  tall: boolean;
 }) {
   const [hovered, setHovered] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState<string | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const [boxW, setBoxW] = useState(1000);
 
@@ -607,13 +737,7 @@ function SheetView({
 
   const cal = sheet.calibration;
   const { width: W, height: H } = sheet;
-
-  // These plates are about nine times wider than they are tall. Fitting one to
-  // the panel's width therefore renders it as a ~140px ribbon of a 7000px
-  // drawing — every line is there and none of it is readable, which looks
-  // exactly like a missing image. So the default is NOT fit-to-width: it is the
-  // zoom at which the plate fills the viewport's height, which is the scale a
-  // deck plan is meant to be read at. Fit-the-whole-ship is one click away.
+  const maxH = tall ? 820 : SHEET_BOX_H;
   const naturalH = Math.max(1, boxW * (H / W));
   const fit = boxW / W;
 
@@ -629,54 +753,53 @@ function SheetView({
     }
   }
 
-  // Two things have to be true of the opening view, and they pull against each
-  // other: the drawing has to be readable, and this deck's markers have to be on
-  // screen. Take whichever constraint binds harder, then never go below the
-  // point where the plate's lettering can be read — if a deck's work is spread
-  // too far along the hull to fit at that scale, the header says how many are
-  // off-screen rather than leaving the planner to wonder.
+  // These plates are about nine times wider than they are tall, so fitting one
+  // to the panel's width renders it as a ~140px ribbon of a 7000px drawing —
+  // every line present and none of it readable, which looks exactly like a
+  // missing image. The default is therefore not fit-to-width. It satisfies two
+  // constraints instead: the plate has to be readable, and this deck's markers
+  // have to be on screen. Whichever binds harder wins, floored at the scale
+  // where the plate's own lettering still reads.
   const markerXs = [...placed.values()].map((p) => p.x);
   const span = markerXs.length > 1 ? Math.max(...markerXs) - Math.min(...markerXs) : 0;
-  const heightZoom = SHEET_BOX_H / naturalH;
+  const heightZoom = maxH / naturalH;
   const spanZoom = span > 0 ? W / (span * 1.18) : heightZoom;
   const readableFloor = READABLE_SCALE / fit;
   const framedZoom = Math.max(
     1,
-    Math.min(
-      MAX_SHEET_ZOOM,
-      Math.max(readableFloor, Math.floor(Math.min(heightZoom, spanZoom))),
-    ),
+    Math.min(MAX_SHEET_ZOOM, Math.max(readableFloor, Math.floor(Math.min(heightZoom, spanZoom)))),
   );
-  // `zoom === 0` means "not framed yet" — the caller has not chosen a zoom, so
-  // use the framed default rather than making the first paint the bad one.
+  /** Zero means "not framed yet" — resolve it to the readable default. */
   const z = zoom || framedZoom;
 
-  const boxH = Math.round(Math.min(SHEET_BOX_H, Math.max(150, naturalH * z)));
+  const boxH = Math.round(Math.min(maxH, Math.max(150, naturalH * z)));
   const scale = fit * z;
   const vw = boxW / scale;
   const vh = boxH / scale;
   /** Sheet units per screen pixel — markers multiply by this to stay put. */
   const u = 1 / scale;
 
-  // Opening zoomed in means the window has to open somewhere. Centre it on the
-  // work: the selected compartment if there is one, otherwise the middle of the
-  // compartments on this deck. Landing on an empty stretch of hull and making
-  // the planner hunt for their own markers is the whole problem restated.
+  // Opening zoomed in means opening somewhere. Centre on the work: the selected
+  // compartment, else the middle of this deck's markers. Landing on an empty
+  // stretch of hull and making the planner hunt for their own markers restates
+  // the problem the framing exists to solve.
   const focus = (() => {
+    if (markerXs.length === 0) return W / 2;
+    const middle = (Math.min(...markerXs) + Math.max(...markerXs)) / 2;
     const chosen = selected ? placed.get(selected) : undefined;
-    if (chosen) return chosen.x;
-    const xs = [...placed.values()].map((p) => p.x);
-    if (xs.length === 0) return W / 2;
-    return (Math.min(...xs) + Math.max(...xs)) / 2;
+    // Centre on the span, not on the selection — but re-centre on the selection
+    // if the span-centred window would not contain it. Always centring on the
+    // selection pushed the other markers off the plate and lit the "3 markers
+    // off-screen" warning on a view that had nothing wrong with it.
+    if (chosen && Math.abs(chosen.x - middle) > (boxW / (fit * z)) / 2 - 60) return chosen.x;
+    return middle;
   })();
 
   // Clamp the window to the plate, but centre instead of clamping on any axis
   // where the window is larger than the plate — otherwise the drawing sticks to
-  // the top-left corner with the slack all on one side.
+  // a corner with the slack all on one side.
   const axis = (want: number, extent: number, window: number) =>
-    window >= extent
-      ? extent / 2
-      : Math.min(Math.max(want, window / 2), extent - window / 2);
+    window >= extent ? extent / 2 : Math.min(Math.max(want, window / 2), extent - window / 2);
   const centre = {
     x: axis(focus + pan.x, W, vw),
     y: axis((cal?.centrelineY ?? H / 2) + pan.y, H, vh),
@@ -685,6 +808,19 @@ function SheetView({
   if (!cal) return null;
 
   const showLabels = scale >= READABLE_SCALE;
+
+  // Pins sit at their true frame and side; their LABELS get fanned. Same lane
+  // packing as the schematic, but measured in the only unit that decides a label
+  // collision here — how many frames an 80px label covers at the current scale,
+  // which shrinks as you zoom in and the labels stop colliding on their own.
+  const labelLanes = packLanes(
+    rows.map((r) => ({
+      id: r.compartment.compartment_no,
+      frame: r.compartment.frame,
+      side: r.compartment.side,
+    })),
+    88 / Math.max(0.001, scale * cal.pxPerFrame),
+  );
   const offScreen = [...placed.values()].filter(
     (m) =>
       m.x < centre.x - vw / 2 ||
@@ -692,6 +828,8 @@ function SheetView({
       m.y < centre.y - vh / 2 ||
       m.y > centre.y + vh / 2,
   ).length;
+  const ready = loaded === sheet.file;
+  const hoverRow = rows.find((r) => r.compartment.compartment_no === hovered);
 
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
@@ -700,35 +838,51 @@ function SheetView({
         <span style={{ fontSize: 10.5, color: DIM }}>bow right · drag to pan</span>
         {!showLabels && <span style={{ fontSize: 10.5, color: DIM }}>· zoom in for labels</span>}
         {offScreen > 0 && (
-          <span style={{ fontSize: 10.5, color: C.danger }} title="Pan, or use Whole ship">
+          <span style={{ fontSize: 10.5, color: C.danger }} title="Pan, or use Fit width">
             · {offScreen} marker{offScreen === 1 ? "" : "s"} off-screen
           </span>
         )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 5, alignItems: "center" }}>
-          <span style={{ fontSize: 10.5, color: DIM, fontVariantNumeric: "tabular-nums", minWidth: 62 }}>
+          <span style={{ fontSize: 10.5, color: DIM, fontVariantNumeric: "tabular-nums", minWidth: 58 }}>
             {hoverFrame !== null ? `Fr ${hoverFrame}` : "—"}
           </span>
+          {/* The prototype's three presets. A percentage rather than "4×",
+              because on a scanned plate what matters is how big it is relative to
+              the original sheet, not relative to fit-to-width. */}
+          <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} style={presetBtn} title="The plate's whole length — the overview, not a readable scale">
+            Fit width
+          </button>
+          <button onClick={() => { setZoom(0); setPan({ x: 0, y: 0 }); }} style={presetBtn} title="Readable, framed on this deck's work">
+            Fit deck
+          </button>
           <button
-            onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
-            style={{ ...zoomBtn, width: "auto", padding: "0 7px" }}
-            title="Fit the plate's whole length — the overview, not a readable scale"
+            onClick={() => { setZoom(Math.min(MAX_SHEET_ZOOM, Math.max(1, Math.round(1 / fit)))); setPan({ x: 0, y: 0 }); }}
+            style={presetBtn}
+            title="One screen pixel per pixel of the scanned plate"
           >
-            Whole ship
+            100%
           </button>
           <button onClick={() => setZoom(Math.max(1, z - 1))} style={zoomBtn}>−</button>
-          <span style={{ fontSize: 10.5, color: DIM, minWidth: 34, textAlign: "center" }}>{z.toFixed(0)}×</span>
+          <span style={{ fontSize: 10.5, color: DIM, minWidth: 40, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
+            {Math.round(scale * 100)}%
+          </span>
           <button onClick={() => setZoom(Math.min(MAX_SHEET_ZOOM, z + 1))} style={zoomBtn}>+</button>
-          <button
-            onClick={() => { setZoom(0); setPan({ x: 0, y: 0 }); }}
-            style={zoomBtn}
-            title="Back to the readable default, centred on this deck's work"
-          >
-            Reset
-          </button>
         </span>
       </div>
 
-      <div ref={boxRef} style={{ height: boxH, background: "#f7f7f4" }}>
+      <div ref={boxRef} style={{ height: boxH, background: "#f7f7f4", position: "relative" }}>
+        {/* Said out loud. A 900KB plate over a slow link otherwise shows an empty
+            light panel, which is indistinguishable from a deck with no drawing. */}
+        {!ready && (
+          <div
+            style={{
+              position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+              background: "#0e0f13", color: DIM, fontSize: 12, zIndex: 2,
+            }}
+          >
+            Loading {sheet.label} plate…
+          </div>
+        )}
         <svg
           viewBox={`${centre.x - vw / 2} ${centre.y - vh / 2} ${vw} ${vh}`}
           style={{ width: "100%", height: boxH, display: "block", cursor: dragging.current ? "grabbing" : "grab", touchAction: "none" }}
@@ -737,7 +891,7 @@ function SheetView({
             (e.target as Element).setPointerCapture?.(e.pointerId);
           }}
           onPointerUp={() => { dragging.current = null; }}
-          onPointerLeave={() => { dragging.current = null; setHoverFrame(null); }}
+          onPointerLeave={() => { dragging.current = null; setHoverFrame(null); setHovered(null); }}
           onPointerMove={(e) => {
             const box = e.currentTarget.getBoundingClientRect();
             setHoverFrame(sheetFrame(cal, centre.x - vw / 2 + (e.clientX - box.left) * u));
@@ -751,7 +905,11 @@ function SheetView({
             }
           }}
         >
-          <image href={`decks/${sheet.file}`} x={0} y={0} width={W} height={H} />
+          <image
+            href={`decks/${sheet.file}`}
+            x={0} y={0} width={W} height={H}
+            onLoad={() => setLoaded(sheet.file)}
+          />
 
           {/* The hazard's path across this deck, drawn on the drawing itself. */}
           {cascadeEdges.map(([from, to]) => {
@@ -770,40 +928,88 @@ function SheetView({
           {rows.map((r) => {
             const at = placed.get(r.compartment.compartment_no);
             if (!at) return null;
+            const no = r.compartment.compartment_no;
             const tone = toneOf(r);
-            const isSel = r.compartment.compartment_no === selected;
-            const isHot = r.compartment.compartment_no === hovered;
+            const isSel = no === selected;
+            const isHot = no === hovered;
             const label = isSel || isHot || showLabels;
+            const jump = deckJumps.get(no);
+            // A cross drawn over the pin for a space that is shut outright. The
+            // prototype uses it for off-limits, and it survives being colour-blind
+            // or looking at a printout in the sun, which a red dot does not.
+            const shut = r.state === "BLOCK";
             return (
               <g
-                key={r.compartment.compartment_no}
-                onClick={() => onSelect(r.compartment.compartment_no)}
-                onPointerEnter={() => setHovered(r.compartment.compartment_no)}
-                onPointerLeave={() => setHovered(null)}
+                key={no}
+                onClick={() => onSelect(no)}
+                onPointerEnter={() => setHovered(no)}
                 style={{ cursor: "pointer" }}
               >
                 {/* A tick down to the keel line: on a busy plate the pin alone
                     does not make its frame station obvious. */}
-                <line
-                  x1={at.x} y1={at.y} x2={at.x} y2={cal.centrelineY}
-                  stroke={tone.fg} strokeWidth={1.5 * u} opacity={0.6}
-                />
+                <line x1={at.x} y1={at.y} x2={at.x} y2={cal.centrelineY} stroke={tone.fg} strokeWidth={1.5 * u} opacity={0.6} />
                 <circle
                   cx={at.x} cy={at.y} r={(isSel ? 9 : 6.5) * u}
                   fill={tone.fg} fillOpacity={0.9}
                   stroke={isSel ? "#ffffff" : "#101216"} strokeWidth={2 * u}
                 />
-                {label && (
-                  <g>
-                    <rect
-                      x={at.x - 34 * u} y={at.y - 26 * u} width={68 * u} height={15 * u} rx={3 * u}
-                      fill="#0b0c0e" fillOpacity={0.9} stroke={tone.fg} strokeWidth={1 * u}
+                {shut && (
+                  <g stroke={OVERLAY_STYLE.stop.fg} strokeWidth={2.6 * u} strokeLinecap="round">
+                    <line x1={at.x - 8 * u} y1={at.y - 8 * u} x2={at.x + 8 * u} y2={at.y + 8 * u} />
+                    <line x1={at.x + 8 * u} y1={at.y - 8 * u} x2={at.x - 8 * u} y2={at.y + 8 * u} />
+                  </g>
+                )}
+                {label && (() => {
+                  // Fanned away from the pin, upward for port and downward for
+                  // starboard, so a label never crosses the keel line into the
+                  // other half of the ship.
+                  const lane = labelLanes.get(no) ?? 0;
+                  const dir = r.compartment.side === "starboard" ? 1 : -1;
+                  const ly = at.y + dir * (24 + lane * 17) * u;
+                  return (
+                    <g>
+                      {lane > 0 && (
+                        <line
+                          x1={at.x} y1={at.y + dir * 7 * u} x2={at.x} y2={ly - dir * 7 * u}
+                          stroke={tone.fg} strokeWidth={1 * u} opacity={0.55}
+                        />
+                      )}
+                      <rect
+                        x={at.x - 44 * u} y={ly - 7.5 * u} width={88 * u} height={15 * u} rx={3 * u}
+                        fill="#0b0c0e" fillOpacity={0.92} stroke={tone.fg} strokeWidth={1 * u}
+                      />
+                      {r.rules_fired.length > 0 && (
+                        <text x={at.x - 38 * u} y={ly + 3.5 * u} fill={tone.fg} fontSize={9 * u}>
+                          ⚑
+                        </text>
+                      )}
+                      <text
+                        x={at.x + (r.rules_fired.length > 0 ? 5 : 0) * u} y={ly + 3.5 * u}
+                        fill={tone.fg} fontSize={9.5 * u} textAnchor="middle" fontFamily="monospace"
+                      >
+                        {no}
+                      </text>
+                    </g>
+                  );
+                })()}
+                {/* Follow the cascade to the deck it reached. Without this the
+                    only way to trace a penetration is to remember which deck to
+                    click next, and the whole point is that it is not obvious. */}
+                {jump && (isSel || isHot) && (
+                  <g
+                    onClick={(e) => { e.stopPropagation(); onDeckJump(jump.deck); }}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <title>{`Follow the cascade to ${jump.label}`}</title>
+                    <circle
+                      cx={at.x + 26 * u} cy={at.y - 2 * u} r={8 * u}
+                      fill="#0b0c0e" stroke={STATE_STYLE.SUSPEND.fg} strokeWidth={1.6 * u}
                     />
                     <text
-                      x={at.x} y={at.y - 15 * u} fill={tone.fg} fontSize={10 * u}
-                      textAnchor="middle" fontFamily="monospace"
+                      x={at.x + 26 * u} y={at.y + 2 * u} fill={STATE_STYLE.SUSPEND.fg}
+                      fontSize={10 * u} textAnchor="middle"
                     >
-                      {r.compartment.compartment_no}
+                      {jump.up ? "▲" : "▼"}
                     </text>
                   </g>
                 )}
@@ -811,6 +1017,39 @@ function SheetView({
             );
           })}
         </svg>
+
+        {/* Hover card. Kept in HTML rather than SVG so its text does not scale
+            with the zoom and so it can never be clipped by the viewBox. */}
+        {hoverRow && (
+          <div
+            style={{
+              position: "absolute", left: 10, bottom: 10, zIndex: 3, pointerEvents: "none",
+              background: "#0b0c0eF2", border: `1px solid ${toneOf(hoverRow).border}`,
+              borderRadius: 6, padding: "7px 10px", maxWidth: 340,
+            }}
+          >
+            <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "monospace", fontSize: 12 }}>{hoverRow.compartment.compartment_no}</span>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: STATE_STYLE[hoverRow.state].fg }}>
+                {hoverRow.state}
+              </span>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: OVERLAY_STYLE[overlayBucket(hoverRow)].fg }}>
+                {OVERLAY_STYLE[overlayBucket(hoverRow)].label}
+              </span>
+            </div>
+            <div style={{ fontSize: 11.5, color: "#ccd1da" }}>{hoverRow.compartment.name}</div>
+            <div style={{ fontSize: 10.5, color: DIM }}>
+              {hoverRow.compartment.zone} · Fr {hoverRow.compartment.frame} · {hoverRow.compartment.side}
+              {hoverRow.remaining_hours > 0 && ` · ${mh(hoverRow.remaining_hours)} left`}
+            </div>
+            {hoverRow.readiness === "held" && (
+              <div style={{ fontSize: 10.5, color: DIM, marginTop: 2 }}>
+                cleared by <b style={{ color: "#ccd1da" }}>{hoverRow.clearing_authority || "unnamed authority"}</b> ·{" "}
+                {fmtClear(hoverRow.earliest_clear)}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <p style={{ fontSize: 10.5, color: DIM, padding: "7px 11px", margin: 0, borderTop: `1px solid ${LINE}` }}>
@@ -821,10 +1060,17 @@ function SheetView({
         <b>The plate is real; the compartment register pinned to it is notional demo
         data</b>, so a pin marks its frame station, not a space you will find under
         that number on this drawing.
+        {overlay && " Readiness overlay is on — colour is GO / WAIT / STOP, not authorization state."}
       </p>
     </div>
   );
 }
+
+const presetBtn: React.CSSProperties = {
+  height: 22, borderRadius: 5, cursor: "pointer", padding: "0 7px",
+  background: "transparent", color: C.dim, border: `1px solid ${C.line}`,
+  font: "inherit", fontSize: 10.5, lineHeight: 1,
+};
 
 /** The deck plan: compartments placed by frame and side, pannable and zoomable. */
 function PlanView({
@@ -1016,7 +1262,7 @@ const zoomBtn: React.CSSProperties = {
  * legible, and it is why the register keeps an ordered deck ordinal.
  */
 function VerticalSection({
-  decks, rows, centreOrdinal, selected, onSelect, toneOf, cascadeEdges,
+  decks, rows, centreOrdinal, selected, onSelect, toneOf, cascadeEdges, onDeck,
 }: {
   decks: Deck[];
   rows: DeckStateRow[];
@@ -1025,11 +1271,17 @@ function VerticalSection({
   onSelect: (n: string) => void;
   toneOf: (r: DeckStateRow) => { fg: string; bg: string; border: string };
   cascadeEdges: [string, string][];
+  /** Moves the three-deck window, from the stack ribbon. */
+  onDeck: (code: string) => void;
 }) {
   // Above is a SMALLER ordinal: the register numbers decks ascending downward.
-  const band = decks
-    .filter((d) => Math.abs(d.ordinal - centreOrdinal) <= 1)
-    .sort((a, b) => a.ordinal - b.ordinal);
+  const ordered = [...decks].sort((a, b) => a.ordinal - b.ordinal);
+  const band = ordered.filter((d) => Math.abs(d.ordinal - centreOrdinal) <= 1);
+  const centreIdx = ordered.findIndex((d) => d.ordinal === centreOrdinal);
+  const shift = (delta: number) => {
+    const next = ordered[Math.min(Math.max(centreIdx + delta, 0), ordered.length - 1)];
+    if (next) onDeck(next.code);
+  };
 
   const W = 1000;
   const MARKER_W = 88;
@@ -1080,13 +1332,52 @@ function VerticalSection({
 
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
-      <div style={{ padding: "7px 11px", borderBottom: `1px solid ${LINE}`, fontSize: 11, fontWeight: 600 }}>
-        Vertical section — deck above, selected, below
-        <span style={{ color: DIM, fontWeight: 400, marginLeft: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, fontSize: 11, fontWeight: 600, flexWrap: "wrap" }}>
+        <span>Vertical trace — deck above, selected, below</span>
+        <span style={{ color: DIM, fontWeight: 400 }}>
           a deck penetration carries heat down and vapour up; this is the view that shows it
         </span>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
+          <button onClick={() => shift(-1)} style={zoomBtn} title="Shift the window up a deck" disabled={centreIdx <= 0}>▲</button>
+          <button onClick={() => shift(1)} style={zoomBtn} title="Shift the window down a deck" disabled={centreIdx >= ordered.length - 1}>▼</button>
+        </span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block" }}>
+      <div style={{ display: "flex", alignItems: "stretch" }}>
+        {/* The stack ribbon. Twelve decks is too many for the eye to hold, and
+            the trace only ever shows three of them, so the ribbon is what says
+            where those three sit in the ship. */}
+        <div style={{ flex: "0 0 96px", borderRight: `1px solid ${LINE}`, padding: "6px 0" }}>
+          <div style={{ fontSize: 9, letterSpacing: 0.7, textTransform: "uppercase", color: DIM, padding: "0 8px 5px" }}>
+            Stack
+          </div>
+          {ordered.map((d) => {
+            const inBand = Math.abs(d.ordinal - centreOrdinal) <= 1;
+            const isCentre = d.ordinal === centreOrdinal;
+            const held = rows.filter((r) => r.compartment.deck_code === d.code && r.readiness === "held").length;
+            return (
+              <button
+                key={d.code}
+                onClick={() => onDeck(d.code)}
+                title={d.label}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5, width: "100%", textAlign: "left",
+                  font: "inherit", fontSize: 10, cursor: "pointer", padding: "3px 8px",
+                  background: isCentre ? "#20222b" : "transparent",
+                  color: inBand ? TEXT : "#5a6070",
+                  border: "none", borderLeft: `3px solid ${isCentre ? C.accent : (inBand ? "#353842" : "transparent")}`,
+                }}
+              >
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {d.label}
+                </span>
+                {held > 0 && (
+                  <span style={{ width: 6, height: 6, borderRadius: 3, background: READINESS_STYLE.held.fg }} />
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block" }}>
         {bands.map(({ deck, onThis, levels, top, height }) => {
           const isCentre = deck.ordinal === centreOrdinal;
           return (
@@ -1137,7 +1428,8 @@ function VerticalSection({
             />
           );
         })}
-      </svg>
+        </svg>
+      </div>
       {band.length < 2 && (
         <p style={{ color: DIM, fontSize: 12.5, padding: "10px 12px", margin: 0 }}>
           Only one deck in range — the register needs a deck above or below this one

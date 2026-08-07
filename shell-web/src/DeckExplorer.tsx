@@ -12,6 +12,7 @@ import {
 } from "./api";
 import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
+import type { Altitude as ChromeAltitude } from "./Chrome";
 import { framesPerSpan, frameToX, layoutPlan, packLanes, xToFrame } from "./deckGeometry";
 import {
   halfBeamAt,
@@ -35,14 +36,14 @@ type View = "single" | "vertical";
 /** How it is drawn: the real general-arrangement plate, or a schematic strip. */
 type Mode = "drawing" | "schematic";
 /**
- * How high above the hull you are reading from.
+ * How high above the hull you are reading from — the prototype's organising idea,
+ * and the reason the same facts serve three roles: a foreman works one deck, a
+ * zone superintendent works a zone, a project superintendent works the hull.
  *
- * The prototype's organising idea, and the reason the same facts serve three
- * roles: a foreman works one deck, a zone superintendent works a zone, a project
- * superintendent works the hull. The altitude is the control; the facts do not
- * change with it.
+ * Defined in `Chrome` because the *persona* decides where you land, so the shell
+ * owns the value and this module is a controlled component over it.
  */
-type Altitude = "ship" | "zone" | "compartment";
+type Altitude = ChromeAltitude;
 
 /** Viewport height for a plate, in CSS px. */
 const SHEET_BOX_H = 520;
@@ -69,10 +70,20 @@ export default function DeckExplorer({
   identity,
   vesselId,
   hullLabel,
+  altitude,
+  onAltitude,
+  focusCompartment,
+  onFocused,
 }: {
   identity: Identity;
   vesselId: string;
   hullLabel: string;
+  /** Controlled by the shell, because the persona decides where you land. */
+  altitude: Altitude;
+  onAltitude: (a: Altitude) => void;
+  /** A compartment the chrome asked us to open — from search or an alert. */
+  focusCompartment: string | null;
+  onFocused: () => void;
 }) {
   const [decks, setDecks] = useState<Deck[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
@@ -82,7 +93,6 @@ export default function DeckExplorer({
   const [decision, setDecision] = useState<Decision | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [altitude, setAltitude] = useState<Altitude>("compartment");
   const [zoneFilter, setZoneFilter] = useState<string | null>(null);
   const [lens, setLens] = useState<Lens>("space");
   // Two independent axes, as in the prototype. What you are looking at (one deck
@@ -131,6 +141,20 @@ export default function DeckExplorer({
       .then((r) => setDecision(r.decision))
       .catch(() => setDecision(null));
   }, [identity, vesselId, selected]);
+
+  // A compartment handed in by the chrome — the global search or an alert. Doing
+  // this here rather than in the shell keeps one place that knows a compartment's
+  // deck, and clears the request so re-picking the same space works.
+  useEffect(() => {
+    if (!focusCompartment) return;
+    const row = rows.find((r) => r.compartment.compartment_no === focusCompartment);
+    if (!row) return;
+    setSelectedDeck(row.compartment.deck_code);
+    setSelected(focusCompartment);
+    setZoneFilter(null);
+    onAltitude("compartment");
+    onFocused();
+  }, [focusCompartment, rows, onAltitude, onFocused]);
 
   // Esc leaves full screen. Expected of anything that takes over the viewport,
   // and the only way out if the toggle scrolls off.
@@ -288,7 +312,7 @@ export default function DeckExplorer({
       // would read out and what a keyboard user would have to search for.
       aria-label={`${label} altitude — ${sub}`}
       style={{ ...seg(altitude === id), textAlign: "left", padding: "4px 10px" }}
-      onClick={() => setAltitude(id)}
+      onClick={() => onAltitude(id)}
     >
       <div style={{ fontSize: 11.5, fontWeight: altitude === id ? 600 : 400 }}>{label}</div>
       <div style={{ fontSize: 9.5, color: altitude === id ? DIM : "#5a6070" }}>{sub}</div>
@@ -299,7 +323,7 @@ export default function DeckExplorer({
     if (d.zone) setZoneFilter(d.zone);
     if (d.deck) setSelectedDeck(d.deck);
     if (d.compartment) setSelected(d.compartment);
-    setAltitude("compartment");
+    onAltitude("compartment");
   };
 
   return (
@@ -378,7 +402,7 @@ export default function DeckExplorer({
             zoneFilter={zoneFilter}
             onDeck={(code) => {
               setSelectedDeck(code);
-              setAltitude("compartment");
+              onAltitude("compartment");
             }}
             onZone={(z) => setZoneFilter(zoneFilter === z ? null : z)}
           />

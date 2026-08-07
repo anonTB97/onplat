@@ -3,11 +3,14 @@ import {
   compartmentState,
   deckStates,
   listDecks,
+  readiness,
   type Deck,
   type DeckStateRow,
   type Decision,
   type Identity,
+  type Rollup,
 } from "./api";
+import { ShipBoard, ZoneBoard, type Drill } from "./ReadinessBoards";
 import { framesPerSpan, frameToX, layoutPlan, packLanes, xToFrame } from "./deckGeometry";
 import {
   halfBeamAt,
@@ -28,6 +31,15 @@ const TEXT = C.text;
 type Lens = "space" | "trade";
 /** The real drawing, the schematic strip, or the three-deck vertical section. */
 type View = "sheet" | "plan" | "vertical";
+/**
+ * How high above the hull you are reading from.
+ *
+ * The prototype's organising idea, and the reason the same facts serve three
+ * roles: a foreman works one deck, a zone superintendent works a zone, a project
+ * superintendent works the hull. The altitude is the control; the facts do not
+ * change with it.
+ */
+type Altitude = "ship" | "zone" | "compartment";
 
 // A stable colour per trade, so a trade keeps its colour across decks.
 const TRADE_COLOURS = ["#3D6BFF", "#22c55e", "#f59e0b", "#c4b5fd", "#f472b6", "#2dd4bf"];
@@ -52,7 +64,11 @@ export default function DeckExplorer({
   const [decision, setDecision] = useState<Decision | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [rollup, setRollup] = useState<Rollup | null>(null);
+
   // Prototype controls.
+  const [altitude, setAltitude] = useState<Altitude>("compartment");
+  const [zoneFilter, setZoneFilter] = useState<string | null>(null);
   const [lens, setLens] = useState<Lens>("space");
   const [view, setView] = useState<View>("sheet");
   const [restrictedOnly, setRestrictedOnly] = useState(false);
@@ -66,15 +82,21 @@ export default function DeckExplorer({
     setError(null);
     setSelected(null);
     setDecision(null);
-    Promise.all([listDecks(identity, vesselId), deckStates(identity, vesselId)])
-      .then(([d, r]) => {
+    Promise.all([
+      listDecks(identity, vesselId),
+      deckStates(identity, vesselId),
+      readiness(identity, vesselId),
+    ])
+      .then(([d, r, roll]) => {
         setDecks(d);
         setRows(r);
+        setRollup(roll);
         setSelectedDeck(d[0]?.code ?? null);
       })
       .catch((e: unknown) => {
         setDecks([]);
         setRows([]);
+        setRollup(null);
         setError(String(e));
       });
   }, [identity, vesselId]);
@@ -120,9 +142,10 @@ export default function DeckExplorer({
       rows.filter((r) => {
         if (restrictedOnly && r.state === "ALLOW") return false;
         if (tradeFilter && !r.trades.includes(tradeFilter)) return false;
+        if (zoneFilter && r.compartment.zone !== zoneFilter) return false;
         return true;
       }),
-    [rows, restrictedOnly, tradeFilter],
+    [rows, restrictedOnly, tradeFilter, zoneFilter],
   );
 
   const onDeck = useMemo(
@@ -186,8 +209,40 @@ export default function DeckExplorer({
         restricted by a live hazard.
       </p>
 
-      {/* controls: lens · view · filters — the prototype's chrome */}
+      {/* altitude first: it decides what the rest of the chrome even means */}
       <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>Altitude</span>
+          {(
+            [
+              ["ship", "Ship", "Leadership board — the hull on one screen"],
+              ["zone", "Zone", "Section — zone superintendent"],
+              ["compartment", "Compartment", "Deck plan — foreman"],
+            ] as const
+          ).map(([id, label, title]) => (
+            <button key={id} style={seg(altitude === id)} onClick={() => setAltitude(id)} title={title}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {zoneFilter && (
+          <button
+            style={{ ...seg(true), borderColor: C.accent }}
+            onClick={() => setZoneFilter(null)}
+            title="Clear the zone filter"
+          >
+            Zone {zoneFilter} ✕
+          </button>
+        )}
+      </div>
+
+      {/* controls: lens · view · filters — the prototype's chrome */}
+      <div
+        style={{
+          display: altitude === "compartment" ? "flex" : "none",
+          gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 12,
+        }}
+      >
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>Lens</span>
           <button style={seg(lens === "space")} onClick={() => setLens("space")} title="Show me my zone">
@@ -236,6 +291,27 @@ export default function DeckExplorer({
         )}
       </div>
 
+      {/* The upper two altitudes. A click on either drills down and carries its
+          context with it — the zone it came from, the deck, the compartment — so
+          the space the board named worst is the space that opens. */}
+      {altitude !== "compartment" &&
+        (rollup ? (
+          <ReadinessAltitude
+            altitude={altitude}
+            rollup={rollup}
+            onDrill={(d: Drill) => {
+              if (d.zone) setZoneFilter(d.zone);
+              if (d.deck) setSelectedDeck(d.deck);
+              if (d.compartment) setSelected(d.compartment);
+              setAltitude("compartment");
+            }}
+          />
+        ) : (
+          <p style={{ color: DIM, fontSize: 12.5 }}>Reading the hull…</p>
+        ))}
+
+      {altitude !== "compartment" ? null : (
+      <>
       {/* deck rail — ordered downward, which is what makes "directly above" real */}
       <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
         {decks.map((d) => {
@@ -419,6 +495,45 @@ export default function DeckExplorer({
               </span>
             ))}
       </div>
+      </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ship and zone altitudes, with the one sentence that keeps them honest.
+ *
+ * Readiness is a different question from authorization — a suspended space with
+ * no work booked in it costs nothing today — and these boards count hours, so
+ * the distinction is stated where it is being relied on rather than left for a
+ * reader to infer from a colour.
+ */
+function ReadinessAltitude({
+  altitude,
+  rollup,
+  onDrill,
+}: {
+  altitude: "ship" | "zone";
+  rollup: Rollup;
+  onDrill: (d: Drill) => void;
+}) {
+  return (
+    <div>
+      <p style={{ color: DIM, fontSize: 11.5, margin: "0 0 12px", maxWidth: 800 }}>
+        {altitude === "ship"
+          ? "Every space on the hull, joined to the work booked in it."
+          : "Zones worst first, by the man-hours each is holding."}{" "}
+        <b style={{ color: "#ccd1da" }}>Held</b> means work is booked and the engine
+        refuses it — the only category costing the availability today. A closed space
+        with nothing booked in it is <b style={{ color: "#ccd1da" }}>latent</b>, not held:
+        it costs nothing now, and it is somewhere you must not plan into.
+      </p>
+      {altitude === "ship" ? (
+        <ShipBoard rollup={rollup} onDrill={onDrill} />
+      ) : (
+        <ZoneBoard rollup={rollup} onDrill={onDrill} />
+      )}
     </div>
   );
 }

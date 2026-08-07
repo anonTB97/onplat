@@ -82,6 +82,67 @@ export interface DeckStateRow {
   earliest_clear: number | null;
 }
 
+// Readiness is not authorization. The engine says whether work MAY proceed;
+// readiness says whether anyone is actually held up — which needs the hours
+// booked in the space as well. See wadl-plan's readiness module.
+export type ReadinessState = "go" | "held" | "idle" | "latent";
+
+export interface Tally {
+  spaces: number;
+  go: number;
+  held: number;
+  idle: number;
+  latent: number;
+  held_hours: number;
+  workable_hours: number;
+}
+
+export interface Holder {
+  authority: string;
+  spaces: number;
+  hours: number;
+}
+
+export interface HeldSpace {
+  compartment_no: string;
+  zone: string;
+  deck_code: string;
+  hours: number;
+  /** Hours elsewhere this hold strands. Exact per space; never summed. */
+  stranded_hours: number;
+  trades: string[];
+  clearing_authority: string;
+}
+
+export interface ReadinessGroup {
+  key: string;
+  tally: Tally;
+  holders: Holder[];
+  worst_spaces: HeldSpace[];
+}
+
+export interface Rollup {
+  ship: ReadinessGroup;
+  zones: ReadinessGroup[];
+  decks: ReadinessGroup[];
+  /** Outstanding hours naming a compartment the register does not contain. */
+  unattributed_hours: number;
+}
+
+export async function readiness(id: Identity, vesselId: string): Promise<Rollup> {
+  const res = await fetch(`/api/vessels/${vesselId}/readiness`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`readiness → ${res.status}`);
+  return (await res.json()) as Rollup;
+}
+
+/** The worst thing true of a tally — matches `Tally::worst` in wadl-plan. */
+export function worstOf(t: Tally): ReadinessState {
+  if (t.held > 0) return "held";
+  if (t.go > 0) return "go";
+  if (t.idle > 0) return "idle";
+  return "latent";
+}
+
 export interface WorkOrder {
   work_order_id: string;
   code: string;
@@ -100,6 +161,8 @@ export interface PackageSummary {
   code: string;
   name: string;
   system: string;
+  /** Lead trade. A distributed package is a work order, so it has one. */
+  trade: string;
   segment_count: number;
   compartment_count: number;
   budget_hours: number;

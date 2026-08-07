@@ -8,8 +8,10 @@ use uuid::Uuid;
 
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::VesselId;
+use wadl_domain::units::ManHours;
 use wadl_engine::{evaluate, Decision, EvaluationRequest};
 use wadl_plan::governing_constraint;
+use wadl_plan::readiness::{roll_up, SpaceReadiness};
 
 use crate::auth::Caller;
 use crate::error::ApiError;
@@ -156,6 +158,117 @@ pub(crate) async fn deck_states(
         })
         .collect();
     Ok(Json(json!(rows)))
+}
+
+/// The hull rolled up to ship, zone and deck — the Deck Explorer's altitudes.
+///
+/// The rollup arithmetic is [`wadl_plan::readiness`], not this handler. That
+/// matters: "620 man-hours are held behind the marine chemist" is a number that
+/// re-sequences an availability, and it is property-tested in a pure crate
+/// rather than assembled here where nothing could check it adds up.
+///
+/// Authorization still comes only from the engine. This endpoint joins the
+/// engine's decision to the hours booked in each space — which is a different
+/// question (*is anyone held up?*) from the one the engine answers (*may work
+/// proceed?*), and the two are kept apart deliberately.
+pub(crate) async fn readiness(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    let orders = state.store.list_work_orders(&scope, vessel).await?;
+    // Distributed packages book their hours per *segment*, so a compartment in a
+    // package footprint has no work order of its own. Without this the rollup
+    // reports zero hours held in exactly the spaces the cascade suspends — the
+    // held column reads clean while six compartments are shut. The stranded
+    // report already carries per-compartment package hours, derived from real
+    // segment topology by `wadl_plan`, so it is the right source.
+    let stranded = state.store.stranded_hours(&scope, vessel).await?;
+    // A package's lead trade. Read from the packages, not the work-order list: a
+    // distributed package's owning order is not in that list, so looking there
+    // leaves every package space reading "no trade recorded" — precisely the
+    // spaces the trade lens most needs to name.
+    let packages = state.store.list_packages(&scope, vessel).await?;
+    let at = state.clock.now();
+
+    // Hours in the hull's work that name a compartment the register does not
+    // contain. Handed to the rollup rather than dropped: a footprint authored
+    // against the class, a hull delta that removed a space, or a mis-keyed
+    // placard all land here, and a board that silently omitted them would
+    // under-report what is outstanding.
+    let registered: std::collections::BTreeSet<&CompartmentNo> =
+        compartments.iter().map(|c| &c.compartment_no).collect();
+    let unattributed = stranded
+        .items
+        .iter()
+        .filter(|i| !registered.contains(&i.compartment_no))
+        .map(|i| i.own_remaining)
+        .fold(ManHours::ZERO, |a, b| a + b);
+
+    let spaces: Vec<SpaceReadiness> = compartments
+        .into_iter()
+        .map(|compartment| {
+            let decision = evaluate(&EvaluationRequest {
+                subject: &compartment.compartment_no,
+                graph: &graph,
+                rules: &rules,
+                hazards: &hazards,
+                at,
+            });
+            let in_space: Vec<_> = orders
+                .iter()
+                .filter(|o| o.compartment_no == compartment.compartment_no)
+                .collect();
+            let in_packages: Vec<_> = stranded
+                .items
+                .iter()
+                .filter(|i| i.compartment_no == compartment.compartment_no)
+                .collect();
+
+            let mut trades: Vec<String> = in_space.iter().map(|o| o.trade.clone()).collect();
+            for item in &in_packages {
+                if let Some(owner) = packages.iter().find(|p| p.code == item.package_code) {
+                    trades.push(owner.trade.clone());
+                }
+            }
+            trades.sort_unstable();
+            trades.dedup();
+
+            let remaining = in_space
+                .iter()
+                .map(|o| o.remaining_hours())
+                .chain(in_packages.iter().map(|i| i.own_remaining))
+                .fold(ManHours::ZERO, |a, b| a + b);
+            let stranded_downstream = in_packages
+                .iter()
+                .map(|i| i.stranded_downstream)
+                .fold(ManHours::ZERO, |a, b| a + b);
+
+            SpaceReadiness {
+                compartment_no: compartment.compartment_no.as_str().to_owned(),
+                zone: compartment.zone.clone(),
+                deck_code: compartment.deck_code.clone(),
+                permits_work: decision.permits_work(),
+                remaining,
+                trades,
+                // Empty rather than "unspecified" when nothing is holding: the
+                // rollup groups by this string, and inventing a holder for an
+                // unheld space would put a phantom name on the ship board.
+                clearing_authority: decision
+                    .governing_step()
+                    .map(|s| s.clearing_authority.clone())
+                    .unwrap_or_default(),
+                stranded_downstream,
+            }
+        })
+        .collect();
+
+    Ok(Json(json!(roll_up(&spaces, unattributed))))
 }
 
 /// The distributed packages on a hull.

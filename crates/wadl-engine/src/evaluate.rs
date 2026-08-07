@@ -121,6 +121,22 @@ impl Decision {
     pub fn permits_work(&self) -> bool {
         self.state.permits_work()
     }
+
+    /// The trace line that produced [`Self::state`] — the governing hold.
+    ///
+    /// Not `trace.first()`. The trace is in traversal order, so the first line
+    /// is the *nearest* hazard, not the most severe one: a WARN in this space
+    /// followed by a SUSPEND two hops away leaves `first()` naming the authority
+    /// for the warning while the space is actually suspended. "Who can clear
+    /// this" is the field a supervisor acts on, so it has to come from the line
+    /// that decided the state.
+    ///
+    /// Ties go to the earliest matching line, which is the shallowest hop — the
+    /// closest place the hold can be addressed.
+    #[must_use]
+    pub fn governing_step(&self) -> Option<&TraceStep> {
+        self.trace.iter().find(|s| s.state == self.state)
+    }
 }
 
 /// Builds the trace step for a rule that fired, at `depth`, along `via`.

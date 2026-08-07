@@ -102,7 +102,9 @@ pub fn governing_constraint(
             ConstraintKind::Authorization {
                 state: d.state,
                 rules,
-                clearing_authority: d.trace.first().map_or_else(
+                // The line that decided the state, not the first line reached —
+                // see `Decision::governing_step`.
+                clearing_authority: d.governing_step().map_or_else(
                     || "unspecified".to_owned(),
                     |s| s.clearing_authority.clone(),
                 ),

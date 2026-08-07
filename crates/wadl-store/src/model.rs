@@ -141,6 +141,10 @@ pub struct PackageSummary {
     pub name: String,
     /// The system it belongs to.
     pub system: String,
+    /// The lead trade. A distributed package *is* a work order, so it has one —
+    /// and without it the trade lens is blind to exactly the work that spans
+    /// compartments, which is the work most likely to be held up.
+    pub trade: String,
     /// Segments in the package.
     pub segment_count: usize,
     /// Compartments in the footprint.

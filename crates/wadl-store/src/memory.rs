@@ -97,6 +97,8 @@ struct PackageRow {
     code: &'static str,
     name: &'static str,
     system: &'static str,
+    /// The lead trade that owns the package.
+    trade: &'static str,
     /// The verb this package's segments are tested with. Carried as data because
     /// an HVAC package's gates are not interchangeable with a cableway's.
     test_verb: &'static str,
@@ -225,6 +227,7 @@ impl InMemoryStore {
                 code: "WI-2201",
                 name: "AC Plant No. 2 — supply & return distribution",
                 system: "Ventilation & air conditioning · Zone 3 forward and aft",
+                trade: "Sheet Metal",
                 test_verb: "leak-tested",
             },
             PackageRow {
@@ -233,6 +236,7 @@ impl InMemoryStore {
                 code: "WI-3310",
                 name: "Zone 3 overhead cableway — power and IC pulls",
                 system: "Electrical distribution and interior communications",
+                trade: "Electrical",
                 test_verb: "continuity- and megger-tested",
             },
         ]
@@ -946,6 +950,7 @@ impl Repositories for InMemoryStore {
                     code: row.code.to_owned(),
                     name: row.name.to_owned(),
                     system: row.system.to_owned(),
+                    trade: row.trade.to_owned(),
                     segment_count: package.segments.len(),
                     compartment_count: package.spaces.len(),
                     budget_hours: package.spaces.values().map(|w| w.budget).sum(),

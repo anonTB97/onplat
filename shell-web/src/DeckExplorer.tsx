@@ -41,6 +41,20 @@ type View = "sheet" | "plan" | "vertical";
  */
 type Altitude = "ship" | "zone" | "compartment";
 
+/** Viewport height for a plate, in CSS px. */
+const SHEET_BOX_H = 520;
+/** Zoom ceiling. Past this the JPEG's own scan resolution is the limit. */
+const MAX_SHEET_ZOOM = 14;
+/**
+ * Rendered pixels per source pixel below which the plate stops being readable.
+ *
+ * Measured against the drawings themselves: their compartment numbers and frame
+ * ticks are about ten source pixels tall, so under roughly a third scale they
+ * turn to grey texture. That is what made the first cut of this view look like a
+ * missing image, so the number is a named constant rather than a magic 0.3.
+ */
+const READABLE_SCALE = 0.3;
+
 // A stable colour per trade, so a trade keeps its colour across decks.
 const TRADE_COLOURS = ["#3D6BFF", "#22c55e", "#f59e0b", "#c4b5fd", "#f472b6", "#2dd4bf"];
 function tradeColour(trade: string, all: string[]): string {
@@ -159,8 +173,13 @@ export default function DeckExplorer({
 
   // Zoom and pan are per-deck-per-view; carrying them across a deck change
   // leaves you looking at empty sheet and wondering where the ship went.
+  //
+  // Zero means "no zoom chosen" and only the sheet view understands it — that
+  // view picks a readable default from the plate's own aspect, which fit-to-width
+  // cannot give on a 9:1 drawing. The schematic strip has no such problem, so it
+  // starts at 1.
   useEffect(() => {
-    setZoom(1);
+    setZoom(view === "sheet" ? 0 : 1);
     setPan({ x: 0, y: 0 });
   }, [selectedDeck, view]);
 
@@ -589,18 +608,67 @@ function SheetView({
   const cal = sheet.calibration;
   const { width: W, height: H } = sheet;
 
-  // Zoom 1 always fits the plate's full length, because the first question is
-  // "where on the ship" and that needs the whole hull in view. The viewport then
-  // grows with the zoom instead of staying tall and mostly empty: a 7000×728
-  // plate fitted to width is a 90px ribbon, and a 460px box around it is dead
-  // space that makes the drawing look broken.
+  // These plates are about nine times wider than they are tall. Fitting one to
+  // the panel's width therefore renders it as a ~140px ribbon of a 7000px
+  // drawing — every line is there and none of it is readable, which looks
+  // exactly like a missing image. So the default is NOT fit-to-width: it is the
+  // zoom at which the plate fills the viewport's height, which is the scale a
+  // deck plan is meant to be read at. Fit-the-whole-ship is one click away.
+  const naturalH = Math.max(1, boxW * (H / W));
   const fit = boxW / W;
-  const boxH = Math.round(Math.min(520, Math.max(150, boxW * (H / W) * zoom)));
-  const scale = fit * zoom;
+
+  const placed = new Map<string, { x: number; y: number }>();
+  if (cal) {
+    for (const r of rows) {
+      const frame = r.compartment.frame;
+      if (frame === null) continue;
+      placed.set(r.compartment.compartment_no, {
+        x: sheetX(cal, frame),
+        y: sheetY(cal, sheet, r.compartment.side, frame),
+      });
+    }
+  }
+
+  // Two things have to be true of the opening view, and they pull against each
+  // other: the drawing has to be readable, and this deck's markers have to be on
+  // screen. Take whichever constraint binds harder, then never go below the
+  // point where the plate's lettering can be read — if a deck's work is spread
+  // too far along the hull to fit at that scale, the header says how many are
+  // off-screen rather than leaving the planner to wonder.
+  const markerXs = [...placed.values()].map((p) => p.x);
+  const span = markerXs.length > 1 ? Math.max(...markerXs) - Math.min(...markerXs) : 0;
+  const heightZoom = SHEET_BOX_H / naturalH;
+  const spanZoom = span > 0 ? W / (span * 1.18) : heightZoom;
+  const readableFloor = READABLE_SCALE / fit;
+  const framedZoom = Math.max(
+    1,
+    Math.min(
+      MAX_SHEET_ZOOM,
+      Math.max(readableFloor, Math.floor(Math.min(heightZoom, spanZoom))),
+    ),
+  );
+  // `zoom === 0` means "not framed yet" — the caller has not chosen a zoom, so
+  // use the framed default rather than making the first paint the bad one.
+  const z = zoom || framedZoom;
+
+  const boxH = Math.round(Math.min(SHEET_BOX_H, Math.max(150, naturalH * z)));
+  const scale = fit * z;
   const vw = boxW / scale;
   const vh = boxH / scale;
   /** Sheet units per screen pixel — markers multiply by this to stay put. */
   const u = 1 / scale;
+
+  // Opening zoomed in means the window has to open somewhere. Centre it on the
+  // work: the selected compartment if there is one, otherwise the middle of the
+  // compartments on this deck. Landing on an empty stretch of hull and making
+  // the planner hunt for their own markers is the whole problem restated.
+  const focus = (() => {
+    const chosen = selected ? placed.get(selected) : undefined;
+    if (chosen) return chosen.x;
+    const xs = [...placed.values()].map((p) => p.x);
+    if (xs.length === 0) return W / 2;
+    return (Math.min(...xs) + Math.max(...xs)) / 2;
+  })();
 
   // Clamp the window to the plate, but centre instead of clamping on any axis
   // where the window is larger than the plate — otherwise the drawing sticks to
@@ -610,23 +678,20 @@ function SheetView({
       ? extent / 2
       : Math.min(Math.max(want, window / 2), extent - window / 2);
   const centre = {
-    x: axis(W / 2 + pan.x, W, vw),
+    x: axis(focus + pan.x, W, vw),
     y: axis((cal?.centrelineY ?? H / 2) + pan.y, H, vh),
   };
 
   if (!cal) return null;
 
-  const placed = new Map<string, { x: number; y: number }>();
-  for (const r of rows) {
-    const frame = r.compartment.frame;
-    if (frame === null) continue;
-    placed.set(r.compartment.compartment_no, {
-      x: sheetX(cal, frame),
-      y: sheetY(cal, sheet, r.compartment.side, frame),
-    });
-  }
-
-  const showLabels = zoom >= 2.5;
+  const showLabels = scale >= READABLE_SCALE;
+  const offScreen = [...placed.values()].filter(
+    (m) =>
+      m.x < centre.x - vw / 2 ||
+      m.x > centre.x + vw / 2 ||
+      m.y < centre.y - vh / 2 ||
+      m.y > centre.y + vh / 2,
+  ).length;
 
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
@@ -634,14 +699,32 @@ function SheetView({
         <span style={{ fontSize: 11, fontWeight: 600 }}>{sheet.label} — general arrangement</span>
         <span style={{ fontSize: 10.5, color: DIM }}>bow right · drag to pan</span>
         {!showLabels && <span style={{ fontSize: 10.5, color: DIM }}>· zoom in for labels</span>}
+        {offScreen > 0 && (
+          <span style={{ fontSize: 10.5, color: C.danger }} title="Pan, or use Whole ship">
+            · {offScreen} marker{offScreen === 1 ? "" : "s"} off-screen
+          </span>
+        )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 5, alignItems: "center" }}>
           <span style={{ fontSize: 10.5, color: DIM, fontVariantNumeric: "tabular-nums", minWidth: 62 }}>
             {hoverFrame !== null ? `Fr ${hoverFrame}` : "—"}
           </span>
-          <button onClick={() => setZoom(Math.max(1, zoom - 1))} style={zoomBtn}>−</button>
-          <span style={{ fontSize: 10.5, color: DIM, minWidth: 34, textAlign: "center" }}>{zoom.toFixed(0)}×</span>
-          <button onClick={() => setZoom(Math.min(14, zoom + 1))} style={zoomBtn}>+</button>
-          <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} style={zoomBtn}>Reset</button>
+          <button
+            onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
+            style={{ ...zoomBtn, width: "auto", padding: "0 7px" }}
+            title="Fit the plate's whole length — the overview, not a readable scale"
+          >
+            Whole ship
+          </button>
+          <button onClick={() => setZoom(Math.max(1, z - 1))} style={zoomBtn}>−</button>
+          <span style={{ fontSize: 10.5, color: DIM, minWidth: 34, textAlign: "center" }}>{z.toFixed(0)}×</span>
+          <button onClick={() => setZoom(Math.min(MAX_SHEET_ZOOM, z + 1))} style={zoomBtn}>+</button>
+          <button
+            onClick={() => { setZoom(0); setPan({ x: 0, y: 0 }); }}
+            style={zoomBtn}
+            title="Back to the readable default, centred on this deck's work"
+          >
+            Reset
+          </button>
         </span>
       </div>
 

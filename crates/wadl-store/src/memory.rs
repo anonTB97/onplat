@@ -510,6 +510,7 @@ impl InMemoryStore {
     fn seed_compartments(w: &DemoWorld) -> Vec<CompartmentRow> {
         let mut rows = Self::seed_compartments_forward(w);
         rows.extend(Self::seed_compartments_aft_third(w));
+        rows.extend(Self::seed_compartments_packages(w));
         rows
     }
 
@@ -665,6 +666,104 @@ impl InMemoryStore {
                 deck_ordinal: 3,
                 zone: "Z5",
                 category: "Machinery / electrical",
+            },
+        ]
+    }
+
+    /// The two distributed packages' footprints.
+    ///
+    /// Separate from the cascade neighbourhood because it is a different story:
+    /// those compartments demonstrate a hazard travelling, these demonstrate one
+    /// work order spread over eleven spaces. Their names are the ones the
+    /// packages' own segments use — "mess and scullery", "switchgear and
+    /// berthing", "wardroom terminal" — so the register, the segment topology and
+    /// the deck plates describe one ship rather than three.
+    ///
+    /// Registering them is what makes the demo add up. While they were absent,
+    /// 1,919 of 2,059 package man-hours belonged to no zone and the ship board
+    /// could only report them as unattributed.
+    fn seed_compartments_packages(w: &DemoWorld) -> Vec<CompartmentRow> {
+        vec![
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "1-160-0-Q",
+                name: "Hangar Bay 3",
+                deck_code: "Main",
+                deck_ordinal: 1,
+                zone: "Z6",
+                category: "Machinery / operational",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "2-152-0-Q",
+                name: "Scullery",
+                deck_code: "2nd",
+                deck_ordinal: 2,
+                zone: "Z6",
+                category: "Living",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "2-160-1-Q",
+                name: "Mess Decks",
+                deck_code: "2nd",
+                deck_ordinal: 2,
+                zone: "Z6",
+                category: "Living",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "2-176-0-Q",
+                name: "Wardroom Terminal Space",
+                deck_code: "2nd",
+                deck_ordinal: 2,
+                zone: "Z5",
+                category: "Living",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "3-140-0-Q",
+                name: "Cableway Trunk — Fr 140",
+                deck_code: "3rd",
+                deck_ordinal: 3,
+                zone: "Z5",
+                category: "Electrical",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "3-148-0-L",
+                name: "Chief Petty Officer Berthing",
+                deck_code: "3rd",
+                deck_ordinal: 3,
+                zone: "Z5",
+                category: "Living",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "3-148-2-E",
+                name: "Switchgear Room No. 2",
+                deck_code: "3rd",
+                deck_ordinal: 3,
+                zone: "Z5",
+                category: "Electrical",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "3-172-0-M",
+                name: "AC Plant No. 2",
+                deck_code: "3rd",
+                deck_ordinal: 3,
+                zone: "Z5",
+                category: "Machinery / electrical",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "3-192-2-E",
+                name: "IC Terminal Room",
+                deck_code: "3rd",
+                deck_ordinal: 3,
+                zone: "Z5",
+                category: "Electrical",
             },
         ]
     }

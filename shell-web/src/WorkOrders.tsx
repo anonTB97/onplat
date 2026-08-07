@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { listWorkOrders, type Identity, type WorkOrder } from "./api";
-import { C, mh } from "./theme";
+import { listWorkOrders, type DeckStateRow, type Identity, type WorkOrder } from "./api";
+import { C, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
 
 type SortKey = "code" | "remaining" | "compartment";
 
@@ -8,10 +8,22 @@ export default function WorkOrders({
   identity,
   vesselId,
   hullLabel,
+  spaces,
+  onOpenSpace,
 }: {
   identity: Identity;
   vesselId: string;
   hullLabel: string;
+  /**
+   * The hull's compartments with their authorization, from the shell.
+   *
+   * Passed in rather than fetched again so there is exactly one answer per space
+   * in the running app. This table is where a planner picks what to do next, and
+   * a list of work that does not say whether the space is open is a list that
+   * sends a crew to a locked door.
+   */
+  spaces: DeckStateRow[];
+  onOpenSpace: (compartment: string) => void;
 }) {
   const [orders, setOrders] = useState<WorkOrder[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -112,6 +124,7 @@ export default function WorkOrders({
               <th style={{ ...th, textAlign: "right" }}>Budget</th>
               <th style={{ ...th, textAlign: "right" }}>Earned</th>
               <th style={{ ...th, textAlign: "right" }}>Remaining</th>
+              <th style={th}>Space</th>
               <th style={th}>Provenance</th>
             </tr>
           </thead>
@@ -129,6 +142,39 @@ export default function WorkOrders({
                 <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{w.earned_hours.toLocaleString()}</td>
                 <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>
                   {remaining(w).toLocaleString()}
+                </td>
+                {/* Whether the space this work sits in is actually open, and who
+                    can release it if not. The authorization comes from the engine
+                    via the shell — nothing is decided here. */}
+                <td style={{ ...td, fontSize: 11 }}>
+                  {(() => {
+                    const space = spaces.find((r) => r.compartment.compartment_no === w.compartment_no);
+                    if (!space) {
+                      return (
+                        <span style={{ color: C.dim }} title="This order names a compartment the register does not contain">
+                          not in register
+                        </span>
+                      );
+                    }
+                    const bucket = OVERLAY_STYLE[overlayBucket(space)];
+                    return (
+                      <button
+                        onClick={() => onOpenSpace(w.compartment_no)}
+                        title={`${bucket.gloss} — open it on the deck plan`}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                          font: "inherit", fontSize: 10.5, padding: "2px 7px", borderRadius: 4,
+                          background: bucket.bg, color: bucket.fg, border: `1px solid ${bucket.border}`,
+                        }}
+                      >
+                        <b>{bucket.label}</b>
+                        <span style={{ color: STATE_STYLE[space.state].fg }}>{space.state}</span>
+                        {space.readiness === "held" && space.clearing_authority && (
+                          <span style={{ color: C.dim }}>· {space.clearing_authority}</span>
+                        )}
+                      </button>
+                    );
+                  })()}
                 </td>
                 <td style={{ ...td, fontSize: 11 }}>
                   <span style={{ fontFamily: "monospace" }}>{w.source_ref}</span>

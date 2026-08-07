@@ -391,7 +391,10 @@ export default function DeckExplorer({
         )}
       </div>
 
-      <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+      {/* Wraps. Rail + canvas + trace is about 900px of hard minimum, so on a
+          1100px laptop the trace was being pushed past the right edge and the
+          whole page scrolled sideways. It drops below the canvas instead. */}
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
         {!fullScreen && (
           <SelectorRail
             altitude={altitude}

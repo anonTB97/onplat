@@ -645,9 +645,10 @@ export function ModuleRail({
                 </span>
                 {!collapsed && (
                   <>
-                    <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {m.label}
-                    </span>
+                    {/* Wraps rather than truncating. "Deconfliction C…" in a
+                        navigation rail is worse than two tidy lines: a reader has
+                        to hover to find out where they would be going. */}
+                    <span style={{ flex: 1, lineHeight: 1.25 }}>{m.label}</span>
                     {/* A module with no view says so here rather than looking
                         identical to a built one and then disappointing. */}
                     {!m.built && (

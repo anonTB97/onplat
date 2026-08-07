@@ -110,14 +110,18 @@ pub(crate) async fn compartment_state(
 
 /// The work booked in one compartment: hours left, the orders, and the trades.
 ///
-/// **One implementation, two callers.** A distributed package books its hours per
-/// *segment*, so a compartment inside a package footprint has no work order of
-/// its own; the per-compartment package hours come from the stranded report,
-/// which derives them from real segment topology. When `deck_states` counted only
-/// work orders and `readiness` counted both, the deck plan showed a space as
-/// having nothing booked while the ship board billed it as 80 held man-hours.
-/// Two readings of "is anyone working here" is not a rounding difference — it is
-/// the screen contradicting itself.
+/// **One implementation, every caller.** A distributed package books its hours per
+/// *segment*, so a compartment inside a package footprint has no work order of its
+/// own and has to be picked up from the package.
+///
+/// The source of those hours is each package's own **footprint**
+/// ([`wadl_plan::Package::spaces`]) and nothing else. It was briefly the stranded
+/// report, which was wrong in a way worth remembering: that report lists the
+/// compartments that *cause* stranding, not an inventory of booked work. On the
+/// seeded hull it named three compartments out of an eleven-compartment footprint,
+/// so 1,919 of 2,059 package man-hours went unseen — and, worse, unseen by the
+/// very coverage figure built to catch hours the register cannot account for. A
+/// report about causes is not a ledger.
 struct BookedWork {
     remaining: ManHours,
     stranded_downstream: ManHours,
@@ -125,38 +129,63 @@ struct BookedWork {
     trades: Vec<String>,
 }
 
+/// A package's footprint, paired with the trade that owns it.
+struct PackageWork {
+    code: String,
+    trade: String,
+    spaces: std::collections::BTreeMap<CompartmentNo, wadl_plan::SpaceWork>,
+}
+
+/// Reads every package on the hull with its footprint. Small N by construction —
+/// a hull has a handful of distributed packages, not thousands.
+async fn packages_with_footprints(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+) -> Result<Vec<PackageWork>, ApiError> {
+    let summaries = state.store.list_packages(scope, vessel).await?;
+    let mut out = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        let package = state
+            .store
+            .get_package(scope, vessel, &summary.code)
+            .await?;
+        out.push(PackageWork {
+            code: summary.code,
+            trade: summary.trade,
+            spaces: package.spaces,
+        });
+    }
+    Ok(out)
+}
+
 fn booked_work(
     compartment: &CompartmentNo,
     orders: &[wadl_store::model::WorkOrderSummary],
-    packages: &[wadl_store::model::PackageSummary],
+    packages: &[PackageWork],
     stranded: &wadl_store::model::StrandedReport,
 ) -> BookedWork {
     let in_space: Vec<_> = orders
         .iter()
         .filter(|o| &o.compartment_no == compartment)
         .collect();
-    let in_packages: Vec<_> = stranded
-        .items
+    // Every package whose footprint includes this compartment, with hours left.
+    let in_packages: Vec<_> = packages
         .iter()
-        .filter(|i| &i.compartment_no == compartment)
+        .filter_map(|p| p.spaces.get(compartment).map(|w| (p, w.remaining())))
+        .filter(|(_, remaining)| remaining.get() > 0)
         .collect();
 
     let mut trades: Vec<String> = in_space.iter().map(|o| o.trade.clone()).collect();
     // A package's trade is the package's own — its owning order is not in the
     // work-order list, so looking there leaves every package space reading "no
     // trade recorded", which is exactly the work the trade lens most needs named.
-    for item in &in_packages {
-        if let Some(owner) = packages.iter().find(|p| p.code == item.package_code) {
-            trades.push(owner.trade.clone());
-        }
-    }
+    trades.extend(in_packages.iter().map(|(p, _)| p.trade.clone()));
     trades.sort_unstable();
     trades.dedup();
 
     let mut order_codes: Vec<String> = in_space.iter().map(|o| o.code.clone()).collect();
-    for item in &in_packages {
-        order_codes.push(item.package_code.clone());
-    }
+    order_codes.extend(in_packages.iter().map(|(p, _)| p.code.clone()));
     order_codes.sort_unstable();
     order_codes.dedup();
 
@@ -164,10 +193,15 @@ fn booked_work(
         remaining: in_space
             .iter()
             .map(|o| o.remaining_hours())
-            .chain(in_packages.iter().map(|i| i.own_remaining))
+            .chain(in_packages.iter().map(|(_, r)| *r))
             .fold(ManHours::ZERO, |a, b| a + b),
-        stranded_downstream: in_packages
+        // Stranding IS the stranded report's job: hours in OTHER compartments that
+        // cannot be tested until this one clears. That is a claim about causes, so
+        // the causes report is the right source for it.
+        stranded_downstream: stranded
+            .items
             .iter()
+            .filter(|i| &i.compartment_no == compartment)
             .map(|i| i.stranded_downstream)
             .fold(ManHours::ZERO, |a, b| a + b),
         order_codes,
@@ -188,7 +222,7 @@ pub(crate) async fn deck_states(
     let hazards = state.store.live_hazards(&scope, vessel).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
     let orders = state.store.list_work_orders(&scope, vessel).await?;
-    let packages = state.store.list_packages(&scope, vessel).await?;
+    let packages = packages_with_footprints(&state, &scope, vessel).await?;
     let stranded = state.store.stranded_hours(&scope, vessel).await?;
     let at = state.clock.now();
 
@@ -262,11 +296,7 @@ pub(crate) async fn readiness(
     // report already carries per-compartment package hours, derived from real
     // segment topology by `wadl_plan`, so it is the right source.
     let stranded = state.store.stranded_hours(&scope, vessel).await?;
-    // A package's lead trade. Read from the packages, not the work-order list: a
-    // distributed package's owning order is not in that list, so looking there
-    // leaves every package space reading "no trade recorded" — precisely the
-    // spaces the trade lens most needs to name.
-    let packages = state.store.list_packages(&scope, vessel).await?;
+    let packages = packages_with_footprints(&state, &scope, vessel).await?;
     let at = state.clock.now();
 
     // Hours in the hull's work that name a compartment the register does not
@@ -276,11 +306,11 @@ pub(crate) async fn readiness(
     // under-report what is outstanding.
     let registered: std::collections::BTreeSet<&CompartmentNo> =
         compartments.iter().map(|c| &c.compartment_no).collect();
-    let unattributed = stranded
-        .items
+    let unattributed = packages
         .iter()
-        .filter(|i| !registered.contains(&i.compartment_no))
-        .map(|i| i.own_remaining)
+        .flat_map(|p| p.spaces.iter())
+        .filter(|(no, _)| !registered.contains(no))
+        .map(|(_, w)| w.remaining())
         .fold(ManHours::ZERO, |a, b| a + b);
 
     let spaces: Vec<SpaceReadiness> = compartments

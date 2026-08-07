@@ -211,7 +211,13 @@ export default function App() {
           )}
 
           {!error && selected && module.id === "workOrders" && (
-            <WorkOrders identity={DEMO_IDENTITY} vesselId={selected} hullLabel={hullLabel} />
+            <WorkOrders
+              identity={DEMO_IDENTITY}
+              vesselId={selected}
+              hullLabel={hullLabel}
+              spaces={rows}
+              onOpenSpace={jump}
+            />
           )}
 
           {!error && selected && module.id === "distPackages" && (

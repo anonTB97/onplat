@@ -12,8 +12,9 @@ import {
 } from "./api";
 import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
+import { VerticalTrace } from "./VerticalTrace";
 import type { Altitude as ChromeAltitude } from "./Chrome";
-import { framesPerSpan, frameToX, layoutPlan, packLanes, xToFrame } from "./deckGeometry";
+import { frameToX, layoutPlan, packLanes, xToFrame } from "./deckGeometry";
 import {
   halfBeamAt,
   sheetForDeck,
@@ -23,7 +24,7 @@ import {
   SHEET_SOURCE,
   type DeckSheet,
 } from "./deckSheets";
-import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, READINESS_STYLE, STATE_STYLE } from "./theme";
+import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -508,15 +509,15 @@ export default function DeckExplorer({
               </div>
 
               {view === "vertical" ? (
-                <VerticalSection
+                <VerticalTrace
                   decks={decks}
                   rows={visible}
                   centreOrdinal={deckOrdinal}
                   selected={selected}
                   onSelect={setSelected}
+                  onDeck={setSelectedDeck}
                   toneOf={toneOf}
                   cascadeEdges={cascadeEdges}
-                  onDeck={setSelectedDeck}
                 />
               ) : effMode === "drawing" && sheet ? (
                 <SheetView
@@ -1333,190 +1334,3 @@ const zoomBtn: React.CSSProperties = {
   background: "transparent", color: DIM, border: `1px solid ${LINE}`,
   font: "inherit", fontSize: 12, lineHeight: 1, padding: 0,
 };
-
-/**
- * The three-deck vertical section — the view the plan cannot give you.
- *
- * A hazard travelling through a deck penetration goes *up and down*, so a
- * planner looking at one deck sheet cannot see why a space two decks away is
- * suspended. Showing the deck above and below together is what makes that
- * legible, and it is why the register keeps an ordered deck ordinal.
- */
-function VerticalSection({
-  decks, rows, centreOrdinal, selected, onSelect, toneOf, cascadeEdges, onDeck,
-}: {
-  decks: Deck[];
-  rows: DeckStateRow[];
-  centreOrdinal: number;
-  selected: string | null;
-  onSelect: (n: string) => void;
-  toneOf: (r: DeckStateRow) => { fg: string; bg: string; border: string };
-  cascadeEdges: [string, string][];
-  /** Moves the three-deck window, from the stack ribbon. */
-  onDeck: (code: string) => void;
-}) {
-  // Above is a SMALLER ordinal: the register numbers decks ascending downward.
-  const ordered = [...decks].sort((a, b) => a.ordinal - b.ordinal);
-  const band = ordered.filter((d) => Math.abs(d.ordinal - centreOrdinal) <= 1);
-  const centreIdx = ordered.findIndex((d) => d.ordinal === centreOrdinal);
-  const shift = (delta: number) => {
-    const next = ordered[Math.min(Math.max(centreIdx + delta, 0), ordered.length - 1)];
-    if (next) onDeck(next.code);
-  };
-
-  const W = 1000;
-  const MARKER_W = 88;
-  const MARKER_H = 24;
-  const LANE_H = 30;
-  /** Room for the deck label above the markers. */
-  const LABEL_H = 38;
-
-  // Each band is only as tall as its own deck needs. Side is not shown here —
-  // this is a slice through the hull, so port and starboard project onto the
-  // same line and the packing has to consider every compartment together.
-  const minGap = framesPerSpan(MARKER_W + 6, W);
-  let cursor = 0;
-  const bands = band.map((deck) => {
-    const onThis = rows.filter((r) => r.compartment.deck_code === deck.code);
-    const levels = packLanes(
-      onThis.map((r) => ({
-        id: r.compartment.compartment_no,
-        frame: r.compartment.frame,
-        side: r.compartment.side,
-      })),
-      minGap,
-    );
-    let lanes = 0;
-    for (const l of levels.values()) lanes = Math.max(lanes, l + 1);
-    const height = Math.max(96, LABEL_H + Math.max(lanes, 1) * LANE_H + 6);
-    const top = cursor;
-    cursor += height;
-    return { deck, onThis, levels, top, height };
-  });
-  const H = Math.max(cursor, 96);
-
-  // Marker centres across every band, so a cascade hop can be drawn from the
-  // deck it left to the deck it reached. This is the whole reason the section
-  // exists — on a single deck sheet that hop is invisible.
-  const placed = new Map<string, { x: number; y: number }>();
-  for (const b of bands) {
-    for (const r of b.onThis) {
-      const frame = r.compartment.frame;
-      if (frame === null) continue;
-      const lane = b.levels.get(r.compartment.compartment_no) ?? 0;
-      placed.set(r.compartment.compartment_no, {
-        x: frameToX(frame) * W,
-        y: b.top + LABEL_H + (lane + 0.5) * LANE_H,
-      });
-    }
-  }
-
-  return (
-    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, fontSize: 11, fontWeight: 600, flexWrap: "wrap" }}>
-        <span>Vertical trace — deck above, selected, below</span>
-        <span style={{ color: DIM, fontWeight: 400 }}>
-          a deck penetration carries heat down and vapour up; this is the view that shows it
-        </span>
-        <span style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
-          <button onClick={() => shift(-1)} style={zoomBtn} title="Shift the window up a deck" disabled={centreIdx <= 0}>▲</button>
-          <button onClick={() => shift(1)} style={zoomBtn} title="Shift the window down a deck" disabled={centreIdx >= ordered.length - 1}>▼</button>
-        </span>
-      </div>
-      <div style={{ display: "flex", alignItems: "stretch" }}>
-        {/* The stack ribbon. Twelve decks is too many for the eye to hold, and
-            the trace only ever shows three of them, so the ribbon is what says
-            where those three sit in the ship. */}
-        <div style={{ flex: "0 0 96px", borderRight: `1px solid ${LINE}`, padding: "6px 0" }}>
-          <div style={{ fontSize: 9, letterSpacing: 0.7, textTransform: "uppercase", color: DIM, padding: "0 8px 5px" }}>
-            Stack
-          </div>
-          {ordered.map((d) => {
-            const inBand = Math.abs(d.ordinal - centreOrdinal) <= 1;
-            const isCentre = d.ordinal === centreOrdinal;
-            const held = rows.filter((r) => r.compartment.deck_code === d.code && r.readiness === "held").length;
-            return (
-              <button
-                key={d.code}
-                onClick={() => onDeck(d.code)}
-                title={d.label}
-                style={{
-                  display: "flex", alignItems: "center", gap: 5, width: "100%", textAlign: "left",
-                  font: "inherit", fontSize: 10, cursor: "pointer", padding: "3px 8px",
-                  background: isCentre ? "#20222b" : "transparent",
-                  color: inBand ? TEXT : "#5a6070",
-                  border: "none", borderLeft: `3px solid ${isCentre ? C.accent : (inBand ? "#353842" : "transparent")}`,
-                }}
-              >
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {d.label}
-                </span>
-                {held > 0 && (
-                  <span style={{ width: 6, height: 6, borderRadius: 3, background: READINESS_STYLE.held.fg }} />
-                )}
-              </button>
-            );
-          })}
-        </div>
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block" }}>
-        {bands.map(({ deck, onThis, levels, top, height }) => {
-          const isCentre = deck.ordinal === centreOrdinal;
-          return (
-            <g key={deck.code}>
-              <rect
-                x={0} y={top} width={W} height={height}
-                fill={isCentre ? "#141720" : "#0e0f13"}
-                stroke="#1d2029"
-              />
-              <text x={10} y={top + 16} fill={isCentre ? TEXT : DIM} fontSize={11} fontWeight={600}>
-                {deck.label}
-              </text>
-              <text x={10} y={top + 30} fill="#4b5060" fontSize={9}>
-                ordinal {deck.ordinal}
-              </text>
-              {onThis.map((r) => {
-                const frame = r.compartment.frame;
-                if (frame === null) return null;
-                const tone = toneOf(r);
-                const isSel = r.compartment.compartment_no === selected;
-                const x = frameToX(frame) * W;
-                const lane = levels.get(r.compartment.compartment_no) ?? 0;
-                const y = top + LABEL_H + (lane + 0.5) * LANE_H;
-                return (
-                  <g key={r.compartment.compartment_no} onClick={() => onSelect(r.compartment.compartment_no)} style={{ cursor: "pointer" }}>
-                    <rect
-                      x={x - MARKER_W / 2} y={y - MARKER_H / 2}
-                      width={MARKER_W} height={MARKER_H} rx={4}
-                      fill={tone.bg} stroke={isSel ? C.accent : tone.border} strokeWidth={isSel ? 2 : 1}
-                    />
-                    <text x={x} y={y + 4} fill={tone.fg} fontSize={9.5} textAnchor="middle" fontFamily="monospace">
-                      {r.compartment.compartment_no}
-                    </text>
-                  </g>
-                );
-              })}
-            </g>
-          );
-        })}
-        {cascadeEdges.map(([from, to]) => {
-          const a = placed.get(from);
-          const b = placed.get(to);
-          if (!a || !b) return null;
-          return (
-            <line
-              key={`${from}-${to}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-              stroke={STATE_STYLE.SUSPEND.fg} strokeWidth={1.8} strokeDasharray="7 5"
-            />
-          );
-        })}
-        </svg>
-      </div>
-      {band.length < 2 && (
-        <p style={{ color: DIM, fontSize: 12.5, padding: "10px 12px", margin: 0 }}>
-          Only one deck in range — the register needs a deck above or below this one
-          for a section to mean anything.
-        </p>
-      )}
-    </div>
-  );
-}

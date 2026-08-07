@@ -642,6 +642,30 @@ impl InMemoryStore {
                 zone: "Z6",
                 category: "Command & surveillance",
             },
+            // These two are in a distributed package's footprint but were missing
+            // from the register, so their outstanding hours belonged to no zone
+            // and the ship board had to report them as unattributed. Keeping them
+            // out was not a demo of anything — the endpoint's coverage warning is
+            // still there and still tested, it just has nothing to report on this
+            // hull now.
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "3-152-0-Q",
+                name: "Cableway Trunk — Zone 3 overhead",
+                deck_code: "3rd",
+                deck_ordinal: 3,
+                zone: "Z6",
+                category: "Electrical",
+            },
+            CompartmentRow {
+                vessel: w.cvn73,
+                no: "3-184-0-Q",
+                name: "AC Plant No. 2 Machinery Room",
+                deck_code: "3rd",
+                deck_ordinal: 3,
+                zone: "Z5",
+                category: "Machinery / electrical",
+            },
         ]
     }
 
@@ -981,22 +1005,23 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<Vec<DeckSummary>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
-        // Derived from the register in this seed. In the PostgreSQL store these
-        // come from `class_deck`, which is the authority for the ordinal.
-        let mut by_ordinal: BTreeMap<i32, (&str, usize)> = BTreeMap::new();
+        // The deck register is the CLASS's, not a roll-up of whichever
+        // compartments happen to be keyed. Deriving it from the register made a
+        // deck disappear the moment nothing was keyed on it, which is wrong twice
+        // over: the ship still has that deck, and its general-arrangement plate
+        // is still the thing a planner needs to look at. A count of zero is a
+        // statement about our data, not about the ship.
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         for compartment in self.compartments.iter().filter(|c| c.vessel == vessel) {
-            let entry = by_ordinal
-                .entry(compartment.deck_ordinal)
-                .or_insert((compartment.deck_code, 0));
-            entry.1 += 1;
+            *counts.entry(compartment.deck_code).or_insert(0) += 1;
         }
-        Ok(by_ordinal
-            .into_iter()
-            .map(|(ordinal, (code, count))| DeckSummary {
-                code: code.to_owned(),
-                label: deck_label(code),
-                ordinal,
-                compartment_count: count,
+        Ok(CLASS_DECKS
+            .iter()
+            .map(|(code, label, ordinal)| DeckSummary {
+                code: (*code).to_owned(),
+                label: (*label).to_owned(),
+                ordinal: *ordinal,
+                compartment_count: counts.get(code).copied().unwrap_or(0),
             })
             .collect())
     }
@@ -1056,17 +1081,31 @@ impl Repositories for InMemoryStore {
     }
 }
 
-/// Human label for a deck code. The PostgreSQL store reads `class_deck.label`;
-/// this mirrors the prototype's labels for the seeded codes.
-fn deck_label(code: &str) -> String {
-    match code {
-        "Main" => "Main Deck".to_owned(),
-        "2nd" => "Second Deck".to_owned(),
-        "3rd" => "Third Deck".to_owned(),
-        "4th" => "Fourth Deck".to_owned(),
-        other => other.to_owned(),
-    }
-}
+/// The class's deck register: code, label, ordinal — ordered downward.
+///
+/// This is the CVN-67/73 arrangement, and the codes are the ones the deck plates
+/// are keyed to (`shell-web/src/deckSheets.json`). The PostgreSQL store reads the
+/// same thing out of `class_deck`, which is the authority for the ordinal.
+///
+/// Ordinals ascend downward and the ones above the main deck are negative, so
+/// "the deck directly above" is arithmetic rather than a lookup — which is what
+/// the vertical section relies on to show a hazard crossing a deck penetration.
+/// The island is deliberately absent: it is not a deck, it is a stack of levels
+/// on one plate, so it has no single ordinal and no frame axis.
+const CLASS_DECKS: &[(&str, &str, i32)] = &[
+    ("flight", "Flight Deck", -4),
+    ("o2", "O-2 Level", -3),
+    ("o1", "O-1 Level", -2),
+    ("gallery", "Gallery Deck", -1),
+    ("Main", "Main Deck", 1),
+    ("2nd", "Second Deck", 2),
+    ("3rd", "Third Deck", 3),
+    ("4th", "Fourth Deck", 4),
+    ("1stplat", "First Platform", 5),
+    ("2ndplat", "Second Platform", 6),
+    ("hold", "Hold", 7),
+    ("db", "Inner Bottom", 8),
+];
 
 #[cfg(test)]
 mod tests {
@@ -1097,7 +1136,18 @@ mod tests {
         let fourth = decks.iter().find(|d| d.code == "4th").unwrap();
         let third = decks.iter().find(|d| d.code == "3rd").unwrap();
         assert!(third.ordinal < fourth.ordinal);
-        assert!(decks.iter().all(|d| d.compartment_count > 0));
+
+        // The whole class register comes back, including decks nothing is keyed
+        // on. A deck that vanished when its compartments were absent took its
+        // general-arrangement plate with it, which is the opposite of useful.
+        assert_eq!(decks.len(), CLASS_DECKS.len());
+        let flight = decks.iter().find(|d| d.code == "flight").unwrap();
+        assert_eq!(flight.compartment_count, 0, "no register data yet");
+        assert!(flight.ordinal < fourth.ordinal, "the flight deck is above");
+        assert!(
+            decks.iter().any(|d| d.compartment_count > 0),
+            "and the decks we do have data for still report it"
+        );
     }
 
     #[tokio::test]

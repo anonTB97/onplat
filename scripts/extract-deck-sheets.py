@@ -96,23 +96,27 @@ CALIBRATION: dict[str, tuple[float, float, int] | None] = {
     "deck_db": (21.021, 6621.9, 366),
 }
 
-# Ordered bow-to-keel, i.e. topmost structure first. `deck` is the register's
-# deck code (see wadl-store's demo seed and class_deck.code); sheets with no
-# deck code are carried for completeness but nothing links to them yet.
+# Ordered top-down. `deck_code` is the register's deck code — it MUST match
+# `CLASS_DECKS` in wadl-store's memory seed (and `class_deck.code` in the
+# schema), because that string is the only thing joining a deck to its plate.
+#
+# `deck_island` is the one plate with no deck code, and that is not an omission:
+# it is a sheet of separate small plans of the island levels rather than one
+# deck, so it has neither a single ordinal nor a frame axis to place a marker on.
 SHEETS = [
-    ("deck_flight", "Flight Deck", None),
+    ("deck_flight", "Flight Deck", "flight"),
     ("deck_island", "Island Levels", None),
-    ("deck_o2", "O-2 Level", None),
-    ("deck_o1", "O-1 Level", None),
-    ("deck_gallery", "Gallery Deck", None),
+    ("deck_o2", "O-2 Level", "o2"),
+    ("deck_o1", "O-1 Level", "o1"),
+    ("deck_gallery", "Gallery Deck", "gallery"),
     ("deck_main", "Main Deck", "Main"),
     ("deck_2nd", "Second Deck", "2nd"),
     ("deck_3rd", "Third Deck", "3rd"),
     ("deck_4th", "Fourth Deck", "4th"),
-    ("deck_1stplat", "First Platform", None),
-    ("deck_2ndplat", "Second Platform", None),
-    ("deck_hold", "Hold", None),
-    ("deck_db", "Inner Bottom", None),
+    ("deck_1stplat", "First Platform", "1stplat"),
+    ("deck_2ndplat", "Second Platform", "2ndplat"),
+    ("deck_hold", "Hold", "hold"),
+    ("deck_db", "Inner Bottom", "db"),
 ]
 
 

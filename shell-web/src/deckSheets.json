@@ -6,7 +6,7 @@
     {
       "id": "deck_flight",
       "label": "Flight Deck",
-      "deckCode": null,
+      "deckCode": "flight",
       "file": "deck_flight.jpg",
       "width": 7000,
       "height": 2271,
@@ -88,7 +88,7 @@
     {
       "id": "deck_o2",
       "label": "O-2 Level",
-      "deckCode": null,
+      "deckCode": "o2",
       "file": "deck_o2.jpg",
       "width": 7000,
       "height": 1432,
@@ -161,7 +161,7 @@
     {
       "id": "deck_o1",
       "label": "O-1 Level",
-      "deckCode": null,
+      "deckCode": "o1",
       "file": "deck_o1.jpg",
       "width": 7000,
       "height": 1132,
@@ -234,7 +234,7 @@
     {
       "id": "deck_gallery",
       "label": "Gallery Deck",
-      "deckCode": null,
+      "deckCode": "gallery",
       "file": "deck_gallery.jpg",
       "width": 7000,
       "height": 1609,
@@ -599,7 +599,7 @@
     {
       "id": "deck_1stplat",
       "label": "First Platform",
-      "deckCode": null,
+      "deckCode": "1stplat",
       "file": "deck_1stplat.jpg",
       "width": 7000,
       "height": 939,
@@ -672,7 +672,7 @@
     {
       "id": "deck_2ndplat",
       "label": "Second Platform",
-      "deckCode": null,
+      "deckCode": "2ndplat",
       "file": "deck_2ndplat.jpg",
       "width": 7000,
       "height": 789,
@@ -745,7 +745,7 @@
     {
       "id": "deck_hold",
       "label": "Hold",
-      "deckCode": null,
+      "deckCode": "hold",
       "file": "deck_hold.jpg",
       "width": 7000,
       "height": 714,
@@ -818,7 +818,7 @@
     {
       "id": "deck_db",
       "label": "Inner Bottom",
-      "deckCode": null,
+      "deckCode": "db",
       "file": "deck_db.jpg",
       "width": 7000,
       "height": 730,

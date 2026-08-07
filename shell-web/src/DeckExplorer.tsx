@@ -10,7 +10,7 @@ import {
   type Identity,
   type Rollup,
 } from "./api";
-import { ShipBoard, ZoneBoard, type Drill } from "./ReadinessBoards";
+import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
 import { framesPerSpan, frameToX, layoutPlan, packLanes, xToFrame } from "./deckGeometry";
 import {
@@ -186,6 +186,12 @@ export default function DeckExplorer({
     }
     return out;
   }, [rows, decks, cascadeEdges]);
+
+  /** Every compartment the selected space's cascade touches. */
+  const cascadePath = useMemo(
+    () => new Set(cascadeEdges.flat()),
+    [cascadeEdges],
+  );
 
   const allTrades = useMemo(() => {
     const set = new Set<string>();
@@ -381,7 +387,18 @@ export default function DeckExplorer({
         <div style={{ flex: "1 1 640px", minWidth: 380 }}>
           {altitude !== "compartment" ? (
             rollup ? (
-              <ReadinessAltitude altitude={altitude} rollup={rollup} onDrill={drill} />
+              <ReadinessAltitude
+                altitude={altitude}
+                rollup={rollup}
+                onDrill={drill}
+                zone={zoneFilter}
+                rows={visible}
+                decks={decks}
+                selected={selected}
+                toneOf={toneOf}
+                onSelect={setSelected}
+                cascade={cascadePath}
+              />
             ) : (
               <p style={{ color: DIM, fontSize: 12.5 }}>Reading the hull…</p>
             )
@@ -656,11 +673,27 @@ function ReadinessAltitude({
   altitude,
   rollup,
   onDrill,
+  zone,
+  rows,
+  decks,
+  selected,
+  toneOf,
+  onSelect,
+  cascade,
 }: {
   altitude: "ship" | "zone";
   rollup: Rollup;
   onDrill: (d: Drill) => void;
+  /** The section to lay out, when one has been picked in the rail. */
+  zone: string | null;
+  rows: DeckStateRow[];
+  decks: Deck[];
+  selected: string | null;
+  toneOf: (r: DeckStateRow) => { fg: string; bg: string; border: string };
+  onSelect: (compartment: string) => void;
+  cascade: Set<string>;
 }) {
+  const group = zone ? rollup.zones.find((z) => z.key === zone) : undefined;
   return (
     <div>
       <p style={{ color: DIM, fontSize: 11.5, margin: "0 0 12px", maxWidth: 800 }}>
@@ -674,6 +707,27 @@ function ReadinessAltitude({
       </p>
       {altitude === "ship" ? (
         <ShipBoard rollup={rollup} onDrill={onDrill} />
+      ) : zone && group ? (
+        // A zone picked in the rail opens as a section, matching the prototype.
+        // The cards are for choosing between zones; once you have chosen, the
+        // question changes to "what is where inside it", and that is the grid.
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <ZoneMatrix
+            zone={zone}
+            rows={rows}
+            decks={decks}
+            selected={selected}
+            toneOf={toneOf}
+            onSelect={onSelect}
+            cascade={cascade}
+          />
+          <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, padding: 13, background: "#121316" }}>
+            <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: DIM }}>
+              Who can release Zone {zone}
+            </div>
+            <ZoneHolders group={group} onDrill={onDrill} />
+          </div>
+        </div>
       ) : (
         <ZoneBoard rollup={rollup} onDrill={onDrill} />
       )}

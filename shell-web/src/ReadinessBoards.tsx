@@ -9,7 +9,15 @@
 // here re-adds, re-ranks or re-derives it — the ordering is the API's, so the
 // zone a superintendent opens is the zone the board said was worst.
 
-import { worstOf, type HeldSpace, type ReadinessGroup, type Rollup, type Tally } from "./api";
+import {
+  worstOf,
+  type Deck,
+  type DeckStateRow,
+  type HeldSpace,
+  type ReadinessGroup,
+  type Rollup,
+  type Tally,
+} from "./api";
 import { C, mh, READINESS_STYLE } from "./theme";
 
 const DIM = C.dim;
@@ -124,6 +132,234 @@ function WorstSpaces({ spaces, onDrill }: { spaces: HeldSpace[]; onDrill: (d: Dr
         </button>
       ))}
     </div>
+  );
+}
+
+/**
+ * Zone altitude's section view: the zone as a frame × deck grid.
+ *
+ * This is the view a zone superintendent actually works from, and the reason it
+ * is a grid rather than a list: a zone is a *slice through the ship*, and the
+ * question it exists to answer — "if I clear this space, what sits directly above
+ * and below it?" — is a question about two axes. A list flattens one of them away.
+ *
+ * Frames run bow-right, matching every plate and the deck plan, so a planner
+ * moving between the two views does not have to mirror the ship in their head.
+ */
+export function ZoneMatrix({
+  zone,
+  rows,
+  decks,
+  selected,
+  toneOf,
+  onSelect,
+  cascade,
+}: {
+  zone: string;
+  rows: DeckStateRow[];
+  decks: Deck[];
+  selected: string | null;
+  toneOf: (r: DeckStateRow) => { fg: string; bg: string; border: string };
+  onSelect: (compartment: string) => void;
+  /** Compartments on the selected space's cascade path. */
+  cascade: Set<string>;
+}) {
+  const inZone = rows.filter((r) => r.compartment.zone === zone);
+  const framed = inZone.filter((r) => r.compartment.frame !== null);
+  if (framed.length === 0) {
+    return (
+      <p style={{ color: DIM, fontSize: 12.5 }}>
+        No compartment in {zone} carries a frame station, so there is nothing to lay
+        out against the ship&rsquo;s length.
+      </p>
+    );
+  }
+
+  const frames = framed.map((r) => r.compartment.frame as number);
+  const lo = Math.min(...frames);
+  const hi = Math.max(...frames);
+  // Buckets wide enough that a column is a readable band of the ship rather than
+  // one frame — a zone spanning sixty frames would otherwise be sixty columns.
+  const COLS = Math.min(8, Math.max(2, hi - lo + 1));
+  const width = Math.max(1, (hi - lo + 1) / COLS);
+  const columns = Array.from({ length: COLS }, (_, i) => ({
+    from: Math.round(lo + i * width),
+    to: Math.round(lo + (i + 1) * width) - 1,
+  }));
+  // Bow on the right, so the highest frames are the leftmost column.
+  columns.reverse();
+
+  const deckRows = decks
+    .filter((d) => inZone.some((r) => r.compartment.deck_code === d.code))
+    .sort((a, b) => a.ordinal - b.ordinal);
+
+  // A column the cascade passes through on more than one deck IS the deck
+  // penetration, drawn. This grid is the clearest place in the product to see one
+  // — three spaces stacked in one column at the same frame is the hazard's route
+  // through the ship — so the column is tinted rather than left to be spotted.
+  const penetrated = new Set(
+    columns
+      .filter((c) => {
+        const decksHit = new Set(
+          framed
+            .filter(
+              (r) =>
+                cascade.has(r.compartment.compartment_no) &&
+                (r.compartment.frame as number) >= c.from &&
+                (r.compartment.frame as number) <= c.to,
+            )
+            .map((r) => r.compartment.deck_code),
+        );
+        return decksHit.size > 1;
+      })
+      .map((c) => c.from),
+  );
+
+  const cell = (deckCode: string, from: number, to: number) =>
+    framed.filter(
+      (r) =>
+        r.compartment.deck_code === deckCode &&
+        (r.compartment.frame as number) >= from &&
+        (r.compartment.frame as number) <= to,
+    );
+
+  return (
+    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#121316", overflow: "hidden" }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", padding: "8px 11px", borderBottom: `1px solid ${LINE}`, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12.5, fontWeight: 700 }}>Zone {zone} — section</span>
+        <span style={{ fontSize: 10.5, color: DIM }}>
+          frame × deck · Fr {lo}–{hi} · bow right
+        </span>
+        <span style={{ marginLeft: "auto", fontSize: 10.5, color: DIM }}>
+          {framed.length} of {inZone.length} spaces placed
+        </span>
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 520 }}>
+          <thead>
+            <tr>
+              <th style={{ ...headCell, textAlign: "left", minWidth: 96 }}>Deck ↓</th>
+              {columns.map((c) => (
+                <th
+                  key={c.from}
+                  style={{
+                    ...headCell,
+                    background: penetrated.has(c.from) ? "rgba(167,139,250,0.12)" : undefined,
+                    color: penetrated.has(c.from) ? "#c4b5fd" : headCell.color,
+                  }}
+                  title={penetrated.has(c.from) ? "The cascade crosses decks at these frames" : undefined}
+                >
+                  Fr {c.from === c.to ? c.from : `${c.from}–${c.to}`}
+                  {penetrated.has(c.from) && " ↕"}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {deckRows.map((d) => (
+              <tr key={d.code}>
+                <th style={{ ...bodyCell, textAlign: "left", fontWeight: 600, fontSize: 11, color: C.text }}>
+                  {d.label}
+                </th>
+                {columns.map((c) => {
+                  const here = cell(d.code, c.from, c.to);
+                  return (
+                    <td
+                      key={c.from}
+                      style={{
+                        ...bodyCell,
+                        background: penetrated.has(c.from) ? "rgba(167,139,250,0.07)" : undefined,
+                      }}
+                    >
+                      {here.length === 0 ? (
+                        // An empty cell is a real statement — no space of this
+                        // zone on this deck at these frames — so it is drawn as
+                        // absence rather than left blank and ambiguous.
+                        <span style={{ color: "#353842", fontSize: 11 }}>·</span>
+                      ) : (
+                        here.map((r) => {
+                          const tone = toneOf(r);
+                          const isSel = r.compartment.compartment_no === selected;
+                          return (
+                            <button
+                              key={r.compartment.compartment_no}
+                              onClick={() => onSelect(r.compartment.compartment_no)}
+                              title={`${r.compartment.name} — ${r.state}${
+                                r.remaining_hours > 0 ? ` · ${mh(r.remaining_hours)} left` : ""
+                              }`}
+                              style={{
+                                display: "block", width: "100%", marginBottom: 2, cursor: "pointer",
+                                font: "inherit", fontSize: 10, fontFamily: "monospace",
+                                padding: "3px 4px", borderRadius: 4,
+                                background: tone.bg, color: tone.fg,
+                                border: `1px solid ${
+                                  isSel ? C.accent : cascade.has(r.compartment.compartment_no) ? "#c4b5fd" : tone.border
+                                }`,
+                                borderWidth: isSel || cascade.has(r.compartment.compartment_no) ? 2 : 1,
+                              }}
+                            >
+                              {r.compartment.compartment_no}
+                              {r.readiness === "held" && (
+                                <span style={{ color: READINESS_STYLE.held.fg }}> ⚑</span>
+                              )}
+                            </button>
+                          );
+                        })
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {penetrated.size > 0 && (
+        <p style={{ fontSize: 10.5, color: "#c4b5fd", padding: "7px 11px", margin: 0, borderTop: `1px solid ${LINE}` }}>
+          ↕ marks frames where the selected space&rsquo;s cascade crosses a deck. Those
+          columns are the deck penetration — the part a single deck sheet cannot show.
+        </p>
+      )}
+      {framed.length < inZone.length && (
+        <p style={{ fontSize: 10.5, color: DIM, padding: "7px 11px", margin: 0, borderTop: `1px solid ${LINE}` }}>
+          {inZone.length - framed.length} space
+          {inZone.length - framed.length === 1 ? "" : "s"} in this zone carry no frame
+          station and are not in the grid.
+        </p>
+      )}
+    </div>
+  );
+}
+
+const headCell: React.CSSProperties = {
+  fontSize: 9.5,
+  letterSpacing: 0.5,
+  textTransform: "uppercase",
+  color: C.dim,
+  fontWeight: 600,
+  padding: "5px 6px",
+  borderBottom: `1px solid ${C.line}`,
+  borderRight: `1px solid ${C.line}`,
+  whiteSpace: "nowrap",
+};
+
+const bodyCell: React.CSSProperties = {
+  padding: 4,
+  borderBottom: `1px solid ${C.line}`,
+  borderRight: `1px solid ${C.line}`,
+  verticalAlign: "top",
+  textAlign: "center",
+};
+
+/** The holders and worst spaces for one group — reused by the zone section. */
+export function ZoneHolders({ group, onDrill }: { group: ReadinessGroup; onDrill: (d: Drill) => void }) {
+  return (
+    <>
+      <Holders group={group} />
+      <WorstSpaces spaces={group.worst_spaces} onDrill={onDrill} />
+    </>
   );
 }
 

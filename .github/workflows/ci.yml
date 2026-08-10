@@ -47,6 +47,18 @@ jobs:
       - name: run leak tests
         run: cargo test -p wadl-api --test generated_leak_test
 
+  fixtures:
+    name: sample P6 export is internally consistent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A schedule fixture nobody checks rots into a plausible-looking file that
+      # teaches a parser the wrong lessons. This also asserts the two conditions
+      # the sample carries on purpose are still there, so it cannot quietly stop
+      # covering the ground it claims to.
+      - name: validate the sample P6 export
+        run: python3 scripts/validate-p6-sample.py
+
   wasm:
     name: pure crates build for wasm32
     runs-on: ubuntu-latest

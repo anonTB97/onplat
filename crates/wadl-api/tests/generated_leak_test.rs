@@ -12,14 +12,21 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-async fn status(method: &str, path: &str, org: &str, assigned: &str) -> StatusCode {
+async fn status(
+    method: &str,
+    path: &str,
+    org: &str,
+    assigned: &str,
+    body: Option<&'static str>,
+) -> StatusCode {
     let (app, _world) = wadl_api::demo_app();
     let request = Request::builder()
         .method(method)
         .uri(path)
         .header("x-org-id", org)
         .header("x-assigned-vessels", assigned)
-        .body(Body::empty())
+        .header("content-type", "application/json")
+        .body(body.map_or_else(Body::empty, Body::from))
         .unwrap();
     app.oneshot(request).await.unwrap().status()
 }
@@ -41,7 +48,7 @@ async fn leak_get_api_vessels_id() {
     let path = "/api/vessels/:id"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -58,7 +65,7 @@ async fn leak_get_api_vessels_id_compartments() {
     let path = "/api/vessels/:id/compartments"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -75,7 +82,7 @@ async fn leak_get_api_vessels_id_work_orders() {
     let path = "/api/vessels/:id/work-orders"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -92,7 +99,7 @@ async fn leak_get_api_vessels_id_stranded_hours() {
     let path = "/api/vessels/:id/stranded-hours"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -109,7 +116,7 @@ async fn leak_get_api_vessels_id_timeframe() {
     let path = "/api/vessels/:id/timeframe"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -126,7 +133,7 @@ async fn leak_get_api_vessels_id_compartments_no_state() {
     let path = "/api/vessels/:id/compartments/:no/state"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -143,7 +150,7 @@ async fn leak_get_api_vessels_id_decks() {
     let path = "/api/vessels/:id/decks"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -160,7 +167,7 @@ async fn leak_get_api_vessels_id_deck_states() {
     let path = "/api/vessels/:id/deck-states"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -177,7 +184,7 @@ async fn leak_get_api_vessels_id_readiness() {
     let path = "/api/vessels/:id/readiness"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -194,7 +201,7 @@ async fn leak_get_api_vessels_id_compartments_no_mitigations() {
     let path = "/api/vessels/:id/compartments/:no/mitigations"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -211,11 +218,35 @@ async fn leak_get_api_vessels_id_leverage() {
     let path = "/api/vessels/:id/leverage"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
         "cross-tenant GET /api/vessels/:id/leverage must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_compartments_no_decision() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/compartments/:no/decision"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"disposition":"rejected","option":{},"reason":"leak test"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/compartments/:no/decision must be 404"
     );
 }
 
@@ -228,7 +259,7 @@ async fn leak_get_api_vessels_id_packages() {
     let path = "/api/vessels/:id/packages"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -245,7 +276,7 @@ async fn leak_get_api_vessels_id_packages_no() {
     let path = "/api/vessels/:id/packages/:no"
         .replace(":id", &foreign)
         .replace(":no", "4-141-0-C");
-    let code = status("GET", &path, &org, &assigned).await;
+    let code = status("GET", &path, &org, &assigned, None).await;
     assert_eq!(
         code,
         StatusCode::NOT_FOUND,
@@ -259,10 +290,13 @@ async fn control_in_tenant_get_vessel_is_ok() {
     let org = w.navy_org.as_uuid().to_string();
     let assigned = w.navy_hull.as_uuid().to_string();
     let path = format!("/api/vessels/{}", w.navy_hull.as_uuid());
-    assert_eq!(status("GET", &path, &org, &assigned).await, StatusCode::OK);
+    assert_eq!(
+        status("GET", &path, &org, &assigned, None).await,
+        StatusCode::OK
+    );
 }
 
 #[test]
 fn every_scoped_id_route_has_a_leak_test() {
-    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 13);
+    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 14);
 }

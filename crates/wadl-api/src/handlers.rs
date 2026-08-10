@@ -24,7 +24,7 @@ use crate::AppState;
 /// value read out of one response can be handed straight back in the next.
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
 pub(crate) struct AsOf {
-    as_of: Option<i64>,
+    pub(crate) as_of: Option<i64>,
 }
 
 impl AsOf {
@@ -538,7 +538,118 @@ pub(crate) async fn mitigations(
         spaces: &spaces,
     };
     let subject = CompartmentNo::new(compartment);
-    Ok(Json(json!(wadl_mitigate::assess(&world, &subject))))
+    let assessment = wadl_mitigate::assess(&world, &subject);
+    // The history comes with the options in one read. A planner deciding what to do
+    // needs to know what was already tried and rejected, and making that a second
+    // request means a surface can forget to ask.
+    let decided = state
+        .store
+        .list_audit(&scope, vessel, Some(subject.as_str()))
+        .await?;
+    let mut body = json!(assessment);
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("as_of".to_owned(), json!(at));
+        obj.insert("decisions".to_owned(), json!(decided));
+    }
+    Ok(Json(body))
+}
+
+/// What a planner decided about a proposed option.
+///
+/// The whole option is echoed back in the request rather than re-derived from an
+/// id, and that is deliberate. The record has to say what was on the screen when
+/// the choice was made — the effect was priced under a rule set and a hazard state
+/// that will both have moved on. Re-deriving "what would this have freed" years
+/// later answers a different question.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct DecisionBody {
+    /// `accepted` or `rejected`.
+    disposition: String,
+    /// The option as the planner saw it.
+    option: Value,
+    /// Why. Optional on accept, and the surface should press for it on reject.
+    #[serde(default)]
+    reason: String,
+    /// The instant the options were computed for.
+    #[serde(default)]
+    as_of: Option<i64>,
+}
+
+/// The immutable content of a decision, in a fixed field order.
+///
+/// A struct rather than an ad-hoc object because this is **hashed**: the ledger
+/// chains on the serialised `detail`, so its byte layout has to be stable. A map
+/// whose key order depended on insertion would produce a different hash for the
+/// same decision.
+#[derive(Debug, serde::Serialize)]
+struct DecisionDetail<'a> {
+    subject: &'a str,
+    disposition: &'a str,
+    as_of_ms: i64,
+    reason: &'a str,
+    /// The option verbatim, including the effect as computed at the time.
+    option: &'a Value,
+}
+
+/// Records a planner's disposition of an option in the audit ledger.
+///
+/// This does **not** apply the mitigation. Nothing here clears a hazard, moves a
+/// date or grants an authorization — the platform flags and prices; the yard acts.
+/// What is written is a statement that a named person was shown these options and
+/// chose this one, which is the part a board of inquiry asks about and the part no
+/// other system holds.
+pub(crate) async fn record_decision(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path((id, compartment)): Path<(Uuid, String)>,
+    body: Option<Json<DecisionBody>>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    // Scope first, and before the body is looked at: a caller with no business
+    // reading this hull must get the same not-found as for any other route, and
+    // must not be able to tell a malformed body from a foreign hull.
+    let hull = state.store.get_vessel(&scope, vessel).await?;
+    let Some(Json(body)) = body else {
+        return Err(ApiError::OutOfRange(
+            "a decision needs a body: disposition, option, and optionally a reason".to_owned(),
+        ));
+    };
+
+    let disposition = match body.disposition.as_str() {
+        "accepted" => "MITIGATION_ACCEPTED",
+        "rejected" => "MITIGATION_REJECTED",
+        other => {
+            return Err(ApiError::OutOfRange(format!(
+                "disposition must be accepted or rejected, got {other:?}"
+            )))
+        }
+    };
+    let at = AsOf { as_of: body.as_of }.resolve(&state, &hull)?;
+
+    let detail = DecisionDetail {
+        subject: &compartment,
+        disposition: &body.disposition,
+        as_of_ms: at.epoch_millis(),
+        reason: &body.reason,
+        option: &body.option,
+    };
+    // A serialisation failure on a struct of strings and numbers is not reachable;
+    // an empty detail would still be chained and would still verify, so there is
+    // nothing to gain from failing the request over it.
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            disposition,
+            &detail,
+            Some(&compartment),
+            state.clock.now().epoch_millis(),
+        )
+        .await?;
+    Ok(Json(json!(record)))
 }
 
 /// The hull's highest-leverage actions — the answer to *what is worth doing at

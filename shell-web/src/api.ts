@@ -359,3 +359,116 @@ export async function compartmentState(
   if (!res.ok) throw new Error(`compartment state → ${res.status}`);
   return (await res.json()) as { compartment: string; decision: Decision };
 }
+
+/* ------------------------------------------------------------- mitigations */
+
+/**
+ * Something a person could do that would change a verdict.
+ *
+ * Each kind maps onto one perturbation of the engine's inputs, which is why the
+ * effect below can be trusted: the server rebuilt the world with this action taken
+ * and re-evaluated the hull. Nothing here is interpolated or looked up.
+ */
+export type MitigationAction =
+  | { kind: "discharge"; origin: string; hazard: string; actor: string }
+  | { kind: "wait"; until: number }
+  | { kind: "interrupt"; from: string; to: string; coupling: string };
+
+export interface MitigationEffect {
+  frees: string[];
+  /** Spaces this action would SHUT. Never hide these. */
+  closes: string[];
+  freed_hours: number;
+  closed_hours: number;
+}
+
+/** What is computed versus what the platform is assuming. */
+export type Confidence = "computed" | "assumes_actor" | "assumes_own_authorization";
+
+export interface Mitigation {
+  action: MitigationAction;
+  effect: MitigationEffect;
+  confidence: Confidence;
+  subject_state: DecisionState;
+}
+
+export interface Hold {
+  rule_code: string;
+  origin: string;
+  hazard: string;
+  clearing_authority: string;
+  earliest_clear: number | null;
+}
+
+export interface AuditRecord {
+  seq: number;
+  action: string;
+  detail: string;
+  subject_ref: string | null;
+  occurred_at_ms: number;
+  entry_hash: string;
+  prev_hash: string | null;
+}
+
+export interface Assessment {
+  subject: string;
+  state: DecisionState;
+  booked: number;
+  holds: Hold[];
+  /** Ranked, best first. Empty when no single action opens the space. */
+  options: Mitigation[];
+  as_of: number;
+  /** What has already been decided here, newest first. */
+  decisions: AuditRecord[];
+}
+
+export async function mitigations(
+  id: Identity,
+  vesselId: string,
+  compartmentNo: string,
+  asOf: AsOf = null,
+): Promise<Assessment> {
+  const res = await fetch(
+    withAsOf(
+      `/api/vessels/${vesselId}/compartments/${encodeURIComponent(compartmentNo)}/mitigations`,
+      asOf,
+    ),
+    { headers: headers(id) },
+  );
+  if (!res.ok) throw new Error(`mitigations → ${res.status}`);
+  return (await res.json()) as Assessment;
+}
+
+export async function leverage(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<{ as_of: number; actions: Mitigation[] }> {
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/leverage`, asOf), {
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`leverage → ${res.status}`);
+  return (await res.json()) as { as_of: number; actions: Mitigation[] };
+}
+
+/**
+ * Records what a planner decided. Does **not** apply the mitigation — nothing in
+ * this product clears a hazard or moves a date.
+ */
+export async function recordDecision(
+  id: Identity,
+  vesselId: string,
+  compartmentNo: string,
+  body: { disposition: "accepted" | "rejected"; option: Mitigation; reason: string; as_of: AsOf },
+): Promise<AuditRecord> {
+  const res = await fetch(
+    `/api/vessels/${vesselId}/compartments/${encodeURIComponent(compartmentNo)}/decision`,
+    {
+      method: "POST",
+      headers: { ...headers(id), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw new Error(`decision → ${res.status}`);
+  return (await res.json()) as AuditRecord;
+}

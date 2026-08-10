@@ -27,7 +27,7 @@ pub mod routes;
 
 use std::sync::Arc;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 use wadl_domain::Clock;
@@ -83,6 +83,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::mitigations),
         )
         .route("/api/vessels/:id/leverage", get(handlers::leverage))
+        .route(
+            "/api/vessels/:id/compartments/:no/decision",
+            post(handlers::record_decision),
+        )
         .route("/api/vessels/:id/packages", get(handlers::list_packages))
         .route("/api/vessels/:id/packages/:no", get(handlers::get_package))
         .with_state(state)

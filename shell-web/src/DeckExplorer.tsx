@@ -14,6 +14,7 @@ import {
 import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
 import { VerticalTrace } from "./VerticalTrace";
+import Mitigations from "./Mitigations";
 import type { Altitude as ChromeAltitude } from "./Chrome";
 import { frameToX, layoutPlan, packLanes, xToFrame } from "./deckGeometry";
 import {
@@ -747,6 +748,17 @@ export default function DeckExplorer({
                     </div>
                   );
                 })}
+                {/* Directly under the trace, because the two answer consecutive
+                    questions: the trace says why the space is shut, and this says
+                    what would open it. Splitting them across screens would make a
+                    planner hold the first in their head while looking for the
+                    second. */}
+                <Mitigations
+                  identity={identity}
+                  vesselId={vesselId}
+                  compartment={selectedRow.compartment.compartment_no}
+                  asOf={asOf}
+                />
               </>
             )}
           </aside>

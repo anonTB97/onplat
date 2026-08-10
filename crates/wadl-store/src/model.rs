@@ -184,3 +184,29 @@ pub struct PackageSummary {
     /// Total earned man-hours.
     pub earned_hours: ManHours,
 }
+
+/// An append-only ledger record, as a surface reads it.
+///
+/// Hashes are hex rather than bytes because the only consumers are a JSON API and
+/// `wadl verify-ledger`; neither wants a byte array, and hex survives a copy-paste
+/// into a bug report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AuditRecord {
+    /// Monotonic sequence.
+    pub seq: i64,
+    /// What was recorded, e.g. `MITIGATION_ACCEPTED`.
+    pub action: String,
+    /// The full record. Hashed, so this is the trusted content.
+    pub detail: String,
+    /// Denormalised lookup key — a compartment placard for a space-scoped entry.
+    ///
+    /// Outside the hash chain, so it is an index and not the record: the
+    /// authoritative subject is inside `detail`.
+    pub subject_ref: Option<String>,
+    /// When it happened, epoch millis.
+    pub occurred_at_ms: i64,
+    /// This entry's hash, hex.
+    pub entry_hash: String,
+    /// The previous entry's hash, hex. `None` for the first entry.
+    pub prev_hash: Option<String>,
+}

@@ -21,8 +21,8 @@ use wadl_plan::{Package, Segment, SpaceWork};
 
 use crate::error::StoreError;
 use crate::model::{
-    CompartmentSummary, DeckSummary, PackageSummary, StrandedItem, StrandedReport, VesselSummary,
-    WorkOrderSummary,
+    AuditRecord, CompartmentSummary, DeckSummary, PackageSummary, StrandedItem, StrandedReport,
+    VesselSummary, WorkOrderSummary,
 };
 use crate::repo::Repositories;
 use crate::scope::TenantScope;
@@ -155,6 +155,17 @@ struct PackageSpaceRow {
     to_day: i64,
 }
 
+/// One appended ledger entry, held in memory.
+struct AuditRow {
+    vessel: VesselId,
+    action: String,
+    detail: String,
+    subject_ref: Option<String>,
+    occurred_at_ms: i64,
+    prev_hash: Option<Vec<u8>>,
+    entry_hash: Vec<u8>,
+}
+
 /// The seeded in-memory store.
 pub struct InMemoryStore {
     /// The instant the demo's story is told relative to. Every dated row is an
@@ -168,6 +179,14 @@ pub struct InMemoryStore {
     packages: Vec<PackageRow>,
     segments: Vec<SegmentRow>,
     package_spaces: Vec<PackageSpaceRow>,
+    /// The audit ledger. The only mutable state in this store, and behind a lock
+    /// rather than `&mut self` because the repository seam is a shared `Arc<dyn>`.
+    ///
+    /// The chain is computed with the real [`crate::ledger::compute_hash`], not a
+    /// stub: an in-memory ledger that skipped the chaining would let a chain bug
+    /// reach production untested, and `wadl verify-ledger` is supposed to work
+    /// against whatever wrote the entries.
+    audit: std::sync::Mutex<Vec<AuditRow>>,
 }
 
 /// The identifiers of the seeded demo world, handed back so the API and tests
@@ -259,6 +278,7 @@ impl InMemoryStore {
             packages: Self::seed_packages(&world),
             segments: Self::seed_segments(),
             package_spaces: Self::seed_package_spaces(),
+            audit: std::sync::Mutex::new(Vec::new()),
         };
         (store, world)
     }
@@ -1210,6 +1230,84 @@ impl Repositories for InMemoryStore {
                     earned_hours: package.spaces.values().map(|w| w.earned).sum(),
                 }
             })
+            .collect())
+    }
+
+    async fn append_audit(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        action: &str,
+        detail: &str,
+        subject_ref: Option<&str>,
+        occurred_at_ms: i64,
+    ) -> Result<AuditRecord, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        // A poisoned lock means a previous append panicked mid-write. Recovering
+        // the guard is right here: the ledger is append-only, so a partially
+        // written Vec is not a possible state, and refusing every later entry
+        // would turn one panic into a permanently unusable ledger.
+        let mut log = self
+            .audit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Chained per hull. Two hulls in one store are two ledgers, which is what
+        // the table's `(org_id, vessel_id)` scoping means in practice.
+        let prev = log
+            .iter()
+            .rfind(|r| r.vessel == vessel)
+            .map(|r| r.entry_hash.clone());
+        let entry_hash =
+            crate::ledger::compute_hash(prev.as_deref(), action, detail, occurred_at_ms);
+        let seq = i64::try_from(log.len()).unwrap_or(i64::MAX) + 1;
+        log.push(AuditRow {
+            vessel,
+            action: action.to_owned(),
+            detail: detail.to_owned(),
+            subject_ref: subject_ref.map(str::to_owned),
+            occurred_at_ms,
+            prev_hash: prev.clone(),
+            entry_hash: entry_hash.clone(),
+        });
+        Ok(AuditRecord {
+            seq,
+            action: action.to_owned(),
+            detail: detail.to_owned(),
+            subject_ref: subject_ref.map(str::to_owned),
+            occurred_at_ms,
+            entry_hash: hex::encode(entry_hash),
+            prev_hash: prev.map(hex::encode),
+        })
+    }
+
+    async fn list_audit(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        subject_ref: Option<&str>,
+    ) -> Result<Vec<AuditRecord>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let log = self
+            .audit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Newest first: a surface asking "what was decided here" wants the last
+        // decision at the top, and the history under it.
+        Ok(log
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.vessel == vessel)
+            .filter(|(_, r)| subject_ref.is_none_or(|want| r.subject_ref.as_deref() == Some(want)))
+            .map(|(i, r)| AuditRecord {
+                seq: i64::try_from(i).unwrap_or(i64::MAX) + 1,
+                action: r.action.clone(),
+                detail: r.detail.clone(),
+                subject_ref: r.subject_ref.clone(),
+                occurred_at_ms: r.occurred_at_ms,
+                entry_hash: hex::encode(&r.entry_hash),
+                prev_hash: r.prev_hash.as_ref().map(hex::encode),
+            })
+            .rev()
             .collect())
     }
 

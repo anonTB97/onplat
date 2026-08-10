@@ -74,14 +74,21 @@ fn render() -> String {
          use axum::body::Body;\n\
          use axum::http::{Request, StatusCode};\n\
          use tower::ServiceExt;\n\n\
-         async fn status(method: &str, path: &str, org: &str, assigned: &str) -> StatusCode {\n\
+         async fn status(\n\
+         \x20   method: &str,\n\
+         \x20   path: &str,\n\
+         \x20   org: &str,\n\
+         \x20   assigned: &str,\n\
+         \x20   body: Option<&'static str>,\n\
+         ) -> StatusCode {\n\
          \x20   let (app, _world) = wadl_api::demo_app();\n\
          \x20   let request = Request::builder()\n\
          \x20       .method(method)\n\
          \x20       .uri(path)\n\
          \x20       .header(\"x-org-id\", org)\n\
          \x20       .header(\"x-assigned-vessels\", assigned)\n\
-         \x20       .body(Body::empty())\n\
+         \x20       .header(\"content-type\", \"application/json\")\n\
+         \x20       .body(body.map_or_else(Body::empty, Body::from))\n\
          \x20       .unwrap();\n\
          \x20   app.oneshot(request).await.unwrap().status()\n\
          }\n\n\
@@ -105,12 +112,15 @@ fn render() -> String {
              \x20   let assigned = yard_assigned(&w);\n\
              \x20   let foreign = w.navy_hull.as_uuid().to_string();\n\
              \x20   let path = \"{path}\".replace(\":id\", &foreign).replace(\":no\", \"4-141-0-C\");\n\
-             \x20   let code = status(\"{method}\", &path, &org, &assigned).await;\n\
+             \x20   let code = status(\"{method}\", &path, &org, &assigned, {body}).await;\n\
              \x20   assert_eq!(code, StatusCode::NOT_FOUND, \"cross-tenant {method} {path} must be 404\");\n\
              }}\n\n",
             name = name,
             path = spec.path,
             method = spec.method,
+            body = spec
+                .sample_body
+                .map_or_else(|| "None".to_owned(), |b| format!("Some(r#\"{b}\"#)")),
         );
     }
 
@@ -123,7 +133,7 @@ fn render() -> String {
          \x20   let org = w.navy_org.as_uuid().to_string();\n\
          \x20   let assigned = w.navy_hull.as_uuid().to_string();\n\
          \x20   let path = format!(\"/api/vessels/{}\", w.navy_hull.as_uuid());\n\
-         \x20   assert_eq!(status(\"GET\", &path, &org, &assigned).await, StatusCode::OK);\n\
+         \x20   assert_eq!(status(\"GET\", &path, &org, &assigned, None).await, StatusCode::OK);\n\
          }\n\n",
     );
 

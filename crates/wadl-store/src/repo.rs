@@ -6,7 +6,7 @@ use wadl_plan::Package;
 
 use crate::error::StoreError;
 use crate::model::{
-    CompartmentSummary, DeckSummary, PackageSummary, StrandedReport, VesselSummary,
+    AuditRecord, CompartmentSummary, DeckSummary, PackageSummary, StrandedReport, VesselSummary,
     WorkOrderSummary,
 };
 use crate::scope::TenantScope;
@@ -121,6 +121,38 @@ pub trait Repositories: Send + Sync {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<Vec<PackageSummary>, StoreError>;
+
+    /// Appends an entry to the hull's audit ledger, chained to the last one.
+    ///
+    /// `occurred_at_ms` is supplied by the caller rather than read here, because
+    /// the store has no clock — the one door for wall-clock time is the injected
+    /// [`wadl_domain::Clock`], and the API holds it.
+    ///
+    /// `detail` is hashed, so it is the record. `subject_ref` is an unhashed
+    /// lookup key.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn append_audit(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        action: &str,
+        detail: &str,
+        subject_ref: Option<&str>,
+        occurred_at_ms: i64,
+    ) -> Result<AuditRecord, StoreError>;
+
+    /// The hull's audit entries, newest first, optionally narrowed to one subject.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn list_audit(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        subject_ref: Option<&str>,
+    ) -> Result<Vec<AuditRecord>, StoreError>;
 
     /// One package with its full segment topology and per-compartment work,
     /// ready to hand to [`wadl_plan`] for analysis.

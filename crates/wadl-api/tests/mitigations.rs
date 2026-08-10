@@ -254,3 +254,151 @@ async fn an_out_of_range_instant_is_refused() {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
     }
 }
+
+async fn post(
+    app: &axum::Router,
+    world: &DemoWorld,
+    path: &str,
+    body: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("x-org-id", world.yard_org.as_uuid().to_string())
+        .header("x-assigned-vessels", world.cvn73.as_uuid().to_string())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// A recorded decision lands in the ledger, chains to the one before it, and comes
+/// back with the options next time — which is the point. A planner opening a space
+/// needs to see what was already tried and why it was turned down.
+#[tokio::test]
+async fn a_decision_is_recorded_chained_and_returned_with_the_options() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let space = "4-160-2-Q";
+
+    let (_, before) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/{space}/mitigations"),
+    )
+    .await;
+    assert!(before["decisions"].as_array().unwrap().is_empty());
+    let option = &before["options"][0];
+
+    let body = serde_json::json!({
+        "disposition": "rejected",
+        "option": option,
+        "reason": "chemist unavailable before the back shift",
+        "as_of": ANCHOR,
+    });
+    let (status, first) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/{space}/decision"),
+        &body.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["action"], "MITIGATION_REJECTED");
+    assert_eq!(first["subject_ref"], space);
+    assert!(first["prev_hash"].is_null(), "first entry in the chain");
+    let first_hash = first["entry_hash"].as_str().unwrap().to_owned();
+    assert_eq!(first_hash.len(), 64, "a sha-256 in hex");
+
+    // The reason and the option as it was seen are inside the hashed detail, so
+    // neither can be altered without breaking the chain.
+    let detail = first["detail"].as_str().unwrap();
+    assert!(detail.contains("chemist unavailable"));
+    assert!(detail.contains("\"subject\":\"4-160-2-Q\""));
+
+    // A second decision chains onto the first.
+    let (status, second) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/{space}/decision"),
+        &serde_json::json!({
+            "disposition": "accepted",
+            "option": option,
+            "reason": "waiting it out",
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["action"], "MITIGATION_ACCEPTED");
+    assert_eq!(
+        second["prev_hash"].as_str().unwrap(),
+        first_hash,
+        "the chain links to the previous entry"
+    );
+
+    // And both come back with the options, newest first.
+    let (_, after) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/{space}/mitigations"),
+    )
+    .await;
+    let decisions = after["decisions"].as_array().unwrap();
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(
+        decisions[0]["action"], "MITIGATION_ACCEPTED",
+        "newest first"
+    );
+}
+
+/// Recording a decision about one space must not surface on another.
+#[tokio::test]
+async fn decisions_are_scoped_to_their_space() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, _) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        &serde_json::json!({"disposition": "rejected", "option": {}, "reason": "x"}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, other) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/3-148-2-E/mitigations"),
+    )
+    .await;
+    assert!(other["decisions"].as_array().unwrap().is_empty());
+}
+
+/// A disposition the platform does not understand is refused with the reason,
+/// rather than recorded as something it is not.
+#[tokio::test]
+async fn an_unknown_disposition_is_refused() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, body) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        &serde_json::json!({"disposition": "maybe", "option": {}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("maybe"));
+}

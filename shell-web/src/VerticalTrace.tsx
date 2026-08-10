@@ -27,6 +27,15 @@ const W = 1000;
 const LABEL_W = 92;
 /** Height of one deck lane. */
 const LANE_H = 150;
+/**
+ * Dead space at the top and bottom of each lane.
+ *
+ * The decks are drawn as inverted plates on a near-black ground, so three lanes
+ * stacked flush read as a single continuous drawing and a reader cannot tell
+ * which deck a marker is on — which defeats the one question this view answers.
+ * A gutter is cheaper than a heavier border and does not fight the linework.
+ */
+const GUTTER = 3;
 /** Height of the shared frame ruler under the stack. */
 const RULER_H = 26;
 /** Frames of padding either side of the outermost marker. */
@@ -45,6 +54,38 @@ function tickStep(span: number): number {
     if (span / step <= 10) return step;
   }
   return 200;
+}
+
+/** How many decks the trace stacks. Three: the selected one, and both neighbours. */
+const BAND = 3;
+
+/**
+ * The decks to stack: the selected one and its immediate neighbours **by position
+ * in the register**, not by ordinal arithmetic.
+ *
+ * `ordinal` is an ordering key, not a metric. This class register runs
+ * … Gallery −1, Main 1 … with no zero, because there is no deck between the
+ * gallery deck and the main deck to number. Subtracting ordinals therefore put
+ * the gallery deck two units from the main deck and dropped it from the band, so
+ * opening the Deck Explorer on the main deck produced a two-lane "three-deck
+ * trace" — and the entire reason this view exists is that a hazard through a deck
+ * penetration travels up *and* down.
+ *
+ * At the ends of the register the window slides rather than shrinking, so the
+ * count is stable. A trace that quietly loses a lane at the extremes is a trace
+ * you cannot rely on to be showing you the neighbour at all.
+ *
+ * Note what this deliberately does NOT do: skip decks that carry no compartments
+ * in favour of populated ones further away. The lanes are physically adjacent or
+ * the view is lying — a penetration reaches the deck immediately above, and
+ * putting a non-adjacent deck in that lane would make "directly above" false. An
+ * empty lane is information: the register has nothing there.
+ */
+function bandOf(ordered: Deck[], centreIdx: number): Deck[] {
+  if (ordered.length <= BAND) return ordered;
+  const half = Math.floor(BAND / 2);
+  const start = Math.min(Math.max(centreIdx - half, 0), ordered.length - BAND);
+  return ordered.slice(start, start + BAND);
 }
 
 export function VerticalTrace({
@@ -67,8 +108,9 @@ export function VerticalTrace({
   cascadeEdges: [string, string][];
 }) {
   const ordered = [...decks].sort((a, b) => a.ordinal - b.ordinal);
-  const band = ordered.filter((d) => Math.abs(d.ordinal - centreOrdinal) <= 1);
   const centreIdx = ordered.findIndex((d) => d.ordinal === centreOrdinal);
+  const band = bandOf(ordered, centreIdx);
+  const inBand = new Set(band.map((d) => d.code));
   const shift = (delta: number) => {
     const next = ordered[Math.min(Math.max(centreIdx + delta, 0), ordered.length - 1)];
     if (next) onDeck(next.code);
@@ -116,7 +158,18 @@ export function VerticalTrace({
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, fontSize: 11, fontWeight: 600, flexWrap: "wrap" }}>
-        <span>Vertical trace — deck above, selected, below</span>
+        {/* Not "deck above, selected, below" unconditionally: at either end of the
+            register the window slides, so the selected deck is the top or bottom
+            lane rather than the middle one. Saying otherwise would misdescribe
+            which lane is which on exactly the decks where it matters most. */}
+        <span>
+          Vertical trace — {band.length} decks
+          {centreIdx === 0
+            ? ": selected, and the two below"
+            : centreIdx === ordered.length - 1
+              ? ": the two above, and selected"
+              : ": above, selected, below"}
+        </span>
         <span style={{ color: DIM, fontWeight: 400 }}>
           one shared frame axis · each plate placed by its own scale
         </span>
@@ -139,7 +192,10 @@ export function VerticalTrace({
             Stack
           </div>
           {ordered.map((d) => {
-            const inBand = Math.abs(d.ordinal - centreOrdinal) <= 1;
+            // Read from the same band the lanes were built from. Recomputing it
+            // here is how the ribbon and the stack come to disagree about which
+            // decks are on screen.
+            const onScreen = inBand.has(d.code);
             const isCentre = d.ordinal === centreOrdinal;
             const held = rows.filter((r) => r.compartment.deck_code === d.code && r.readiness === "held").length;
             return (
@@ -151,9 +207,9 @@ export function VerticalTrace({
                   display: "flex", alignItems: "center", gap: 5, width: "100%", textAlign: "left",
                   font: "inherit", fontSize: 10, cursor: "pointer", padding: "3px 8px",
                   background: isCentre ? "#20222b" : "transparent",
-                  color: inBand ? C.text : "#5a6070",
+                  color: onScreen ? C.text : "#5a6070",
                   border: "none",
-                  borderLeft: `3px solid ${isCentre ? C.accent : inBand ? "#353842" : "transparent"}`,
+                  borderLeft: `3px solid ${isCentre ? C.accent : onScreen ? "#353842" : "transparent"}`,
                 }}
               >
                 <span style={{ flex: 1, lineHeight: 1.2 }}>{d.label}</span>
@@ -167,7 +223,16 @@ export function VerticalTrace({
           <defs>
             {lanes.map((lane) => (
               <clipPath key={lane.deck.code} id={`lane-${lane.deck.code}`}>
-                <rect x={LABEL_W} y={lane.top} width={W - LABEL_W} height={LANE_H} />
+                {/* Inset by the gutter, so a lane's plate cannot bleed into its
+                    neighbour's. Three dark plates butted edge to edge read as one
+                    continuous drawing, which is the opposite of what this view is
+                    for: you could not tell which deck a marker sat on. */}
+                <rect
+                  x={LABEL_W}
+                  y={lane.top + GUTTER}
+                  width={W - LABEL_W}
+                  height={LANE_H - GUTTER * 2}
+                />
               </clipPath>
             ))}
           </defs>
@@ -178,6 +243,13 @@ export function VerticalTrace({
             return (
               <g key={lane.deck.code}>
                 <rect x={0} y={lane.top} width={W} height={LANE_H} fill={isCentre ? "#141720" : "#0e0f13"} />
+                {/* The deck's own band of substrate, so the gutter reads as a
+                    separation rather than as part of the drawing. */}
+                <rect
+                  x={LABEL_W} y={lane.top + GUTTER}
+                  width={W - LABEL_W} height={LANE_H - GUTTER * 2}
+                  fill="#0b0c0e"
+                />
                 {/* The deck's own plate, sliced to the shared frame window. Each
                     lane is placed by its own calibration — that is what makes the
                     lanes comparable at all. */}
@@ -195,8 +267,10 @@ export function VerticalTrace({
                 {/* Drawn after the plate so the lane edges stay legible through it,
                     and heavier on the selected deck. */}
                 <rect
-                  x={0} y={lane.top} width={W} height={LANE_H}
-                  fill="none" stroke={isCentre ? "#3a3f52" : "#22252f"} strokeWidth={isCentre ? 1.6 : 1}
+                  x={LABEL_W} y={lane.top + GUTTER}
+                  width={W - LABEL_W} height={LANE_H - GUTTER * 2}
+                  fill="none" stroke={isCentre ? C.accent : "#3d4253"} strokeWidth={isCentre ? 1.6 : 1}
+                  opacity={isCentre ? 0.85 : 1}
                 />
                 <rect x={0} y={lane.top} width={LABEL_W} height={LANE_H} fill={isCentre ? "#141720" : "#0e0f13"} />
                 <text x={8} y={lane.top + 15} fill={isCentre ? C.text : DIM} fontSize={10.5} fontWeight={600}>

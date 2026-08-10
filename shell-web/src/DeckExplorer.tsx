@@ -68,6 +68,24 @@ function tradeColour(trade: string, all: string[]): string {
   return i < 0 ? "#6e7480" : TRADE_COLOURS[i % TRADE_COLOURS.length];
 }
 
+/**
+ * Which deck to open on: the one carrying the most registered compartments.
+ *
+ * Was "the first deck with any compartments", which on this class register is the
+ * main deck — two spaces out of twenty-four. The Explorer opened on the emptiest
+ * populated deck in the hull, which reads as missing data rather than as a deck
+ * with two spaces on it, and left the vertical trace stacking the two thinnest
+ * lanes available. Opening where the register is densest puts the reader where
+ * there is something to read; every other deck is one click away in the rail.
+ */
+function landingDeck(decks: Deck[]): string | null {
+  const best = decks.reduce<Deck | null>(
+    (a, b) => (a === null || b.compartment_count > a.compartment_count ? b : a),
+    null,
+  );
+  return (best?.compartment_count ?? 0) > 0 ? (best?.code ?? null) : (decks[0]?.code ?? null);
+}
+
 export default function DeckExplorer({
   identity,
   vesselId,
@@ -140,7 +158,7 @@ export default function DeckExplorer({
     listDecks(identity, vesselId)
       .then((d) => {
         setDecks(d);
-        setSelectedDeck(d.find((x) => x.compartment_count > 0)?.code ?? d[0]?.code ?? null);
+        setSelectedDeck(landingDeck(d));
       })
       .catch((e: unknown) => {
         setDecks([]);

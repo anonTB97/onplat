@@ -28,11 +28,11 @@
 
 use proptest::prelude::*;
 use wadl_domain::compartment::CompartmentNo;
-use wadl_domain::ids::CouplingTypeId;
+use wadl_domain::ids::{CouplingTypeId, RuleVersionId};
 use wadl_domain::time::Timestamp;
-use wadl_domain::units::{HopDepth, ManHours};
+use wadl_domain::units::{HopDepth, ManHours, Minutes};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
-use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
+use wadl_engine::{AdjacencyGraph, Applies, DecisionState, Hazard, HazardKind, RuleEntry, RuleSet};
 use wadl_mitigate::{assess, leverage, Action, Confidence, SpaceLoad, World};
 
 const T0: i64 = 1_778_649_300_000;
@@ -109,11 +109,14 @@ fn energised_bus() -> Hazard {
     }
 }
 
+type Loads = Box<dyn Fn(Timestamp) -> Vec<SpaceLoad> + Sync>;
+
 struct Fixture {
     graph: AdjacencyGraph,
     rules: RuleSet,
     hazards: Vec<Hazard>,
     spaces: Vec<SpaceLoad>,
+    loads: Loads,
 }
 
 impl Fixture {
@@ -123,16 +126,21 @@ impl Fixture {
             rules: RuleSet::seed_usn_hot_work(),
             hazards,
             spaces: spaces(),
+            loads: Box::new(|_| spaces()),
         }
     }
 
+    /// Loads are a closure over the fixture's fixed set: these tests are about which
+    /// options are offered and how they rank, not about dated work, so the hours are
+    /// the same at every instant. A fixture whose hours moved with time would make
+    /// every ranking assertion depend on two things at once.
     fn world(&self, at_ms: i64) -> World<'_> {
         World {
             graph: &self.graph,
             rules: &self.rules,
             hazards: &self.hazards,
             at: at(at_ms),
-            spaces: &self.spaces,
+            loads: &self.loads,
         }
     }
 }
@@ -470,6 +478,111 @@ fn leverage_never_lists_an_action_that_frees_nothing() {
         assert!(!m.effect.frees.is_empty(), "{:?} frees nothing", m.action);
         assert!(m.effect.net_hours() != 0 || m.effect.freed_hours.get() == 0);
     }
+}
+
+// ---------------------------------------------------- regressions from review
+
+/// An advisory WARN alongside a blocking hold must not suppress the wait.
+///
+/// The gating used to span the whole trace, so one WARN rule with no clock — a
+/// condition flagged, which permits work — made the crate refuse to offer a wait
+/// that demonstrably opened the space. Built from a hand-authored rule set because
+/// the seeded one has no untimed WARN to reproduce it with.
+#[test]
+fn an_untimed_warn_does_not_suppress_a_working_wait() {
+    let version = RuleVersionId::from_uuid(uuid::Uuid::from_u128(0x9001));
+    let rules = RuleSet::new(vec![
+        // Blocks the space, on an eight-hour clock.
+        RuleEntry {
+            rule_code: "X01".to_owned(),
+            rule_version: version,
+            hazard: HazardKind::CoatingOpen,
+            applies: Applies::SameSpace,
+            state: DecisionState::Block,
+            authority: "test".to_owned(),
+            clearing_authority: "marine_chemist".to_owned(),
+            hold: Some(Minutes::new(480)),
+            waivable: false,
+        },
+        // Flags a condition in the same space, with no clock on it. Permits work.
+        RuleEntry {
+            rule_code: "X02".to_owned(),
+            rule_version: version,
+            hazard: HazardKind::CoatingOpen,
+            applies: Applies::SameSpace,
+            state: DecisionState::Warn,
+            authority: "test".to_owned(),
+            clearing_authority: "qa".to_owned(),
+            hold: None,
+            waivable: true,
+        },
+    ]);
+    let f = Fixture {
+        rules,
+        ..Fixture::new(vec![coating()])
+    };
+    let world = f.world(T0);
+    let a = assess(&world, &CompartmentNo::new("3-160-2-Q"));
+
+    assert_eq!(a.state, DecisionState::Block);
+    assert!(
+        a.holds.iter().any(|h| !h.blocks()),
+        "the fixture must contain an advisory hold or it proves nothing: {:?}",
+        a.holds
+    );
+    let wait = a
+        .options
+        .iter()
+        .find(|o| matches!(o.action, Action::Wait { .. }))
+        .expect("waiting clears the only hold that stops work");
+    assert_eq!(
+        wait.subject_state,
+        DecisionState::Warn,
+        "the advisory remains"
+    );
+    assert!(wait.subject_state.permits_work());
+}
+
+/// One physical closure, one row. `apply` cuts a coupling in both directions, so its
+/// identity must be direction-free or the leverage board lists it twice — which is
+/// the duplication the dedup exists to prevent.
+#[test]
+fn a_coupling_cut_has_one_identity_whichever_way_it_is_named() {
+    // Two hazards either side of the same bulkhead, so the trace reaches the coupling
+    // from both ends.
+    let f = Fixture::new(vec![
+        Hazard {
+            origin: CompartmentNo::new("3-148-2-E"),
+            kind: HazardKind::StopWork,
+            since: at(T0),
+            label: "STOP WORK · one side".to_owned(),
+        },
+        Hazard {
+            origin: CompartmentNo::new("3-148-0-L"),
+            kind: HazardKind::StopWork,
+            since: at(T0),
+            label: "STOP WORK · other side".to_owned(),
+        },
+    ]);
+    let world = f.world(T0);
+    let cuts: Vec<_> = leverage(&world)
+        .into_iter()
+        .filter_map(|m| match m.action {
+            Action::Interrupt { from, to, coupling } => {
+                let mut pair = [from.as_str().to_owned(), to.as_str().to_owned()];
+                pair.sort();
+                Some((pair, coupling))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut deduped = cuts.clone();
+    deduped.dedup();
+    assert_eq!(
+        cuts.len(),
+        deduped.len(),
+        "the same closure was listed twice: {cuts:?}"
+    );
 }
 
 // ---------------------------------------------------------------------- proptest

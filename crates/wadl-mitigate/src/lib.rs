@@ -87,7 +87,7 @@ pub struct SpaceLoad {
 
 /// Everything an option is computed against: the engine's own inputs, plus what
 /// work is booked where.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct World<'a> {
     /// The hull's resolved adjacency graph.
     pub graph: &'a AdjacencyGraph,
@@ -97,8 +97,19 @@ pub struct World<'a> {
     pub hazards: &'a [Hazard],
     /// The instant everything is evaluated at.
     pub at: Timestamp,
-    /// Every space in the register, with the hours booked in it at `at`.
-    pub spaces: &'a [SpaceLoad],
+    /// Every space in the register, with the hours booked in it **at a given
+    /// instant**.
+    ///
+    /// A function rather than a slice, because a `Wait` is evaluated at a future
+    /// instant and has to be *priced* at that instant too. Booked work is
+    /// window-filtered, so pricing a twelve-hour cure with today's bookings was
+    /// wrong in both directions — and recovered man-hours is the only ranking key
+    /// this crate has. The caller supplies the closure so there stays exactly one
+    /// implementation of "what is booked here", shared with every other board.
+    /// `Sync` so that `&World` is `Send`: these are read from async request
+    /// handlers, where a world held across an await point must cross threads. It
+    /// costs the pure crate nothing — a closure over borrowed data already is.
+    pub loads: &'a (dyn Fn(Timestamp) -> Vec<SpaceLoad> + Sync),
 }
 
 /// An owned variant of a [`World`] — the hypothetical an [`Action`] produces.
@@ -175,7 +186,18 @@ impl Action {
         match self {
             Self::Wait { until } => format!("0:{}", until.epoch_millis()),
             Self::Discharge { origin, hazard, .. } => format!("1:{origin}:{hazard}"),
-            Self::Interrupt { from, to, coupling } => format!("2:{from}:{to}:{coupling}"),
+            // Endpoints ordered, because `apply` cuts the coupling in BOTH
+            // directions. One physical closure must have one identity, or the
+            // leverage board lists it twice — the exact duplication the dedup
+            // there exists to prevent.
+            Self::Interrupt { from, to, coupling } => {
+                let (a, b) = if from.as_str() <= to.as_str() {
+                    (from, to)
+                } else {
+                    (to, from)
+                };
+                format!("2:{a}:{b}:{coupling}")
+            }
         }
     }
 
@@ -301,6 +323,21 @@ pub struct Hold {
     pub clearing_authority: String,
     /// When it expires on a clock, or `None` when it clears on verification.
     pub earliest_clear: Option<Timestamp>,
+    /// The state this hold contributes.
+    ///
+    /// Carried because a WARN and a BLOCK are not the same object to reason about.
+    /// A WARN permits work — it is a condition flagged, not a hold to discharge —
+    /// and treating the two alike let one advisory WARN with no clock suppress a
+    /// `Wait` that demonstrably opened the space.
+    pub state: DecisionState,
+}
+
+impl Hold {
+    /// Whether this is what stops work, as opposed to a condition flagged alongside.
+    #[must_use]
+    pub const fn blocks(&self) -> bool {
+        !self.state.permits_work()
+    }
 }
 
 /// The full answer for one detected issue.
@@ -423,6 +460,7 @@ fn holds_of(decision: &Decision) -> Vec<Hold> {
             hazard: step.hazard.clone(),
             clearing_authority: step.clearing_authority.clone(),
             earliest_clear: step.earliest_clear,
+            state: step.state,
         });
     }
     out
@@ -440,11 +478,22 @@ fn candidates(decision: &Decision) -> Vec<Action> {
     let mut out: Vec<Action> = Vec::new();
     let mut seen = BTreeSet::new();
 
-    // Waiting only ever clears a space where every hold is on a clock. One
-    // verification-gated hold and no amount of time helps.
-    let all_timed =
-        !decision.trace.is_empty() && decision.trace.iter().all(|s| s.earliest_clear.is_some());
-    if let (true, Some(until)) = (all_timed, decision.earliest_clear) {
+    // Waiting can only help where every hold that *stops work* is on a clock. One
+    // verification-gated hold among them and no amount of time helps.
+    //
+    // Restricted to blocking steps deliberately. Spanning the whole trace let a
+    // single advisory WARN with no clock — a condition flagged, not a hold —
+    // permanently suppress a wait that would have opened the space. Whether the
+    // wait actually works is still settled by re-evaluation rather than by this
+    // reasoning, so being generous here costs nothing.
+    let timed_expiry = decision
+        .trace
+        .iter()
+        .filter(|s| !s.state.permits_work())
+        .map(|s| s.earliest_clear)
+        .collect::<Option<Vec<_>>>()
+        .and_then(|expiries| expiries.into_iter().max());
+    if let Some(until) = timed_expiry {
         out.push(Action::Wait { until });
     }
 
@@ -475,12 +524,36 @@ fn candidates(decision: &Decision) -> Vec<Action> {
     out
 }
 
+/// Which spaces permit work in the world as it is.
+///
+/// Computed once and reused: it is the same answer for every action, and
+/// recomputing it per action made the hull-wide board do twice the evaluations it
+/// needed for no gain.
+fn baseline(world: &World<'_>) -> BTreeMap<CompartmentNo, bool> {
+    (world.loads)(world.at)
+        .into_iter()
+        .map(|load| {
+            let open = decide(world, &load.compartment).permits_work();
+            (load.compartment, open)
+        })
+        .collect()
+}
+
 /// The consequence of a set of actions across every space in the register.
-fn effect_of(world: &World<'_>, actions: &[Action]) -> Effect {
+///
+/// Hours come from the instant the variant is evaluated at, not from `world.at`.
+/// That is the whole reason [`World::loads`] is a function: booked work is
+/// window-filtered, so pricing a twelve-hour cure with today's bookings misstates
+/// the one number the ranking is built on.
+fn effect_of(
+    world: &World<'_>,
+    base: &BTreeMap<CompartmentNo, bool>,
+    actions: &[Action],
+) -> Effect {
     let variant = variant_for(world, actions);
     let mut effect = Effect::default();
-    for load in world.spaces {
-        let before = decide(world, &load.compartment).permits_work();
+    for load in (world.loads)(variant.at) {
+        let before = base.get(&load.compartment).copied().unwrap_or(true);
         let after = variant
             .decide(world.rules, &load.compartment)
             .permits_work();
@@ -518,9 +591,8 @@ fn rank(options: &mut [Mitigation]) {
 #[must_use]
 pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
     let decision = decide(world, subject);
-    let booked = world
-        .spaces
-        .iter()
+    let booked = (world.loads)(world.at)
+        .into_iter()
         .find(|s| &s.compartment == subject)
         .map_or(ManHours::ZERO, |s| s.booked);
 
@@ -538,6 +610,7 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
         return assessment;
     }
 
+    let base = baseline(world);
     for action in candidates(&decision) {
         let after = variant_for(world, std::slice::from_ref(&action)).decide(world.rules, subject);
         if !after.permits_work() {
@@ -545,7 +618,7 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
         }
         assessment.options.push(Mitigation {
             confidence: action.confidence(),
-            effect: effect_of(world, std::slice::from_ref(&action)),
+            effect: effect_of(world, &base, std::slice::from_ref(&action)),
             subject_state: after.state,
             action,
         });
@@ -555,7 +628,7 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
     // would be noise: a planner with one thing to do does not need the plan that
     // does everything.
     if assessment.options.is_empty() {
-        assessment.combined = combined_for(world, subject, &assessment.holds);
+        assessment.combined = combined_for(world, &base, subject, &assessment.holds);
     }
     assessment
 }
@@ -569,16 +642,27 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
 ///
 /// So: one `Wait` covering every timed hold, plus one `Discharge` per hazard whose
 /// hold has no clock.
-fn combined_for(world: &World<'_>, subject: &CompartmentNo, holds: &[Hold]) -> Option<Combined> {
-    if holds.len() < 2 {
+///
+/// Only the holds that actually stop work are considered. An advisory WARN alongside
+/// them needs nothing done: including it added a step to the plan that was not
+/// needed, and pushed the `Wait` out to an instant that could bring fresh hazards
+/// live and put spaces in `closes` for no reason.
+fn combined_for(
+    world: &World<'_>,
+    base: &BTreeMap<CompartmentNo, bool>,
+    subject: &CompartmentNo,
+    holds: &[Hold],
+) -> Option<Combined> {
+    let blocking: Vec<&Hold> = holds.iter().filter(|h| h.blocks()).collect();
+    if blocking.len() < 2 {
         return None;
     }
     let mut actions = Vec::new();
-    if let Some(until) = holds.iter().filter_map(|h| h.earliest_clear).max() {
+    if let Some(until) = blocking.iter().filter_map(|h| h.earliest_clear).max() {
         actions.push(Action::Wait { until });
     }
     let mut seen = BTreeSet::new();
-    for hold in holds.iter().filter(|h| h.earliest_clear.is_none()) {
+    for hold in blocking.iter().filter(|h| h.earliest_clear.is_none()) {
         if seen.insert((hold.origin.clone(), hold.hazard.clone())) {
             actions.push(Action::Discharge {
                 origin: hold.origin.clone(),
@@ -603,7 +687,7 @@ fn combined_for(world: &World<'_>, subject: &CompartmentNo, holds: &[Hold]) -> O
         .max_by_key(|c| c.rank())
         .unwrap_or(Confidence::Computed);
     Some(Combined {
-        effect: effect_of(world, &actions),
+        effect: effect_of(world, base, &actions),
         subject_state: after.state,
         confidence,
         actions,
@@ -623,7 +707,7 @@ fn combined_for(world: &World<'_>, subject: &CompartmentNo, holds: &[Hold]) -> O
 #[must_use]
 pub fn leverage(world: &World<'_>) -> Vec<Mitigation> {
     let mut by_action: BTreeMap<String, Action> = BTreeMap::new();
-    for load in world.spaces {
+    for load in &(world.loads)(world.at) {
         let decision = decide(world, &load.compartment);
         if decision.permits_work() {
             continue;
@@ -633,10 +717,11 @@ pub fn leverage(world: &World<'_>) -> Vec<Mitigation> {
         }
     }
 
+    let base = baseline(world);
     let mut out: Vec<Mitigation> = by_action
         .into_values()
         .map(|action| {
-            let effect = effect_of(world, std::slice::from_ref(&action));
+            let effect = effect_of(world, &base, std::slice::from_ref(&action));
             Mitigation {
                 confidence: action.confidence(),
                 // Hull-wide, so there is no one subject. The state reported is the

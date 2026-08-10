@@ -365,11 +365,24 @@ async fn a_decision_is_recorded_chained_and_returned_with_the_options() {
 async fn decisions_are_scoped_to_their_space() {
     let (app, world) = app_at_anchor();
     let id = hull(&world);
+    // A real option: the server verifies the submitted action is one it offers, so a
+    // placeholder is (correctly) refused.
+    let (_, offered) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/mitigations"),
+    )
+    .await;
     let (status, _) = post(
         &app,
         &world,
         &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
-        &serde_json::json!({"disposition": "rejected", "option": {}, "reason": "x"}).to_string(),
+        &serde_json::json!({
+            "disposition": "rejected",
+            "option": offered["options"][0],
+            "reason": "x",
+        })
+        .to_string(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -401,4 +414,146 @@ async fn an_unknown_disposition_is_refused() {
         .as_str()
         .unwrap_or_default()
         .contains("maybe"));
+}
+
+// ---------------------------------------------------- regressions from review
+
+/// An option the engine does not offer cannot be recorded.
+///
+/// The whole value of putting decisions in a tamper-evident ledger is that the
+/// content can be trusted, and hashing whatever a client posted would have let the
+/// chain attest — unfalsifiably — to an option with an invented effect that the
+/// engine never produced. The hash would verify perfectly and the record would be
+/// fiction.
+#[tokio::test]
+async fn an_option_the_engine_never_offered_is_refused() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let fabricated = serde_json::json!({
+        "disposition": "accepted",
+        "reason": "looks cheap",
+        "option": {
+            "action": { "kind": "discharge", "origin": "3-148-2-E",
+                        "hazard": "a hazard nobody raised", "actor": "me" },
+            "effect": { "frees": ["everything"], "closes": [],
+                        "freed_hours": 99999, "closed_hours": 0 },
+            "confidence": "computed",
+            "subject_state": "ALLOW"
+        }
+    });
+    let (status, body) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        &fabricated.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not on offer"));
+
+    // And nothing reached the ledger.
+    let (_, after) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/mitigations"),
+    )
+    .await;
+    assert!(after["decisions"].as_array().unwrap().is_empty());
+}
+
+/// The recorded effect is the server's, not the client's — even when the action is
+/// genuinely on offer and only the numbers were tampered with.
+#[tokio::test]
+async fn the_recorded_effect_is_the_servers_own() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (_, before) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/mitigations"),
+    )
+    .await;
+    let mut option = before["options"][0].clone();
+    option["effect"]["freed_hours"] = serde_json::json!(999_999);
+
+    let (status, record) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        &serde_json::json!({"disposition": "accepted", "option": option, "reason": "r"})
+            .to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let detail = record["detail"].as_str().unwrap();
+    assert!(
+        !detail.contains("999999"),
+        "the client's figure was hashed into the ledger: {detail}"
+    );
+    assert!(detail.contains("decided_by_org"), "who decided is recorded");
+}
+
+/// A placard the register does not contain is not-found, not a confident ALLOW about
+/// a space that does not exist — and it must not be writable into an append-only
+/// ledger.
+#[tokio::test]
+async fn an_unknown_placard_is_not_found() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, _) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/9-999-9-Z/mitigations"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/9-999-9-Z/decision"),
+        &serde_json::json!({"disposition": "accepted", "option": {}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A malformed body reports what was actually wrong with it, rather than claiming a
+/// body was missing.
+#[tokio::test]
+async fn a_malformed_body_says_what_is_wrong() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, body) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        "{not json at all",
+    )
+    .await;
+    assert!(status.is_client_error());
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        !detail.contains("needs a body"),
+        "a malformed body is not an absent one: {detail}"
+    );
+}
+
+/// Scope is still resolved before the body, so a foreign hull cannot be told apart
+/// from a bad request.
+#[tokio::test]
+async fn a_foreign_hull_is_refused_before_the_body_is_read() {
+    let (app, world) = app_at_anchor();
+    let foreign = world.navy_hull.as_uuid();
+    let (status, _) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{foreign}/compartments/4-160-2-Q/decision"),
+        "{not json at all",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

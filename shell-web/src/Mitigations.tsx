@@ -176,11 +176,31 @@ export default function Mitigations({
     })
     .filter((r) => r.spaces.length > 0);
 
-  // An open space is not an issue. Said, rather than shown as an empty panel.
-  if (data.options.length === 0 && data.holds.length === 0) {
+  // A space that permits work has nothing to mitigate — including a WARN, which is
+  // a condition flagged rather than a hold. Keyed on the state, not on whether the
+  // hold list is empty: a WARN space HAS holds, so the old check never fired and the
+  // panel told a planner "no single action opens this space" about a space that was
+  // open.
+  if (data.state === "ALLOW" || data.state === "WARN") {
+    const advisories = data.holds.filter((h) => h.state === "WARN");
     return (
       <div style={{ fontSize: 11.5, color: C.dim, marginTop: 10 }}>
-        Nothing is holding this space, so there is nothing to mitigate.
+        {advisories.length === 0 ? (
+          "Nothing is holding this space, so there is nothing to mitigate."
+        ) : (
+          <>
+            Work may proceed here. {advisories.length} condition
+            {advisories.length === 1 ? " is" : "s are"} flagged, not holding:
+            {advisories.map((h) => (
+              <div key={`${h.rule_code}-${h.origin}`} style={{ color: "#ccd1da", marginTop: 3 }}>
+                <span style={{ fontFamily: "monospace", color: STATE_STYLE.WARN.fg }}>
+                  {h.rule_code}
+                </span>{" "}
+                {h.hazard} <span style={{ color: C.dim }}>at {h.origin}</span>
+              </div>
+            ))}
+          </>
+        )}
       </div>
     );
   }
@@ -211,10 +231,13 @@ export default function Mitigations({
       {data.options.length === 0 && (
         <div style={{ marginTop: 8 }}>
           <p style={{ fontSize: 12, color: STATE_STYLE.WARN.fg, margin: "0 0 6px" }}>
-            No single action opens this space. All {data.holds.length} holds have to be
+            No single action opens this space. All{" "}
+            {data.holds.filter((h) => h.state !== "WARN").length} holds have to be
             addressed:
           </p>
-          {data.holds.map((h) => (
+          {data.holds
+            .filter((h) => h.state !== "WARN")
+            .map((h) => (
             <div
               key={`${h.rule_code}-${h.origin}-${h.hazard}`}
               style={{ fontSize: 11.5, color: "#ccd1da", padding: "3px 0" }}
@@ -225,9 +248,9 @@ export default function Mitigations({
                 {h.earliest_clear === null
                   ? `${h.clearing_authority} must verify it — no clock on this`
                   : `expires ${fmtClear(h.earliest_clear)}`}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
         </div>
       )}
 

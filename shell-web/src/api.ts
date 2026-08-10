@@ -398,6 +398,8 @@ export interface Hold {
   hazard: string;
   clearing_authority: string;
   earliest_clear: number | null;
+  /** WARN is a condition flagged, not a hold to be discharged. */
+  state: DecisionState;
 }
 
 export interface AuditRecord {

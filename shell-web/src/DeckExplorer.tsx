@@ -224,6 +224,19 @@ export default function DeckExplorer({
     return () => window.removeEventListener("keydown", onKey);
   }, [fullScreen]);
 
+  /**
+   * Selects a space and moves the plan to its deck.
+   *
+   * The two always travel together. Selecting alone left a redeployment target on
+   * another deck highlighted in the panel while the drawing stayed where it was,
+   * which reads as the app ignoring the click.
+   */
+  const openSpace = (compartment: string) => {
+    const row = rows.find((r) => r.compartment.compartment_no === compartment);
+    if (row) setSelectedDeck(row.compartment.deck_code);
+    setSelected(compartment);
+  };
+
   // The hops the hazard actually took, deduped across every rule that fired.
   // Drawn on every view: on a deck it shows the path across that deck, and in
   // the vertical trace it shows the part a single deck sheet can never show —
@@ -759,7 +772,7 @@ export default function DeckExplorer({
                   compartment={selectedRow.compartment.compartment_no}
                   asOf={asOf}
                   spaces={rows}
-                  onOpenSpace={setSelected}
+                  onOpenSpace={openSpace}
                 />
               </>
             )}

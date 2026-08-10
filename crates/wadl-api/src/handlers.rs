@@ -480,36 +480,60 @@ pub(crate) async fn readiness(
 /// leverage figure an option is ranked by is a man-hour count, and if it came from
 /// a second implementation of "what is booked here" the options board and the
 /// readiness board would rank the same action differently.
+struct MitigationInputs {
+    graph: wadl_engine::AdjacencyGraph,
+    hazards: Vec<wadl_engine::Hazard>,
+    rules: wadl_engine::RuleSet,
+    compartments: Vec<wadl_store::model::CompartmentSummary>,
+    orders: Vec<wadl_store::model::WorkOrderSummary>,
+    packages: Vec<PackageWork>,
+    stranded: wadl_store::model::StrandedReport,
+}
+
+impl MitigationInputs {
+    /// The hours booked in every space **at `at`**.
+    ///
+    /// A closure over this, handed to `wadl_mitigate`, because an option that waits
+    /// is evaluated at a future instant and must be priced there too — and because
+    /// the hours have to come from the same [`booked_work`] every other board uses.
+    fn loads(&self, at: Timestamp) -> Vec<wadl_mitigate::SpaceLoad> {
+        self.compartments
+            .iter()
+            .map(|c| wadl_mitigate::SpaceLoad {
+                booked: booked_work(
+                    &c.compartment_no,
+                    &self.orders,
+                    &self.packages,
+                    &self.stranded,
+                    at,
+                )
+                .remaining,
+                compartment: c.compartment_no.clone(),
+            })
+            .collect()
+    }
+
+    fn contains(&self, compartment: &CompartmentNo) -> bool {
+        self.compartments
+            .iter()
+            .any(|c| &c.compartment_no == compartment)
+    }
+}
+
 async fn mitigation_inputs(
     state: &AppState,
     scope: &wadl_store::TenantScope,
     vessel: VesselId,
-    at: Timestamp,
-) -> Result<
-    (
-        wadl_engine::AdjacencyGraph,
-        Vec<wadl_engine::Hazard>,
-        wadl_engine::RuleSet,
-        Vec<wadl_mitigate::SpaceLoad>,
-    ),
-    ApiError,
-> {
-    let compartments = state.store.list_compartments(scope, vessel).await?;
-    let graph = state.store.adjacency_graph(scope, vessel).await?;
-    let hazards = state.store.live_hazards(scope, vessel).await?;
-    let rules = state.store.rules_in_force(scope, vessel).await?;
-    let orders = state.store.list_work_orders(scope, vessel).await?;
-    let packages = packages_with_footprints(state, scope, vessel).await?;
-    let stranded = state.store.stranded_hours(scope, vessel).await?;
-
-    let spaces = compartments
-        .into_iter()
-        .map(|c| wadl_mitigate::SpaceLoad {
-            booked: booked_work(&c.compartment_no, &orders, &packages, &stranded, at).remaining,
-            compartment: c.compartment_no,
-        })
-        .collect();
-    Ok((graph, hazards, rules, spaces))
+) -> Result<MitigationInputs, ApiError> {
+    Ok(MitigationInputs {
+        graph: state.store.adjacency_graph(scope, vessel).await?,
+        hazards: state.store.live_hazards(scope, vessel).await?,
+        rules: state.store.rules_in_force(scope, vessel).await?,
+        compartments: state.store.list_compartments(scope, vessel).await?,
+        orders: state.store.list_work_orders(scope, vessel).await?,
+        packages: packages_with_footprints(state, scope, vessel).await?,
+        stranded: state.store.stranded_hours(scope, vessel).await?,
+    })
 }
 
 /// What could be done about one refused compartment, ranked by work recovered.
@@ -529,15 +553,22 @@ pub(crate) async fn mitigations(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let (graph, hazards, rules, spaces) = mitigation_inputs(&state, &scope, vessel, at).await?;
-    let world = wadl_mitigate::World {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-        at,
-        spaces: &spaces,
-    };
+    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
     let subject = CompartmentNo::new(compartment);
+    // A placard the register does not contain is not-found, not an ALLOW. Answering
+    // "nothing is holding 9-999-9-Z" is a confident statement about a space that
+    // does not exist.
+    if !inputs.contains(&subject) {
+        return Err(ApiError::NotFound);
+    }
+    let loads = |instant: Timestamp| inputs.loads(instant);
+    let world = wadl_mitigate::World {
+        graph: &inputs.graph,
+        rules: &inputs.rules,
+        hazards: &inputs.hazards,
+        at,
+        loads: &loads,
+    };
     let assessment = wadl_mitigate::assess(&world, &subject);
     // The history comes with the options in one read. A planner deciding what to do
     // needs to know what was already tried and rejected, and making that a second
@@ -587,7 +618,14 @@ struct DecisionDetail<'a> {
     disposition: &'a str,
     as_of_ms: i64,
     reason: &'a str,
-    /// The option verbatim, including the effect as computed at the time.
+    /// Who decided, as far as the platform can currently tell.
+    ///
+    /// The tenant, because that is the only identity milestone 1 has: the caller is
+    /// a header shim, not a session. Recorded anyway rather than omitted, so the
+    /// field exists in the chain from the first entry and adding a real person later
+    /// is not a change to the hashed shape of every historical record.
+    decided_by_org: String,
+    /// The option **as the server re-derived it**, not as the client sent it.
     option: &'a Value,
 }
 
@@ -595,24 +633,32 @@ struct DecisionDetail<'a> {
 ///
 /// This does **not** apply the mitigation. Nothing here clears a hazard, moves a
 /// date or grants an authorization — the platform flags and prices; the yard acts.
-/// What is written is a statement that a named person was shown these options and
-/// chose this one, which is the part a board of inquiry asks about and the part no
-/// other system holds.
+/// What is written is a statement that this option was on offer and was taken or
+/// turned down, which is the part a board of inquiry asks about and the part no other
+/// system holds.
+///
+/// It does not yet say *who*, and this comment used to claim it did. Milestone 1's
+/// caller is a header shim rather than a session, so the tenant is the only identity
+/// available; it is recorded as `decided_by_org`, and the person arrives with
+/// authentication. Overstating that would be the worst possible thing to overstate
+/// about an audit record.
 pub(crate) async fn record_decision(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
-    body: Option<Json<DecisionBody>>,
+    body: Result<Json<DecisionBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     // Scope first, and before the body is looked at: a caller with no business
     // reading this hull must get the same not-found as for any other route, and
-    // must not be able to tell a malformed body from a foreign hull.
+    // must not be able to tell a malformed body from a foreign hull. Taking the body
+    // as a `Result` is what defers its rejection to here — as an `Option`, a
+    // malformed body was indistinguishable from an absent one and every parse
+    // failure was reported as "a decision needs a body".
     let hull = state.store.get_vessel(&scope, vessel).await?;
-    let Some(Json(body)) = body else {
-        return Err(ApiError::OutOfRange(
-            "a decision needs a body: disposition, option, and optionally a reason".to_owned(),
-        ));
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(ApiError::OutOfRange(rejection.body_text())),
     };
 
     let disposition = match body.disposition.as_str() {
@@ -626,12 +672,57 @@ pub(crate) async fn record_decision(
     };
     let at = AsOf { as_of: body.as_of }.resolve(&state, &hull)?;
 
+    // The submitted option is checked against what the engine actually offers, and
+    // the SERVER's copy is what gets recorded.
+    //
+    // This is the difference between a tamper-evident ledger and a tamper-evident
+    // record of whatever a client posted. Hashing the client's blob would let the
+    // chain attest, unfalsifiably, to an option with an invented effect the engine
+    // never produced: the hash would verify perfectly and the content would be
+    // fiction. So the assessment is re-derived and the action matched into it.
+    let subject = CompartmentNo::new(&compartment);
+    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    if !inputs.contains(&subject) {
+        return Err(ApiError::NotFound);
+    }
+    let verified = {
+        let loads = |instant: Timestamp| inputs.loads(instant);
+        let world = wadl_mitigate::World {
+            graph: &inputs.graph,
+            rules: &inputs.rules,
+            hazards: &inputs.hazards,
+            at,
+            loads: &loads,
+        };
+        let assessment = wadl_mitigate::assess(&world, &subject);
+        // Matched on the action — the part a planner actually chose. The effect is
+        // the server's own computation regardless of what arrived.
+        let submitted = body.option.get("action").cloned().unwrap_or(Value::Null);
+        assessment
+            .options
+            .into_iter()
+            .find(|o| json!(o.action) == submitted)
+            .map(|o| json!(o))
+            .or_else(|| {
+                let plan = assessment.combined?;
+                (json!(plan.actions) == body.option.get("actions").cloned().unwrap_or(Value::Null))
+                    .then(|| json!(plan))
+            })
+    };
+    let Some(option) = verified else {
+        return Err(ApiError::OutOfRange(format!(
+            "that option is not on offer for {compartment} at this instant, so it cannot \
+             be recorded as a decision"
+        )));
+    };
+
     let detail = DecisionDetail {
         subject: &compartment,
         disposition: &body.disposition,
         as_of_ms: at.epoch_millis(),
         reason: &body.reason,
-        option: &body.option,
+        decided_by_org: scope.org.to_string(),
+        option: &option,
     };
     // A serialisation failure on a struct of strings and numbers is not reachable;
     // an empty detail would still be chained and would still verify, so there is
@@ -665,13 +756,14 @@ pub(crate) async fn leverage(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let (graph, hazards, rules, spaces) = mitigation_inputs(&state, &scope, vessel, at).await?;
+    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    let loads = |instant: Timestamp| inputs.loads(instant);
     let world = wadl_mitigate::World {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
+        graph: &inputs.graph,
+        rules: &inputs.rules,
+        hazards: &inputs.hazards,
         at,
-        spaces: &spaces,
+        loads: &loads,
     };
     Ok(Json(json!({
         "as_of": at,

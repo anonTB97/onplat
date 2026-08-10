@@ -109,6 +109,13 @@ than a seeded one.
 
 ---
 
+## The attack plan
+
+Full-screen/zoom repair, the activity register, and issues as first-class
+objects live in their own plan: `docs/attack-plan.md`. That document supersedes
+the module notes below for Daily Ops, Sequence Board and Conflicts & Risk —
+each now has a designated role there.
+
 ## Other deferred work
 
 - **Modules with no view.** Daily Ops, Sequence Board, Conflicts & Risk,

@@ -10,6 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DeckStateRow, VesselSummary } from "./api";
+import type { Horizon } from "./TimeControl";
 import { C, mh, READINESS_STYLE } from "./theme";
 
 const DIM = C.dim;
@@ -85,18 +86,45 @@ export type Altitude = "ship" | "zone" | "compartment";
 export interface Persona {
   name: string;
   focus: string;
+  /** The height the Deck Explorer opens at — hull, zone or compartment. */
   altitude: Altitude;
+  /**
+   * The time resolution this persona reads at.
+   *
+   * The same argument as `altitude`, on the other axis. An executive should not
+   * arrive at an hour-by-hour scrubber and a production super should not arrive
+   * at a month-by-month one; both would have to navigate away from it every
+   * morning. Space and time are the two dimensions of the same question — where
+   * and when is work being held up — so a persona names its opening point in
+   * both.
+   */
+  horizon: Horizon;
 }
 
 export const PERSONAS: Persona[] = [
-  { name: "Planner", focus: "Conflicts & sequence", altitude: "compartment" },
-  { name: "Zone Manager", focus: "Your zone's muster", altitude: "zone" },
-  { name: "Production Super", focus: "Shift plan", altitude: "zone" },
-  { name: "Project Super", focus: "Availability health", altitude: "ship" },
-  { name: "IPT", focus: "Mitigation decisions", altitude: "compartment" },
-  { name: "Program Office", focus: "Risk / on-time confidence", altitude: "ship" },
-  { name: "Material Manager", focus: "Material readiness", altitude: "compartment" },
-  { name: "Executive", focus: "Throughput / dock utilization", altitude: "ship" },
+  { name: "Planner", focus: "Conflicts & sequence", altitude: "compartment", horizon: "week" },
+  { name: "Zone Manager", focus: "Your zone's muster", altitude: "zone", horizon: "week" },
+  { name: "Production Super", focus: "Shift plan", altitude: "zone", horizon: "shift" },
+  { name: "Project Super", focus: "Availability health", altitude: "ship", horizon: "month" },
+  { name: "IPT", focus: "Mitigation decisions", altitude: "compartment", horizon: "month" },
+  {
+    name: "Program Office",
+    focus: "Risk / on-time confidence",
+    altitude: "ship",
+    horizon: "availability",
+  },
+  {
+    name: "Material Manager",
+    focus: "Material readiness",
+    altitude: "compartment",
+    horizon: "week",
+  },
+  {
+    name: "Executive",
+    focus: "Throughput / dock utilization",
+    altitude: "ship",
+    horizon: "availability",
+  },
 ];
 
 const initialsOf = (name: string) =>

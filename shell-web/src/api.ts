@@ -2,6 +2,12 @@
 // x-assigned-vessels), matching wadl-api's auth extractor; a real session
 // replaces it later. No external hosts — same-origin only.
 
+/** A half-open interval, `[start, end)`. Epoch milliseconds, as the API sends. */
+export interface Window {
+  start: number;
+  end: number;
+}
+
 export interface VesselSummary {
   vessel_id: string;
   hull_no: string;
@@ -9,6 +15,35 @@ export interface VesselSummary {
   class_code: string;
   availability_code: string;
   confidence: string;
+  /** null when the availability carries no dates — then as_of is refused. */
+  availability: Window | null;
+}
+
+/**
+ * The hull's time frame: the server's clock, and the bounds it will refuse an
+ * as_of outside of.
+ *
+ * The `now` here is the SERVER's, deliberately. A browser clock minutes out
+ * would make the shell mark a live board as a projection, or worse the reverse.
+ */
+export interface Timeframe {
+  now: number;
+  availability_code: string;
+  availability: Window | null;
+}
+
+/**
+ * The instant a read is for. `null` means live — no parameter is sent, and the
+ * server answers from its own clock.
+ *
+ * Passed explicitly to every read rather than held in a module-level variable:
+ * one screen showing a scrubbed instant while another shows now is precisely the
+ * cross-screen disagreement this codebase keeps having to fix.
+ */
+export type AsOf = number | null;
+
+function withAsOf(path: string, asOf: AsOf): string {
+  return asOf === null ? path : `${path}${path.includes("?") ? "&" : "?"}as_of=${asOf}`;
 }
 
 export interface Identity {
@@ -137,10 +172,22 @@ export interface Rollup {
   unattributed_hours: number;
 }
 
-export async function readiness(id: Identity, vesselId: string): Promise<Rollup> {
-  const res = await fetch(`/api/vessels/${vesselId}/readiness`, { headers: headers(id) });
+export async function readiness(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<Rollup> {
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/readiness`, asOf), {
+    headers: headers(id),
+  });
   if (!res.ok) throw new Error(`readiness → ${res.status}`);
   return (await res.json()) as Rollup;
+}
+
+export async function timeframe(id: Identity, vesselId: string): Promise<Timeframe> {
+  const res = await fetch(`/api/vessels/${vesselId}/timeframe`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`timeframe → ${res.status}`);
+  return (await res.json()) as Timeframe;
 }
 
 /** The worst thing true of a tally — matches `Tally::worst` in wadl-plan. */
@@ -162,6 +209,10 @@ export interface WorkOrder {
   earned_hours: number;
   source_ref: string;
   source_verified: boolean;
+  /** Planned window, or null when the schedule of record does not say. */
+  planned: Window | null;
+  /** Whether the order is planned for the instant this list was read at. */
+  in_window: boolean;
 }
 
 export interface PackageSummary {
@@ -239,8 +290,14 @@ export interface PackageDetail {
   faults: unknown[];
 }
 
-export async function listWorkOrders(id: Identity, vesselId: string): Promise<WorkOrder[]> {
-  const res = await fetch(`/api/vessels/${vesselId}/work-orders`, { headers: headers(id) });
+export async function listWorkOrders(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<WorkOrder[]> {
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/work-orders`, asOf), {
+    headers: headers(id),
+  });
   if (!res.ok) throw new Error(`work-orders → ${res.status}`);
   return (await res.json()) as WorkOrder[];
 }
@@ -255,10 +312,12 @@ export async function getPackage(
   id: Identity,
   vesselId: string,
   code: string,
+  asOf: AsOf = null,
 ): Promise<PackageDetail> {
-  const res = await fetch(`/api/vessels/${vesselId}/packages/${encodeURIComponent(code)}`, {
-    headers: headers(id),
-  });
+  const res = await fetch(
+    withAsOf(`/api/vessels/${vesselId}/packages/${encodeURIComponent(code)}`, asOf),
+    { headers: headers(id) },
+  );
   if (!res.ok) throw new Error(`package ${code} → ${res.status}`);
   return (await res.json()) as PackageDetail;
 }
@@ -270,8 +329,14 @@ export async function listDecks(id: Identity, vesselId: string): Promise<Deck[]>
 }
 
 // Authorization state is read THROUGH the engine, never computed here.
-export async function deckStates(id: Identity, vesselId: string): Promise<DeckStateRow[]> {
-  const res = await fetch(`/api/vessels/${vesselId}/deck-states`, { headers: headers(id) });
+export async function deckStates(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<DeckStateRow[]> {
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/deck-states`, asOf), {
+    headers: headers(id),
+  });
   if (!res.ok) throw new Error(`deck-states → ${res.status}`);
   return (await res.json()) as DeckStateRow[];
 }
@@ -282,9 +347,13 @@ export async function compartmentState(
   id: Identity,
   vesselId: string,
   compartmentNo: string,
+  asOf: AsOf = null,
 ): Promise<{ compartment: string; decision: Decision }> {
   const res = await fetch(
-    `/api/vessels/${vesselId}/compartments/${encodeURIComponent(compartmentNo)}/state`,
+    withAsOf(
+      `/api/vessels/${vesselId}/compartments/${encodeURIComponent(compartmentNo)}/state`,
+      asOf,
+    ),
     { headers: headers(id) },
   );
   if (!res.ok) throw new Error(`compartment state → ${res.status}`);

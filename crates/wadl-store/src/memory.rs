@@ -436,15 +436,15 @@ impl InMemoryStore {
             hvac("2-160-1-Q", 560, 410, -1, 5),
             hvac("2-152-0-Q", 400, 180, 1, 8),
             hvac("3-148-2-E", 320, 96, 0, 6),
-            hvac("3-140-0-Q", 480, 0, 6, 14),
+            hvac("3-140-0-Q", 480, 0, 6, 30),
             hvac("3-184-0-Q", 340, 300, -8, -1),
             hvac("3-192-2-E", 210, 210, -10, -4),
             hvac("2-176-0-Q", 300, 165, 2, 9),
-            hvac("1-160-0-Q", 300, 60, 10, 20),
+            hvac("1-160-0-Q", 300, 60, 24, 62),
             // Cableway footprint — 4 compartments.
             cable("3-148-0-L", 410, 410, -9, -3),
             cable("3-152-0-Q", 260, 240, -3, 2),
-            cable("3-140-0-Q", 520, 310, 4, 12),
+            cable("3-140-0-Q", 520, 310, 4, 26),
             cable("3-148-2-E", 300, 40, 0, 7),
         ]
     }
@@ -874,6 +874,13 @@ impl InMemoryStore {
         // Provenance mirrors the prototype's ingest/verified stamps. The two
         // orders whose upstream_compartment points at the incomplete Aft IC &
         // Gyro Room (4-141-0-C) are the stranded ones.
+        //
+        // The windows widen the further out they sit, which is how a schedule of
+        // record actually reads: work in progress is pinned to days, work three
+        // months out is a month-wide intention. It also means the availability
+        // horizon has work in it all the way out — a hull that went empty a
+        // fortnight from now would read as missing data rather than as a
+        // fortnight's schedule.
         vec![
             WorkOrderRow {
                 vessel: w.cvn73,
@@ -918,7 +925,7 @@ impl InMemoryStore {
                 source_ref: "AWR 73-26-4471",
                 source_verified: true,
                 from_day: 7,
-                to_day: 26,
+                to_day: 95,
             },
             WorkOrderRow {
                 vessel: w.cvn73,
@@ -949,8 +956,8 @@ impl InMemoryStore {
                 earned: 0,
                 source_ref: "AWR 73-26-1905",
                 source_verified: false,
-                from_day: 12,
-                to_day: 18,
+                from_day: 40,
+                to_day: 74,
             },
             // Stranded: fan-room duct insulation waits on the same upstream room.
             WorkOrderRow {
@@ -965,8 +972,8 @@ impl InMemoryStore {
                 earned: 0,
                 source_ref: "AWR 73-26-5571",
                 source_verified: true,
-                from_day: 12,
-                to_day: 16,
+                from_day: 96,
+                to_day: 130,
             },
         ]
     }

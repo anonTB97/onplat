@@ -1,8 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { listWorkOrders, type DeckStateRow, type Identity, type WorkOrder } from "./api";
+import {
+  listWorkOrders,
+  type AsOf,
+  type DeckStateRow,
+  type Identity,
+  type WorkOrder,
+} from "./api";
 import { C, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
 
-type SortKey = "code" | "remaining" | "compartment";
+type SortKey = "code" | "remaining" | "compartment" | "start";
+
+/** A planned window, at day resolution — the resolution a schedule carries. */
+const fmtWindow = (w: { start: number; end: number } | null): string => {
+  if (!w) return "no dates";
+  const d = (ms: number) => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
+  return `${d(w.start)} → ${d(w.end)}`;
+};
 
 export default function WorkOrders({
   identity,
@@ -10,6 +23,7 @@ export default function WorkOrders({
   hullLabel,
   spaces,
   onOpenSpace,
+  asOf,
 }: {
   identity: Identity;
   vesselId: string;
@@ -24,6 +38,8 @@ export default function WorkOrders({
    */
   spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
+  /** The instant the list is read at; `null` is live. */
+  asOf: AsOf;
 }) {
   const [orders, setOrders] = useState<WorkOrder[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -32,13 +48,13 @@ export default function WorkOrders({
 
   useEffect(() => {
     setError(null);
-    listWorkOrders(identity, vesselId)
+    listWorkOrders(identity, vesselId, asOf)
       .then(setOrders)
       .catch((e: unknown) => {
         setOrders([]);
         setError(String(e));
       });
-  }, [identity, vesselId]);
+  }, [identity, vesselId, asOf]);
 
   const remaining = (w: WorkOrder) => Math.max(0, w.budget_hours - w.earned_hours);
 
@@ -48,6 +64,12 @@ export default function WorkOrders({
     sorted.sort((a, b) => {
       if (sort === "remaining") return remaining(b) - remaining(a);
       if (sort === "compartment") return a.compartment_no.localeCompare(b.compartment_no);
+      // Undated orders sort last rather than first. A null start is not an early
+      // start, and putting them at the top of a schedule view would read as
+      // "these are next".
+      if (sort === "start") {
+        return (a.planned?.start ?? Infinity) - (b.planned?.start ?? Infinity);
+      }
       return a.code.localeCompare(b.code);
     });
     return sorted;
@@ -83,13 +105,15 @@ export default function WorkOrders({
       </div>
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>Work on this availability</h1>
       <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 720 }}>
-        {rows.length} orders · {mh(totalRemaining)} remaining. Every row carries the document it
-        came from; {unverified === 0 ? "all provenance is planner-confirmed" : `${unverified} still await planner confirmation`}.
+        {rows.length} orders · {mh(totalRemaining)} remaining ·{" "}
+        {rows.filter((w) => w.in_window).length} in progress at the instant on the time control.
+        Every row carries the document it came from;{" "}
+        {unverified === 0 ? "all provenance is planner-confirmed" : `${unverified} still await planner confirmation`}.
       </p>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, color: C.dim }}>Sort</span>
-        {(["remaining", "code", "compartment"] as SortKey[]).map((k) => (
+        {(["remaining", "code", "compartment", "start"] as SortKey[]).map((k) => (
           <button
             key={k}
             onClick={() => setSort(k)}
@@ -100,7 +124,13 @@ export default function WorkOrders({
               border: `1px solid ${sort === k ? C.accent : C.line}`,
             }}
           >
-            {k === "remaining" ? "MH remaining" : k === "code" ? "WI number" : "Compartment"}
+            {k === "remaining"
+              ? "MH remaining"
+              : k === "code"
+                ? "WI number"
+                : k === "compartment"
+                  ? "Compartment"
+                  : "Planned start"}
           </button>
         ))}
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, marginLeft: 6, cursor: "pointer" }}>
@@ -124,13 +154,16 @@ export default function WorkOrders({
               <th style={{ ...th, textAlign: "right" }}>Budget</th>
               <th style={{ ...th, textAlign: "right" }}>Earned</th>
               <th style={{ ...th, textAlign: "right" }}>Remaining</th>
+              <th style={th} title="The planned window, and whether it covers the instant this list was read at">
+                Planned
+              </th>
               <th style={th}>Space</th>
               <th style={th}>Provenance</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((w) => (
-              <tr key={w.work_order_id}>
+              <tr key={w.work_order_id} style={{ opacity: w.in_window ? 1 : 0.62 }}>
                 <td style={{ ...td, fontFamily: "monospace", color: C.accent }}>{w.code}</td>
                 <td style={td}>
                   {w.title}
@@ -142,6 +175,36 @@ export default function WorkOrders({
                 <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{w.earned_hours.toLocaleString()}</td>
                 <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>
                   {remaining(w).toLocaleString()}
+                </td>
+                {/* The schedule, and whether this order is live at the instant on
+                    the time control. Served as a flag rather than a filter: a
+                    planner looking at next week still needs to see the order that
+                    closed last week, so it is dimmed, not dropped. */}
+                <td style={{ ...td, fontSize: 11, whiteSpace: "nowrap" }}>
+                  <span style={{ fontFamily: "monospace", color: w.planned ? C.dim : "#f59e0b" }}>
+                    {fmtWindow(w.planned)}
+                  </span>
+                  {w.planned && (
+                    <span
+                      title={
+                        w.in_window
+                          ? "Planned for the instant on the time control"
+                          : "Not planned for this instant — before it, after it, or between phases"
+                      }
+                      style={{
+                        marginLeft: 7,
+                        padding: "1px 6px",
+                        borderRadius: 4,
+                        fontSize: 9.5,
+                        fontWeight: 700,
+                        color: w.in_window ? "#22c55e" : C.dim,
+                        background: w.in_window ? "rgba(34,197,94,0.12)" : "rgba(110,116,128,0.12)",
+                        border: `1px solid ${w.in_window ? "rgba(34,197,94,0.4)" : "rgba(110,116,128,0.35)"}`,
+                      }}
+                    >
+                      {w.in_window ? "IN WINDOW" : "OUT"}
+                    </span>
+                  )}
                 </td>
                 {/* Whether the space this work sits in is actually open, and who
                     can release it if not. The authorization comes from the engine

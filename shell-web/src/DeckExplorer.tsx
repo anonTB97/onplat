@@ -4,6 +4,7 @@ import {
   deckStates,
   listDecks,
   readiness,
+  type AsOf,
   type Deck,
   type DeckStateRow,
   type Decision,
@@ -75,6 +76,7 @@ export default function DeckExplorer({
   onAltitude,
   focusCompartment,
   onFocused,
+  asOf,
 }: {
   identity: Identity;
   vesselId: string;
@@ -85,6 +87,15 @@ export default function DeckExplorer({
   /** A compartment the chrome asked us to open — from search or an alert. */
   focusCompartment: string | null;
   onFocused: () => void;
+  /**
+   * The instant to read the hull at; `null` is live.
+   *
+   * Every fetch in this screen carries it, so the deck plan, the vertical trace
+   * and the readiness boards are all answering about the same moment. Passed
+   * down rather than read from a context so it is impossible to add a fetch here
+   * that forgets it.
+   */
+  asOf: AsOf;
 }) {
   const [decks, setDecks] = useState<Deck[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
@@ -117,8 +128,8 @@ export default function DeckExplorer({
     setDecision(null);
     Promise.all([
       listDecks(identity, vesselId),
-      deckStates(identity, vesselId),
-      readiness(identity, vesselId),
+      deckStates(identity, vesselId, asOf),
+      readiness(identity, vesselId, asOf),
     ])
       .then(([d, r, roll]) => {
         setDecks(d);
@@ -132,16 +143,24 @@ export default function DeckExplorer({
         setRollup(null);
         setError(String(e));
       });
-  }, [identity, vesselId]);
+    // Refetches on every scrub. The alternative — filtering a cached set in the
+    // browser — would produce a plausible board with a fabricated trace behind
+    // it, which is the one thing this screen must never do.
+  }, [identity, vesselId, asOf]);
 
   // Selecting a compartment fetches its full trace from the engine-backed
   // endpoint. The client never derives a state itself.
+  //
+  // Carries `asOf` too, and it has to: the trace panel is the explanation of the
+  // marker beside it. A panel reading the live cascade next to a board showing
+  // Thursday would be two answers to one question, with nothing on screen to say
+  // which instant either belonged to.
   useEffect(() => {
     if (!selected) return;
-    compartmentState(identity, vesselId, selected)
+    compartmentState(identity, vesselId, selected, asOf)
       .then((r) => setDecision(r.decision))
       .catch(() => setDecision(null));
-  }, [identity, vesselId, selected]);
+  }, [identity, vesselId, selected, asOf]);
 
   // A compartment handed in by the chrome — the global search or an alert. Doing
   // this here rather than in the shell keeps one place that knows a compartment's
@@ -340,7 +359,10 @@ export default function DeckExplorer({
       <p style={{ color: DIM, fontSize: 12.5, margin: "0 0 12px", maxWidth: 820 }}>
         Authorization is computed by the rule engine and read through the API — the shell
         never derives it. {heldCount} of {rows.length} compartments have work booked that
-        the engine currently refuses.
+        {/* "currently" was true until the time control existed. On a scrubbed
+            board it is a lie about the most load-bearing sentence on the screen,
+            so the tense follows the instant. */}
+        {asOf === null ? " the engine currently refuses." : " the engine refuses at this instant."}
       </p>
 
       <div
@@ -609,8 +631,9 @@ export default function DeckExplorer({
             </div>
             {!selectedRow && (
               <p style={{ color: DIM, fontSize: 12.5, marginTop: 8 }}>
-                Select a compartment to see why it is in its current state — every rule that
-                fired, the path the hazard took, and who may clear it.
+                Select a compartment to see why it is in{" "}
+                {asOf === null ? "its current state" : "that state at this instant"} — every rule
+                that fired, the path the hazard took, and who may clear it.
               </p>
             )}
             {selectedRow && (

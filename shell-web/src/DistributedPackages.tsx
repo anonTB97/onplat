@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   getPackage,
   listPackages,
+  type AsOf,
   type Identity,
   type PackageDetail,
   type PackageSummary,
@@ -12,10 +13,13 @@ export default function DistributedPackages({
   identity,
   vesselId,
   hullLabel,
+  asOf,
 }: {
   identity: Identity;
   vesselId: string;
   hullLabel: string;
+  /** The instant the footprint's authorization is read at; `null` is live. */
+  asOf: AsOf;
 }) {
   const [packages, setPackages] = useState<PackageSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -39,10 +43,10 @@ export default function DistributedPackages({
 
   useEffect(() => {
     if (!selected) return;
-    getPackage(identity, vesselId, selected)
+    getPackage(identity, vesselId, selected, asOf)
       .then(setDetail)
       .catch(() => setDetail(null));
-  }, [identity, vesselId, selected]);
+  }, [identity, vesselId, selected, asOf]);
 
   if (error) {
     return <p style={{ color: C.danger }}>This hull is out of scope for you ({error}).</p>;

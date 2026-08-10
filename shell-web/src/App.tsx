@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { deckStates, listVessels, type DeckStateRow, type VesselSummary } from "./api";
+import {
+  deckStates,
+  listVessels,
+  timeframe,
+  type AsOf,
+  type DeckStateRow,
+  type Timeframe,
+  type VesselSummary,
+} from "./api";
 import {
   ClassificationBanner,
   GuardrailStrip,
@@ -15,6 +23,7 @@ import {
 import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
 import DistributedPackages from "./DistributedPackages";
+import { fmtInstant, isProjection, TimeControl, type Horizon } from "./TimeControl";
 import WorkOrders from "./WorkOrders";
 import { C } from "./theme";
 
@@ -42,6 +51,14 @@ export default function App() {
   const [persona, setPersona] = useState<Persona>(PERSONAS[0] as Persona);
   const [altitude, setAltitude] = useState<Altitude>((PERSONAS[0] as Persona).altitude);
   const [focus, setFocus] = useState<string | null>(null);
+  // One instant, one horizon, for the whole app. A time control that meant a
+  // different moment on each screen would be worse than none — the Deck Explorer
+  // and the ship board would disagree about what is held, and neither would be
+  // wrong. Held here for the same reason the altitude is.
+  const [frame, setFrame] = useState<Timeframe | null>(null);
+  const [asOf, setAsOf] = useState<AsOf>(null);
+  const [horizon, setHorizon] = useState<Horizon>((PERSONAS[0] as Persona).horizon);
+  const [playing, setPlaying] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [wall, setWall] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,9 +74,24 @@ export default function App() {
   // is a better trade than threading its state up through the chrome.
   useEffect(() => {
     if (!selected) return;
-    deckStates(DEMO_IDENTITY, selected)
+    deckStates(DEMO_IDENTITY, selected, asOf)
       .then(setRows)
       .catch(() => setRows([]));
+  }, [selected, asOf]);
+
+  // The hull's time frame. Re-read on hull change and never cached across hulls:
+  // each availability has its own bounds, and scrubbing one hull's window over
+  // another's data is how a projection ends up outside the range the API accepts.
+  useEffect(() => {
+    if (!selected) {
+      setFrame(null);
+      return;
+    }
+    setAsOf(null);
+    setPlaying(false);
+    timeframe(DEMO_IDENTITY, selected)
+      .then(setFrame)
+      .catch(() => setFrame(null));
   }, [selected]);
 
   // A module that needs a hull is not rendered until there is one. Rendering it
@@ -91,6 +123,8 @@ export default function App() {
     ? `${current.hull_no} ${current.availability_code}`
     : (PICKABLE_HULLS.find((h) => h.id === selected)?.label ?? "— no hull");
 
+  const projecting = frame !== null && isProjection(asOf, frame.now, horizon);
+
   const jump = (compartment: string) => {
     setModule(DECK_EXPLORER);
     setAltitude("compartment");
@@ -119,10 +153,13 @@ export default function App() {
         persona={persona}
         onPersona={(p) => {
           setPersona(p);
-          // The persona's whole job in this shell: it decides the height the
-          // Deck Explorer opens at, so an executive does not navigate down from
-          // the hull every morning and a foreman does not start at the hull.
+          // The persona's whole job in this shell: it decides where the reader
+          // starts in both dimensions — the height the Deck Explorer opens at,
+          // so an executive does not navigate down from the hull every morning
+          // and a foreman does not start at the hull, and the time resolution,
+          // so neither has to change the horizon before reading anything.
           setAltitude(p.altitude);
+          setHorizon(p.horizon);
           setModule(DECK_EXPLORER);
         }}
         rows={rows}
@@ -131,6 +168,22 @@ export default function App() {
       />
 
       <GuardrailStrip />
+
+      {/* Time applies to every module, so the control sits in the chrome rather
+          than inside one screen. Rendered only once a hull is picked: its bounds
+          are that hull's availability. */}
+      {selected && frame && (
+        <TimeControl
+          now={frame.now}
+          availability={frame.availability}
+          horizon={horizon}
+          onHorizon={setHorizon}
+          asOf={asOf}
+          onAsOf={setAsOf}
+          playing={playing}
+          onPlaying={setPlaying}
+        />
+      )}
 
       {/* breadcrumb */}
       <div style={{ display: "flex", gap: 9, alignItems: "center", padding: "7px 16px", borderBottom: "1px solid #191a1f", fontSize: 11.5, flexWrap: "wrap" }}>
@@ -154,8 +207,19 @@ export default function App() {
           {/* Where the numbers come from. The prototype shows P6 ingest currency;
               this build has no scheduling import, so it states the provenance it
               does have rather than a plausible-looking date it does not. */}
-          <span title="Authorization is evaluated per request against the hull's live hazards; nothing here is cached">
-            engine · evaluated live
+          {/* This note used to read "evaluated live" unconditionally. With a
+              time control that would be false on every scrubbed board — and
+              this is the one line on screen whose whole job is to say where the
+              numbers come from. */}
+          <span
+            title={
+              projecting
+                ? "Every state on screen was evaluated by the engine AT this instant — a real decision with a real trace, not an interpolation of the live one."
+                : "Authorization is evaluated per request against the hull's live hazards; nothing here is cached"
+            }
+            style={{ color: projecting ? "#f59e0b" : undefined }}
+          >
+            engine · {projecting && frame ? `as of ${fmtInstant(asOf ?? frame.now, horizon)}` : "evaluated live"}
           </span>
           <span style={{ color: "#424656" }}>·</span>
           <button
@@ -207,6 +271,7 @@ export default function App() {
               onAltitude={setAltitude}
               focusCompartment={focus}
               onFocused={() => setFocus(null)}
+              asOf={asOf}
             />
           )}
 
@@ -217,11 +282,17 @@ export default function App() {
               hullLabel={hullLabel}
               spaces={rows}
               onOpenSpace={jump}
+              asOf={asOf}
             />
           )}
 
           {!error && selected && module.id === "distPackages" && (
-            <DistributedPackages identity={DEMO_IDENTITY} vesselId={selected} hullLabel={hullLabel} />
+            <DistributedPackages
+              identity={DEMO_IDENTITY}
+              vesselId={selected}
+              hullLabel={hullLabel}
+              asOf={asOf}
+            />
           )}
 
           {!error && module.id === "portfolio" && (

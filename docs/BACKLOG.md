@@ -1,116 +1,111 @@
 # Backlog
 
-Deferred work, with enough of the reasoning attached that picking an item up
-does not mean re-deriving the decision. Items are not in priority order; the
-**T-series** is the one with a stated ask behind it.
+Work with enough of the reasoning attached that picking an item up does not mean
+re-deriving the decision. Items are not in priority order.
 
-An item earns a place here only if it is real work with a known shape. Vague
-aspirations belong in `handoff/`, not here.
+Shipped items stay, marked as such, when the reasoning behind them is what makes
+the *next* change to them safe — the T-series is the case in point. An item earns
+a place here only if it is real work with a known shape; vague aspirations belong
+in `handoff/`, not here.
 
 ---
 
-## T — The time dimension
+## T — The time dimension · **shipped**
 
 > Requested: *"Build in a time slider on the deck view and other views as well.
 > It doesn't have to be a time slider exactly, just whatever would best serve
 > the UX and UI so planners and supervisors and workers can see work going on
 > hour by hour and then day by day, week by week, month by month."*
 
-Today every view is a still photograph of **now**. The API evaluates
-authorization against the injected clock (`state.clock.now()`, four call sites
-in `crates/wadl-api/src/handlers.rs`) and the shell renders whatever came back.
-Nothing in the product can answer "what does this deck look like at 1400", and
-that is the question a supervisor actually asks.
+Built as T1–T4 below. Kept here rather than deleted: the reasoning is what makes
+the next change to it safe, and two of the decisions are easy to undo by accident.
 
-### Why this is not one slider
+### What it turned out to be
 
-The stated range — hour to month — is about a 700:1 spread in resolution. A
-single control spanning it is unusable at both ends: a pixel is four hours at
-the month end, and the month end is 500 screens wide at the hour end. Three
-audiences are hiding inside that one request:
+The first thing investigation found was that the instant was already a parameter
+and **nothing read it**. `EvaluationRequest.at` was documented as "the instant the
+decision is made at", passed by all four callers, and ignored inside `evaluate()`.
+The visible consequence was in the demo hull: a coating cascade whose cure elapsed
+on 13 May still showed as a live BLOCK in August, with its own `earliest_clear`
+three months in the past. So T2 would have been a no-op on its own — the engine
+had to start consulting the instant first.
 
-| Who | Horizon | Step | The question |
-|---|---|---|---|
-| Mechanic / worker | this shift | hour | *Can I get into 4-164-2-Q at 1400, or am I waiting on a cure?* |
-| Supervisor | today → this week | shift, then day | *Which of my spaces free up before Thursday without anyone doing anything?* |
-| Planner | the availability | week, then month | *Where does the work pile up, and what is stranded when it does?* |
+`evaluate()` now consults `at` at both ends of a hold: a hazard not yet raised
+contributes nothing, and a trace step whose hold has elapsed contributes nothing.
+A step gated on a **verification** rather than a clock has no expiry and never
+elapses. That is the asymmetry the whole feature exists to show — scrub forward
+and the cure-gated holds clear themselves, leaving exactly the holds that need a
+person sent.
 
-So: a **horizon selector** (Shift / Day / Week / Availability) that sets both
-the window and the step, with a scrubber inside that window. This pairs with
-the altitude control the shell already has — `Altitude` in `Chrome.tsx`, and
-each `Persona` already carries the altitude it opens at. Time is the same idea
-on the other axis, and personas should carry an opening horizon too, so a
-foreman lands on the shift and an executive on the availability without either
-of them navigating there every morning.
+There is deliberately **no `until` on `Hazard`**. When a hazard stops mattering is
+the rule's judgement, not the hazard's: the same coating ticket blocks the deck
+above for eight hours under R03 and suspends the trunk for eight under R09, and a
+different rule set could price them differently from the same ticket. Expiry is
+therefore priced per trace step from the rule's own `hold`.
 
-### Why the architecture is ready for it
+### The shape of the control, and why not one slider
 
-`EvaluationRequest.at: Timestamp` — the engine takes the evaluation instant as
-data and reads no clock (`docs/adr/0001`; `Utc::now` is banned workspace-wide
-via `clippy.toml` `disallowed_methods`). Asking the engine "what do you say at
-T" is therefore a **parameter change, not a new code path**, and the answer is
-a real engine decision with a real trace, not a client-side guess.
+Hour-to-month is about a 700:1 resolution spread, and a single control spanning it
+is unusable at both ends. Three audiences are hiding in the request, each with its
+own horizon *and* its own step, so the **horizon sets both**:
 
-That is the load-bearing constraint. The scrubber must feed `as_of` down into
-the evaluation. It must **not** filter or interpolate already-evaluated results
-in the browser — a projected state with a fabricated trace is exactly the kind
-of plausible lie this codebase is built to make impossible.
+| Horizon | Step | Who reads at it |
+|---|---|---|
+| Shift | hour | Mechanic · can I get in there at 1400? |
+| Week | day | Supervisor · what frees up before Thursday? |
+| Month | week | Zone manager · which weeks are over-committed? |
+| Availability | month | Planner · where does the work pile up? |
 
-### The insight the feature is actually for
+That pairs with the altitude control the Deck Explorer already had. `Persona` now
+carries an opening `horizon` alongside its `altitude` — space and time are the two
+dimensions of one question, so a persona names its starting point in both, and a
+production super lands on the shift while an executive lands on the availability.
 
-`Readiness` and the overlay buckets already turn on whether `earliest_clear` is
-a timestamp or null — a hold gated by a **clock** versus one gated by a
-**verification** (`theme.ts` `overlayBucket`, and `crates/wadl-plan/src/readiness.rs`).
-Scrub forward and those two behave completely differently:
+### What shipped
 
-- clock-gated holds **resolve themselves**. The cure elapses; nobody does anything.
-- verification-gated holds **do not**. They sit there until a person goes and does something.
+- **T1 · Dated windows.** `domain::Window`, half-open so abutting shifts do not
+  both count at the changeover and a hold expiring at `T` clears *at* `T`.
+  Windows on work orders (`WorkOrderSummary::planned`) and per package space
+  (`SpaceWork::window`), plus an availability window per hull. Undated work counts
+  at **every** instant rather than disappearing — hiding it would quietly shrink
+  the outstanding hours the moment a planner touched the control.
+- **T2 · As-of on the read path.** `?as_of=` on the four evaluating endpoints,
+  defaulting to the clock. Three properties are tested rather than asserted in a
+  comment (`crates/wadl-api/tests/as_of.rs`): omitting the parameter is
+  byte-identical to passing the clock's own instant, an instant outside the
+  availability is refused with a reason instead of clamped, and a hull with no
+  dated availability refuses every `as_of` rather than accepting anything.
+  `/timeframe` serves the server's clock and the bounds it enforces.
+- **T3 · The control and the projection guardrail.** `shell-web/src/TimeControl.tsx`,
+  mounted in the chrome so one instant governs every module. Any instant other
+  than now turns the strip amber and carries `PROJECTION — NOT AN AUTHORIZATION`;
+  the breadcrumb's provenance note switches from `evaluated live` to `as of …`,
+  and the Deck Explorer's subtitle drops the word "currently".
+- **T4 · Playback.** One step per beat, stopping at the window's end rather than
+  wrapping — a loop would re-run the day and read as live data refreshing.
 
-Which means the time control is not decoration. Scrubbing to Thursday and
-seeing what is *still* stopped is the shortest path in the product to "here is
-the list of things that need a human this week" — the stranded-hours question,
-answered by moving one control instead of reading a report.
+### The two things not to undo by accident
 
-### What is missing
+1. **Nothing is interpolated in the browser.** Every scrub refetches, and the
+   engine evaluates that instant for real with a real trace. Filtering a cached
+   set client-side would look identical on screen and be a fabrication. This is
+   why `asOf` is threaded through every fetch as a parameter instead of living in
+   a module-level variable.
+2. **A projection is never an authorization.** A scrubbed-future ALLOW is a
+   projection and the UI says so. Decision support, not automation.
 
-Work items and hazards have no dated windows. `Hazard` has `since` but no end:
-a hazard is live unconditionally and hold periods price `earliest_clear`
-forward from `since`. There is no `planned_start` / `planned_finish` anywhere in
-the workspace (`rg planned_start` → nothing). So without new data, scrubbing
-moves the evaluation instant — cure clocks elapse, clock-gated holds clear —
-but it cannot change **what work is booked**, and a planner scrubbing across a
-month would watch an unchanging set of work items with the holds falling off.
-Half a feature, and the misleading half.
+### Still open
 
-Hence the sequence:
+Whether the vertical trace should gain a *time* axis — frames across, time down,
+one deck — or stay spatial with time as a scrub. The frame axis is what makes that
+view truthful and should not be spent lightly; probably a separate view rather
+than an overload of this one.
 
-- **T1 · Dated windows.** Planned start/finish on work items; start/expected-end
-  on hazards. Domain first (`Timestamp` is epoch millis with `plus_minutes`; no
-  date library in `wadl-domain`, keep it that way), then a migration, then the
-  seed — the demo hull needs work spread across the availability or there is
-  nothing to scrub through. `wadl-ingest` is where real P6 dates would land.
-- **T2 · As-of on the read path.** `?as_of=` on the read endpoints, threaded
-  into `EvaluationRequest.at` in place of `clock.now()`. Keep the clock as the
-  default so every existing caller is unchanged. Bound it to the availability
-  window and reject instants outside it rather than serving a meaningless
-  decision. Property test: `as_of = clock.now()` is identical to no parameter.
-- **T3 · The control, and the projection guardrail.** Horizon selector +
-  scrubber, on the Deck Explorer plan, the vertical trace, and the readiness
-  boards — one shared component and one piece of state, because a time control
-  that means something different on each screen is worse than none. Any instant
-  other than now must be **visibly marked a projection**: decision support, not
-  automation (`GuardrailStrip`). A scrubbed-future ALLOW is not a permit and the
-  UI must never let it read as one.
-- **T4 · Playback.** Once the scrubber is honest, stepping it is nearly free,
-  and a day played back at one second per hour is the artefact that makes a
-  POD board make sense. Cheap, and worth nothing before T1–T3.
-
-### Open question for T3
-
-Whether the vertical trace's shared frame axis should also gain a time axis —
-frames across, time down, one deck — or stay spatial with time as a scrub. The
-frame axis is the thing that makes the trace truthful and it should not be
-spent lightly. Probably a separate view rather than an overload of this one.
+The demo schedule is 22 dated items over a 180-day availability, deliberately
+dense near the anchor and looser further out. Real P6 dates would arrive through
+`wadl-ingest`, which is provenance-stamped but still unwired to a schedule of
+record — the one prerequisite left for this to be about a real availability rather
+than a seeded one.
 
 ---
 
@@ -131,5 +126,6 @@ spent lightly. Probably a separate view rather than an overload of this one.
   `scripts/extract-deck-sheets.py`: the island plate has no single frame ruler
   to calibrate against, so it is excluded from frame-mapped views rather than
   given a fabricated calibration.
-- **P6 ingest is provenance-stamped but unwired to a real schedule.** T1 above
-  is the first thing that would need it.
+- **P6 ingest is provenance-stamped but unwired to a real schedule.** The time
+  dimension above now consumes dates, so this is what turns it from a seeded
+  story into a real availability.

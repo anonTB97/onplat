@@ -208,38 +208,56 @@ async fn the_default_answer_follows_the_clock() {
     assert_eq!(state_of(&after, "4-160-2-Q"), "ALLOW");
 }
 
-/// Work-order rows are marked, never dropped. A planner scrubbing to next week
-/// still needs to see the order that closed last week.
+/// The work-order list at an instant: how many rows came back, and which of them
+/// are in their planned window. `at` of `None` omits the parameter entirely.
+async fn work_orders_at(
+    app: &axum::Router,
+    world: &DemoWorld,
+    at: Option<i64>,
+) -> (usize, Vec<String>) {
+    let id = hull(world);
+    let path = match at {
+        Some(ms) => format!("/api/vessels/{id}/work-orders?as_of={ms}"),
+        None => format!("/api/vessels/{id}/work-orders"),
+    };
+    let (status, rows) = get(app, world, &path).await;
+    assert_eq!(status, StatusCode::OK, "{path}");
+    let rows = rows.as_array().expect("array").clone();
+    let in_window = rows
+        .iter()
+        .filter(|r| r["in_window"] == Value::Bool(true))
+        .map(|r| r["code"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    (rows.len(), in_window)
+}
+
+/// Work-order rows are marked, never dropped.
+///
+/// Asserted as the property rather than against the seed's dates: the row count
+/// is identical at every instant, and *which* orders are in their window changes.
+/// An earlier version of this test pinned "at day 100 nothing is in window" and
+/// broke the moment the demo schedule was widened — the test failing on the data
+/// instead of on the behaviour it exists to protect.
 #[tokio::test]
 async fn work_orders_are_marked_in_window_rather_than_filtered() {
     let (app, world) = app_at_anchor();
-    let id = hull(&world);
-    let (status, rows) = get(&app, &world, &format!("/api/vessels/{id}/work-orders")).await;
-    assert_eq!(status, StatusCode::OK);
-    let now_rows = rows.as_array().expect("array").len();
 
-    let later = ANCHOR + 100 * DAY_MS;
-    let (_, far) = get(
-        &app,
-        &world,
-        &format!("/api/vessels/{id}/work-orders?as_of={later}"),
-    )
-    .await;
-    let far_rows = far.as_array().expect("array");
-    assert_eq!(far_rows.len(), now_rows, "the list is not filtered by time");
+    let (n_now, now_open) = work_orders_at(&app, &world, Some(ANCHOR)).await;
+    let (n_later, later_open) = work_orders_at(&app, &world, Some(ANCHOR + 45 * DAY_MS)).await;
+
+    assert_eq!(n_now, n_later, "the list is never filtered by the instant");
     assert!(
-        far_rows
-            .iter()
-            .all(|r| r["in_window"] == Value::Bool(false)),
-        "100 days out, none of the seeded orders are in their window"
+        !now_open.is_empty(),
+        "some work is in progress at the anchor"
     );
-    assert!(
-        rows.as_array()
-            .expect("array")
-            .iter()
-            .any(|r| r["in_window"] == Value::Bool(true)),
-        "at the anchor at least one order is in progress"
+    assert_ne!(
+        now_open, later_open,
+        "six weeks on, a different set of orders is in progress"
     );
+
+    // And the unparameterised call agrees with asking for the clock's instant.
+    let (n_live, live_open) = work_orders_at(&app, &world, None).await;
+    assert_eq!((n_live, live_open), (n_now, now_open));
 }
 
 /// The shell builds its whole time control from this one read, so it has to carry

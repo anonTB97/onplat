@@ -758,6 +758,8 @@ export default function DeckExplorer({
                   vesselId={vesselId}
                   compartment={selectedRow.compartment.compartment_no}
                   asOf={asOf}
+                  spaces={rows}
+                  onOpenSpace={setSelected}
                 />
               </>
             )}

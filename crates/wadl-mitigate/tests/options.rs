@@ -347,6 +347,65 @@ fn a_compound_hold_names_everything_that_must_be_addressed() {
     assert!(hazards.iter().any(|h| h.contains("final coat")));
 }
 
+/// The compound case, priced. Neither hazard alone opens the space, so the answer is
+/// the plan — and the plan must be the CHEAPEST one, not "discharge everything".
+/// The coat expires on its own, so this needs one attendance (the stop-work) and a
+/// wait, not two attendances.
+#[test]
+fn a_compound_hold_is_priced_as_one_cheapest_plan() {
+    let stop_work = Hazard {
+        origin: CompartmentNo::new("4-160-2-Q"),
+        kind: HazardKind::StopWork,
+        since: at(T0),
+        label: "STOP WORK · Fire Marshal".to_owned(),
+    };
+    let f = Fixture::new(vec![coating(), stop_work]);
+    let world = f.world(T0);
+    let a = assess(&world, &CompartmentNo::new("4-160-2-Q"));
+
+    assert!(a.options.is_empty(), "no single action opens it");
+    let plan = a.combined.expect("but a plan does");
+    assert!(
+        plan.subject_state.permits_work(),
+        "and it demonstrably works"
+    );
+
+    let waits = plan
+        .actions
+        .iter()
+        .filter(|x| matches!(x, Action::Wait { .. }))
+        .count();
+    let discharges = plan
+        .actions
+        .iter()
+        .filter(|x| matches!(x, Action::Discharge { .. }))
+        .count();
+    assert_eq!(waits, 1, "one wait covers every timed hold");
+    assert_eq!(
+        discharges, 1,
+        "only the stop-work needs a person; discharging the coat too would \
+         overstate the cost by a whole attendance: {:?}",
+        plan.actions
+    );
+    // A plan is only as certain as its least certain step.
+    assert_eq!(plan.confidence, Confidence::AssumesActor);
+    assert!(plan.effect.freed_hours.get() > 0);
+}
+
+/// A plan is offered only when nothing single works. Alongside a working single
+/// action it would be noise.
+#[test]
+fn no_plan_is_offered_when_one_action_is_enough() {
+    let f = Fixture::new(vec![coating()]);
+    let world = f.world(T0);
+    let a = assess(&world, &CompartmentNo::new("4-160-2-Q"));
+    assert!(!a.options.is_empty());
+    assert!(
+        a.combined.is_none(),
+        "one action suffices, so there is no plan to make"
+    );
+}
+
 /// Cutting the path is a real mitigation and must be offered, with its cost
 /// stated: the closure is itself work needing its own authorization.
 #[test]
@@ -497,6 +556,30 @@ proptest! {
                 a.holds.iter().all(|h| h.earliest_clear.is_some()),
                 "wait offered with an untimed hold present: {:?}", a.holds
             );
+        }
+    }
+
+    /// A space that no single action opens always gets a plan, and the plan always
+    /// works. The first half follows from the engine: remove every hazard named in
+    /// the trace and nothing is left to hold the space. Asserting it anyway is what
+    /// catches the day that stops being true.
+    #[test]
+    fn a_compound_hold_always_yields_a_working_plan(
+        hazards in proptest::collection::vec(any_hazard(), 2..5),
+        subject_idx in 0usize..8,
+    ) {
+        let f = Fixture::new(hazards);
+        let world = f.world(T0);
+        let subject = f.spaces[subject_idx].compartment.clone();
+        let a = assess(&world, &subject);
+        if a.state.permits_work() || !a.options.is_empty() || a.holds.len() < 2 {
+            return Ok(());
+        }
+        let plan = a.combined.clone();
+        prop_assert!(plan.is_some(), "no single action works and no plan offered: {:?}", a.holds);
+        if let Some(plan) = plan {
+            prop_assert!(plan.subject_state.permits_work());
+            prop_assert!(plan.actions.len() >= 2, "a plan of one is an option");
         }
     }
 

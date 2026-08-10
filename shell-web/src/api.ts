@@ -410,6 +410,15 @@ export interface AuditRecord {
   prev_hash: string | null;
 }
 
+/** Several actions that only work together, priced as one plan. */
+export interface Combined {
+  actions: MitigationAction[];
+  effect: MitigationEffect;
+  /** The weakest confidence among the parts. */
+  confidence: Confidence;
+  subject_state: DecisionState;
+}
+
 export interface Assessment {
   subject: string;
   state: DecisionState;
@@ -417,6 +426,8 @@ export interface Assessment {
   holds: Hold[];
   /** Ranked, best first. Empty when no single action opens the space. */
   options: Mitigation[];
+  /** The cheapest plan, present only when no single action opens the space. */
+  combined: Combined | null;
   as_of: number;
   /** What has already been decided here, newest first. */
   decisions: AuditRecord[];

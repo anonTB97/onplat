@@ -224,6 +224,18 @@ pub enum Confidence {
     AssumesOwnAuthorization,
 }
 
+impl Confidence {
+    /// How much is being assumed, least first. Used to take the weakest across a
+    /// plan: a set of actions is only as certain as its least certain step.
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Computed => 0,
+            Self::AssumesActor => 1,
+            Self::AssumesOwnAuthorization => 2,
+        }
+    }
+}
+
 /// What taking an action would do to the hull, computed by evaluating it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Effect {
@@ -303,8 +315,29 @@ pub struct Assessment {
     /// Every independent hold on it.
     pub holds: Vec<Hold>,
     /// Ranked options, best first. Empty when no single action clears it — read
-    /// `holds` then, which names everything that must be addressed together.
+    /// `combined` then.
     pub options: Vec<Mitigation>,
+    /// The cheapest set of actions that together open the space, present only when
+    /// no single action does.
+    pub combined: Option<Combined>,
+}
+
+/// Several actions that only work together, priced as one plan.
+///
+/// Kept separate from [`Mitigation`] rather than adding a "do all of these" variant
+/// to [`Action`], so that the invariant holding the counterfactual honest survives:
+/// one [`Action`] is exactly one perturbation of the engine's inputs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Combined {
+    /// Every action in the plan. All of them are needed.
+    pub actions: Vec<Action>,
+    /// The re-evaluated consequence of taking them all.
+    pub effect: Effect,
+    /// The weakest confidence among the parts — a plan is only as certain as its
+    /// least certain step.
+    pub confidence: Confidence,
+    /// The state the subject would be in afterwards.
+    pub subject_state: DecisionState,
 }
 
 impl Assessment {
@@ -325,63 +358,50 @@ fn decide(world: &World<'_>, subject: &CompartmentNo) -> Decision {
     })
 }
 
-/// The world with one hazard removed.
-fn without_hazard(world: &World<'_>, origin: &CompartmentNo, label: &str) -> Variant {
+/// The world as it is, owned so actions can be applied to it.
+fn base(world: &World<'_>) -> Variant {
     Variant {
         graph: world.graph.clone(),
-        hazards: world
-            .hazards
-            .iter()
-            .filter(|h| !(&h.origin == origin && h.label == label))
-            .cloned()
-            .collect(),
+        hazards: world.hazards.to_vec(),
         at: world.at,
     }
 }
 
-/// The world with one coupling removed, in both directions.
+/// One action applied to a world, yielding the world it would produce.
 ///
-/// Both, because a physical closure is not directional — blanking a duct stops
-/// the air whichever way it was flowing — and the schema stores symmetric
-/// couplings as two rows.
-fn without_coupling(
-    world: &World<'_>,
-    from: &CompartmentNo,
-    to: &CompartmentNo,
-    coupling: &str,
-) -> Variant {
-    let cut = |a: &CompartmentNo, b: &CompartmentNo, code: &str| {
-        code == coupling && ((a == from && b == to) || (a == to && b == from))
-    };
-    Variant {
-        graph: AdjacencyGraph::new(
-            world
-                .graph
-                .edges()
-                .filter(|e| !cut(&e.from, &e.to, e.code.as_str()))
-                .cloned()
-                .collect(),
-        ),
-        hazards: world.hazards.to_vec(),
-        at: world.at,
-    }
-}
-
-/// The world at a later instant.
-fn at_instant(world: &World<'_>, until: Timestamp) -> Variant {
-    Variant {
-        graph: world.graph.clone(),
-        hazards: world.hazards.to_vec(),
-        at: until,
-    }
-}
-
-fn variant_for(world: &World<'_>, action: &Action) -> Variant {
+/// Takes and returns a [`Variant`] rather than reading a [`World`], so actions
+/// compose: pricing a compound hold means applying several at once, and a function
+/// per action that could only start from the real world could not be chained.
+fn apply(mut variant: Variant, action: &Action) -> Variant {
     match action {
-        Action::Discharge { origin, hazard, .. } => without_hazard(world, origin, hazard),
-        Action::Wait { until } => at_instant(world, *until),
-        Action::Interrupt { from, to, coupling } => without_coupling(world, from, to, coupling),
+        Action::Discharge { origin, hazard, .. } => {
+            variant
+                .hazards
+                .retain(|h| !(&h.origin == origin && &h.label == hazard));
+        }
+        Action::Wait { until } => variant.at = *until,
+        Action::Interrupt { from, to, coupling } => {
+            // Cut in both directions: a physical closure is not directional —
+            // blanking a duct stops the air whichever way it was flowing — and the
+            // schema stores symmetric couplings as two rows.
+            let cut = |a: &CompartmentNo, b: &CompartmentNo, code: &str| {
+                code == coupling.as_str() && ((a == from && b == to) || (a == to && b == from))
+            };
+            variant.graph = AdjacencyGraph::new(
+                variant
+                    .graph
+                    .edges()
+                    .filter(|e| !cut(&e.from, &e.to, e.code.as_str()))
+                    .cloned()
+                    .collect(),
+            );
+        }
     }
+    variant
+}
+
+fn variant_for(world: &World<'_>, actions: &[Action]) -> Variant {
+    actions.iter().fold(base(world), apply)
 }
 
 /// The holds on a space, one per (rule, hazard) that fired, deduplicated.
@@ -455,9 +475,9 @@ fn candidates(decision: &Decision) -> Vec<Action> {
     out
 }
 
-/// The consequence of an action across every space in the register.
-fn effect_of(world: &World<'_>, action: &Action) -> Effect {
-    let variant = variant_for(world, action);
+/// The consequence of a set of actions across every space in the register.
+fn effect_of(world: &World<'_>, actions: &[Action]) -> Effect {
+    let variant = variant_for(world, actions);
     let mut effect = Effect::default();
     for load in world.spaces {
         let before = decide(world, &load.compartment).permits_work();
@@ -510,6 +530,7 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
         booked,
         holds: holds_of(&decision),
         options: Vec::new(),
+        combined: None,
     };
     // Nothing to mitigate on a space that already permits work. Said explicitly:
     // an empty option list on an open space means "no issue", not "no idea".
@@ -518,20 +539,75 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
     }
 
     for action in candidates(&decision) {
-        let variant = variant_for(world, &action);
-        let after = variant.decide(world.rules, subject);
+        let after = variant_for(world, std::slice::from_ref(&action)).decide(world.rules, subject);
         if !after.permits_work() {
             continue;
         }
         assessment.options.push(Mitigation {
             confidence: action.confidence(),
-            effect: effect_of(world, &action),
+            effect: effect_of(world, std::slice::from_ref(&action)),
             subject_state: after.state,
             action,
         });
     }
     rank(&mut assessment.options);
+    // Only when nothing single works. Offered alongside a working single action it
+    // would be noise: a planner with one thing to do does not need the plan that
+    // does everything.
+    if assessment.options.is_empty() {
+        assessment.combined = combined_for(world, subject, &assessment.holds);
+    }
     assessment
+}
+
+/// The cheapest set of actions that together open a space no single action opens.
+///
+/// Cheapest, not simply "discharge everything". A compound of one curing coat and
+/// one stop-work does not need two attendances: the coat expires on its own, so the
+/// plan is *wait for the cure and get the stop-work lifted*, and reporting two
+/// discharges would overstate the cost by a whole attendance.
+///
+/// So: one `Wait` covering every timed hold, plus one `Discharge` per hazard whose
+/// hold has no clock.
+fn combined_for(world: &World<'_>, subject: &CompartmentNo, holds: &[Hold]) -> Option<Combined> {
+    if holds.len() < 2 {
+        return None;
+    }
+    let mut actions = Vec::new();
+    if let Some(until) = holds.iter().filter_map(|h| h.earliest_clear).max() {
+        actions.push(Action::Wait { until });
+    }
+    let mut seen = BTreeSet::new();
+    for hold in holds.iter().filter(|h| h.earliest_clear.is_none()) {
+        if seen.insert((hold.origin.clone(), hold.hazard.clone())) {
+            actions.push(Action::Discharge {
+                origin: hold.origin.clone(),
+                hazard: hold.hazard.clone(),
+                actor: hold.clearing_authority.clone(),
+            });
+        }
+    }
+    if actions.len() < 2 {
+        return None;
+    }
+    let after = variant_for(world, &actions).decide(world.rules, subject);
+    // Reported only if it demonstrably works, on the same terms as every single
+    // option. It should always work — every hold has been addressed — but "should"
+    // is not the standard this crate holds itself to.
+    if !after.permits_work() {
+        return None;
+    }
+    let confidence = actions
+        .iter()
+        .map(Action::confidence)
+        .max_by_key(|c| c.rank())
+        .unwrap_or(Confidence::Computed);
+    Some(Combined {
+        effect: effect_of(world, &actions),
+        subject_state: after.state,
+        confidence,
+        actions,
+    })
 }
 
 /// The hull's highest-leverage actions, regardless of which space you started from.
@@ -560,7 +636,7 @@ pub fn leverage(world: &World<'_>) -> Vec<Mitigation> {
     let mut out: Vec<Mitigation> = by_action
         .into_values()
         .map(|action| {
-            let effect = effect_of(world, &action);
+            let effect = effect_of(world, std::slice::from_ref(&action));
             Mitigation {
                 confidence: action.confidence(),
                 // Hull-wide, so there is no one subject. The state reported is the

@@ -23,6 +23,7 @@ import {
 import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
 import DistributedPackages from "./DistributedPackages";
+import LeverageBoard from "./LeverageBoard";
 import { fmtInstant, isProjection, TimeControl, type Horizon } from "./TimeControl";
 import WorkOrders from "./WorkOrders";
 import { C } from "./theme";
@@ -35,7 +36,7 @@ const MODULES: ModuleDef[] = [
   { group: "", label: "Deck Explorer", id: "deckExplorer", icon: "deckExplorer", built: true },
   { group: "Plan", label: "Sequence Board", id: "placeholder", icon: "sequenceBoard", built: false },
   { group: "", label: "Work Orders", id: "workOrders", icon: "workOrders", built: true },
-  { group: "Decide", label: "Conflicts & Risk", id: "placeholder", icon: "conflicts", built: false },
+  { group: "Decide", label: "Conflicts & Risk", id: "leverage", icon: "conflicts", built: true },
   { group: "Yard", label: "Portfolio", id: "portfolio", icon: "portfolio", built: true },
   { group: "Authorization", label: "Distributed Packages", id: "distPackages", icon: "distPackages", built: true },
   { group: "", label: "Deconfliction Cascade", id: "placeholder", icon: "cascade", built: false },
@@ -299,6 +300,16 @@ export default function App() {
               spaces={rows}
               onOpenSpace={jump}
               asOf={asOf}
+            />
+          )}
+
+          {!error && selected && module.id === "leverage" && (
+            <LeverageBoard
+              identity={DEMO_IDENTITY}
+              vesselId={selected}
+              hullLabel={hullLabel}
+              asOf={asOf}
+              onOpenSpace={jump}
             />
           )}
 

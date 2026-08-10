@@ -21,6 +21,7 @@ import {
   type Assessment,
   type AsOf,
   type Confidence,
+  type DeckStateRow,
   type Identity,
   type Mitigation,
   type MitigationAction,
@@ -97,11 +98,21 @@ export default function Mitigations({
   vesselId,
   compartment,
   asOf,
+  spaces,
+  onOpenSpace,
 }: {
   identity: Identity;
   vesselId: string;
   compartment: string;
   asOf: AsOf;
+  /**
+   * Every space on the hull with its served state, for the redeployment list.
+   *
+   * Passed in rather than fetched: the Deck Explorer already holds exactly this,
+   * and a second read would be a second answer to "is that space open".
+   */
+  spaces: DeckStateRow[];
+  onOpenSpace: (compartment: string) => void;
 }) {
   const [data, setData] = useState<Assessment | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -141,6 +152,29 @@ export default function Mitigations({
 
   if (error) return <p style={{ color: C.danger, fontSize: 12 }}>Options unavailable ({error}).</p>;
   if (!data) return null;
+
+  // For each trade booked in this held space, the spaces they could work in
+  // instead: authorized now, with hours booked for that trade at this instant.
+  // Sorted by hours, because a crew being sent somewhere should be sent where the
+  // most of their work is.
+  const here = spaces.find((r) => r.compartment.compartment_no === compartment);
+  const redeploy = (here?.trades ?? [])
+    .map((trade) => {
+      const open = spaces
+        .filter(
+          (r) =>
+            r.compartment.compartment_no !== compartment &&
+            r.readiness === "go" &&
+            r.trades.includes(trade),
+        )
+        .sort((a, b) => b.remaining_hours - a.remaining_hours);
+      return {
+        trade,
+        spaces: open,
+        hours: open.reduce((a, r) => a + r.remaining_hours, 0),
+      };
+    })
+    .filter((r) => r.spaces.length > 0);
 
   // An open space is not an issue. Said, rather than shown as an empty panel.
   if (data.options.length === 0 && data.holds.length === 0) {
@@ -287,6 +321,86 @@ export default function Mitigations({
           </div>
         );
       })}
+
+      {/* The plan, when nothing single works. Shown with its own price so the
+          compound case is not merely described — a planner comparing "one
+          attendance" against "a wait plus one attendance" needs both costed. */}
+      {data.combined && (
+        <div
+          style={{
+            marginTop: 8,
+            padding: "8px 9px",
+            borderRadius: 6,
+            border: `1px solid ${STATE_STYLE.WARN.border}`,
+            background: STATE_STYLE.WARN.bg,
+          }}
+        >
+          <div style={{ fontSize: 12.5, fontWeight: 600 }}>
+            Cheapest plan — all {data.combined.actions.length} together
+          </div>
+          {data.combined.actions.map((a, i) => (
+            <div key={`${a.kind}-${i}`} style={{ fontSize: 11.5, color: "#ccd1da", marginTop: 3 }}>
+              {i + 1}. {actionTitle(a)}{" "}
+              <span style={{ color: C.dim }}>({actionActor(a)})</span>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={chip("#22c55e", "rgba(34,197,94,0.12)", "rgba(34,197,94,0.4)")}>
+              +{mh(data.combined.effect.freed_hours)} · {data.combined.effect.frees.length} space
+              {data.combined.effect.frees.length === 1 ? "" : "s"}
+            </span>
+            {data.combined.effect.closes.length > 0 && (
+              <span style={chip("#f87171", "rgba(220,38,38,0.14)", "rgba(220,38,38,0.5)")}>
+                −{mh(data.combined.effect.closed_hours)} · shuts{" "}
+                {data.combined.effect.closes.join(", ")}
+              </span>
+            )}
+            <span
+              title={CONFIDENCE[data.combined.confidence].gloss}
+              style={chip(C.dim, "rgba(110,116,128,0.12)", "rgba(110,116,128,0.35)")}
+            >
+              {CONFIDENCE[data.combined.confidence].label}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Where the crew booked here could work instead.
+          The other half of a mitigation, and the half a planner needs within the
+          hour: clearing the hold recovers the space, but it does not recover the
+          shift the crew is standing through. Derived from the states the Deck
+          Explorer already holds, so it cannot disagree with the deck plan about
+          which spaces are open. */}
+      {redeploy.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: C.dim }}>
+            Meanwhile — where these crews can work now
+          </div>
+          {redeploy.map((r) => (
+            <div key={r.trade} style={{ fontSize: 11.5, marginTop: 5 }}>
+              <span style={{ color: "#ccd1da", fontWeight: 600 }}>{r.trade}</span>
+              <span style={{ color: C.dim }}> — {mh(r.hours)} open to them elsewhere</span>
+              <div style={{ marginTop: 2 }}>
+                {r.spaces.map((sp) => (
+                  <button
+                    key={sp.compartment.compartment_no}
+                    onClick={() => onOpenSpace(sp.compartment.compartment_no)}
+                    title={`${sp.compartment.name} — ${mh(sp.remaining_hours)} booked, authorized now`}
+                    style={{
+                      font: "inherit", fontSize: 10.5, fontFamily: "monospace",
+                      margin: "0 4px 3px 0", padding: "1px 5px", borderRadius: 4, cursor: "pointer",
+                      color: "#22c55e", background: "rgba(34,197,94,0.10)",
+                      border: "1px solid rgba(34,197,94,0.35)",
+                    }}
+                  >
+                    {sp.compartment.compartment_no} · {sp.remaining_hours}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* What was already tried. The reason this is on the same panel and not
           behind a tab: the second planner to arrive needs to know the chemist was

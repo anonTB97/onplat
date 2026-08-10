@@ -421,10 +421,15 @@ pub(crate) async fn readiness(
     // under-report what is outstanding.
     let registered: std::collections::BTreeSet<&CompartmentNo> =
         compartments.iter().map(|c| &c.compartment_no).collect();
+    // Filtered by `at` on the same terms as the attributed hours below. Without
+    // that the two halves of the rollup answer different questions: scrub forward
+    // and the attributed hours fall away while these stay, so a board reports that
+    // the only outstanding work on the hull is mis-keyed. The coverage figure
+    // exists to catch hours the register cannot account for, not to inflate them.
     let unattributed = packages
         .iter()
         .flat_map(|p| p.spaces.iter())
-        .filter(|(no, _)| !registered.contains(no))
+        .filter(|(no, w)| !registered.contains(no) && w.booked_at(at))
         .map(|(_, w)| w.remaining())
         .fold(ManHours::ZERO, |a, b| a + b);
 

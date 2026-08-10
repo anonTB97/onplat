@@ -83,22 +83,6 @@ impl Window {
     pub const fn overlaps(&self, other: Self) -> bool {
         self.start.0 < other.end.0 && other.start.0 < self.end.0
     }
-
-    /// `at` moved to the nearest instant inside the window.
-    ///
-    /// Used to keep a scrubbed instant inside the availability it belongs to.
-    /// Clamps to `end - 1ms` rather than `end`, because `end` is outside a
-    /// half-open window and would be rejected by the very bound this enforces.
-    #[must_use]
-    pub const fn clamp(&self, at: Timestamp) -> Timestamp {
-        if at.0 < self.start.0 {
-            self.start
-        } else if at.0 >= self.end.0 {
-            Timestamp(self.end.0.saturating_sub(1))
-        } else {
-            at
-        }
-    }
 }
 
 impl fmt::Display for Timestamp {
@@ -179,17 +163,6 @@ mod tests {
         let t = Timestamp::from_epoch_millis;
         assert!(!Window::new(t(100), t(100)).contains(t(100)));
         assert!(!Window::new(t(200), t(100)).contains(t(150)));
-    }
-
-    #[test]
-    fn clamp_lands_inside_a_half_open_window() {
-        let t = Timestamp::from_epoch_millis;
-        let w = Window::new(t(100), t(200));
-        assert_eq!(w.clamp(t(50)), t(100));
-        assert_eq!(w.clamp(t(150)), t(150));
-        // Not 200: that instant is outside the window it is being clamped into.
-        assert_eq!(w.clamp(t(999)), t(199));
-        assert!(w.contains(w.clamp(t(999))));
     }
 
     #[test]

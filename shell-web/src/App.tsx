@@ -87,8 +87,6 @@ export default function App() {
       setFrame(null);
       return;
     }
-    setAsOf(null);
-    setPlaying(false);
     timeframe(DEMO_IDENTITY, selected)
       .then(setFrame)
       .catch(() => setFrame(null));
@@ -125,6 +123,24 @@ export default function App() {
 
   const projecting = frame !== null && isProjection(asOf, frame.now, horizon);
 
+  /**
+   * Points the shell at a hull, clearing the instant in the same update.
+   *
+   * The reset has to happen here rather than in the timeframe effect. An effect
+   * runs *after* the render that changed the hull, so every fetch keyed on
+   * `[vesselId, asOf]` had already fired with the previous hull's instant — and a
+   * scrubbed instant from a six-month availability is out of range on a hull whose
+   * own availability has not opened. The 422 then landed after the corrected
+   * fetch succeeded and left a permanent "out of scope" screen on a hull that had
+   * loaded perfectly. One state update, one fetch, no race.
+   */
+  const pickHull = (id: string) => {
+    setSelected(id);
+    setAsOf(null);
+    setPlaying(false);
+    setFrame(null);
+  };
+
   const jump = (compartment: string) => {
     setModule(DECK_EXPLORER);
     setAltitude("compartment");
@@ -148,7 +164,7 @@ export default function App() {
         onCollapse={() => setCollapsed(!collapsed)}
         hulls={hulls}
         selected={selected}
-        onSelectVessel={setSelected}
+        onSelectVessel={pickHull}
         hullLabel={hullLabel}
         persona={persona}
         onPersona={(p) => {
@@ -304,7 +320,7 @@ export default function App() {
                   <button
                     key={v.vessel_id}
                     onClick={() => {
-                      setSelected(v.vessel_id);
+                      pickHull(v.vessel_id);
                       setModule(DECK_EXPLORER);
                     }}
                     style={{

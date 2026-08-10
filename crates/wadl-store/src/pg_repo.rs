@@ -98,12 +98,19 @@ impl PgStore {
         // The availability bounds come back as epoch milliseconds rather than
         // dates, converted where the dates live. Both columns are nullable, so a
         // hull in planning can legitimately have no window — see below.
+        //
+        // `end_on` names the last day of the availability, inclusive, the way a
+        // schedule reads it. `Window.end` is exclusive. So the end is the day
+        // AFTER `end_on` at midnight: without the interval, midnight of the last
+        // day becomes the exclusive bound and the whole final day of every
+        // availability is refused as out of range.
         let rows = sqlx::query(
             "SELECT v.vessel_id, v.hull_no, COALESCE(v.name, v.hull_no) AS name,
                     c.code AS class_code,
                     COALESCE(a.code, '—') AS availability_code,
                     (EXTRACT(EPOCH FROM a.start_on) * 1000)::bigint AS avail_start_ms,
-                    (EXTRACT(EPOCH FROM a.end_on) * 1000)::bigint   AS avail_end_ms
+                    (EXTRACT(EPOCH FROM a.end_on + INTERVAL '1 day') * 1000)::bigint
+                                                                   AS avail_end_ms
                FROM vessel v
                JOIN ship_class c ON c.class_id = v.class_id
                LEFT JOIN LATERAL (

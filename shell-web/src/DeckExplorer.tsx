@@ -103,7 +103,13 @@ export default function DeckExplorer({
   const [selectedDeck, setSelectedDeck] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [decision, setDecision] = useState<Decision | null>(null);
+  // Two error slots, because the two fetches fail for different reasons and need
+  // different words. The register is scope-gated: failing it means this hull is
+  // not yours. The states are instant-gated too: failing those can just mean the
+  // instant is outside the availability, which is not a scope problem and must not
+  // be reported as one.
   const [error, setError] = useState<string | null>(null);
+  const [instantError, setInstantError] = useState<string | null>(null);
 
   const [zoneFilter, setZoneFilter] = useState<string | null>(null);
   const [lens, setLens] = useState<Lens>("space");
@@ -122,30 +128,42 @@ export default function DeckExplorer({
   const [hoverFrame, setHoverFrame] = useState<number | null>(null);
   const dragging = useRef<{ x: number; y: number } | null>(null);
 
+  // The hull's register, and the selection reset that belongs to changing hulls.
+  // Deliberately NOT keyed on `asOf`: the deck list is time-invariant, and folding
+  // it in here is what made every scrub clear the selected compartment — closing
+  // the trace panel mid-read, making a scrubbed trace unreachable, and resetting
+  // the view every 800 ms under playback.
   useEffect(() => {
     setError(null);
     setSelected(null);
     setDecision(null);
-    Promise.all([
-      listDecks(identity, vesselId),
-      deckStates(identity, vesselId, asOf),
-      readiness(identity, vesselId, asOf),
-    ])
-      .then(([d, r, roll]) => {
+    listDecks(identity, vesselId)
+      .then((d) => {
         setDecks(d);
-        setRows(r);
-        setRollup(roll);
         setSelectedDeck(d.find((x) => x.compartment_count > 0)?.code ?? d[0]?.code ?? null);
       })
       .catch((e: unknown) => {
         setDecks([]);
-        setRows([]);
-        setRollup(null);
         setError(String(e));
       });
-    // Refetches on every scrub. The alternative — filtering a cached set in the
-    // browser — would produce a plausible board with a fabricated trace behind
-    // it, which is the one thing this screen must never do.
+  }, [identity, vesselId]);
+
+  // The states, at the instant. Refetched on every scrub — the alternative,
+  // filtering a cached set in the browser, would produce a plausible board with a
+  // fabricated trace behind it, which is the one thing this screen must never do.
+  // The selection survives, because scrubbing is how you watch one space change.
+  useEffect(() => {
+    Promise.all([deckStates(identity, vesselId, asOf), readiness(identity, vesselId, asOf)])
+      .then(([r, roll]) => {
+        setRows(r);
+        setRollup(roll);
+        setInstantError(null);
+      })
+      .catch((e: unknown) => {
+        setRows([]);
+        setRollup(null);
+        setInstantError(String(e));
+      });
   }, [identity, vesselId, asOf]);
 
   // Selecting a compartment fetches its full trace from the engine-backed
@@ -304,6 +322,15 @@ export default function DeckExplorer({
     return (
       <p style={{ color: STATE_STYLE.BLOCK.fg }}>
         This hull is out of scope for you, or the API is unreachable ({error}).
+      </p>
+    );
+  }
+
+  if (instantError) {
+    return (
+      <p style={{ color: STATE_STYLE.WARN.fg }}>
+        No answer for this instant ({instantError}). The hull is readable — pick a date
+        inside its availability, or press <b>⟲ Now</b>.
       </p>
     );
   }

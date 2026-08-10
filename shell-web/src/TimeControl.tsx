@@ -25,7 +25,7 @@
 // the browser would look identical and be a fabrication, which is why the
 // projection is fetched rather than computed.
 
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import type { AsOf, Window as TimeWindow } from "./api";
 import { C } from "./theme";
 
@@ -81,6 +81,43 @@ export const HORIZONS: Record<Horizon, HorizonDef> = {
 export const HORIZON_ORDER: Horizon[] = ["shift", "week", "month", "availability"];
 
 /**
+ * Moves a window's start onto the step grid that runs through `anchor`.
+ *
+ * This is load-bearing, not tidiness. `<input type="range">` only reaches
+ * `min + k*step`, so unless `min` is congruent to `now` modulo the step, **no
+ * reachable notch is `now`** — and the nearest one can sit closer than half a
+ * step, which is the tolerance `isProjection` uses to decide whether to warn.
+ * At the Week horizon that put a reachable instant 9.6 h away inside the "this is
+ * live" band: the boards were evaluated 9.6 h out, the coating cascade had flipped
+ * BLOCK to ALLOW, and the chrome said `evaluated live`. Aligning the grid means
+ * every reachable notch is either exactly `now` or a full step away from it.
+ *
+ * Shifted forward only, so an aligned window never reaches back outside the
+ * availability it was just clamped into.
+ */
+function alignStart(start: number, anchor: number, step: number): number {
+  return anchor - Math.floor((anchor - start) / step) * step;
+}
+
+/**
+ * The last grid notch strictly inside `w`.
+ *
+ * The window's exclusive end is almost never on the grid, so clamping to
+ * `end - 1` would emit an instant the slider cannot represent — the thumb would
+ * snap to the nearest notch and sit somewhere other than the readout it is
+ * labelled with. Every instant this control emits is on the grid, top of the
+ * window included.
+ */
+function lastNotch(w: TimeWindow, step: number): number {
+  return w.start + Math.floor((w.end - 1 - w.start) / step) * step;
+}
+
+/** `at` moved onto the nearest grid notch inside `w`. */
+export function clampInto(at: number, w: TimeWindow, step: number): number {
+  return Math.min(lastNotch(w, step), Math.max(w.start, at));
+}
+
+/**
  * The scrubbable window for a horizon.
  *
  * Opened with a fifth of its span behind `now`, because a shift that starts at
@@ -90,20 +127,20 @@ export const HORIZON_ORDER: Horizon[] = ["shift", "week", "month", "availability
  * always inside the availability, which is what the API will accept.
  */
 export function windowFor(horizon: Horizon, now: number, availability: TimeWindow): TimeWindow {
-  const span = HORIZONS[horizon].span;
-  if (span === null || span >= availability.end - availability.start) {
-    return availability;
+  const { span, step } = HORIZONS[horizon];
+  const whole = availability.end - availability.start;
+  if (span === null || span >= whole) {
+    return { start: alignStart(availability.start, now, step), end: availability.end };
   }
   let start = now - span / 5;
   if (start < availability.start) start = availability.start;
   if (start + span > availability.end) start = availability.end - span;
-  return { start, end: start + span };
+  return { start: alignStart(start, now, step), end: start + span };
 }
 
-/** Snaps an instant to the horizon's step, measured from the window's start. */
+/** Snaps an instant to the horizon's step grid, which runs through `now`. */
 function snap(ms: number, w: TimeWindow, step: number): number {
-  const offset = Math.round((ms - w.start) / step) * step;
-  return Math.min(w.end - 1, Math.max(w.start, w.start + offset));
+  return clampInto(w.start + Math.round((ms - w.start) / step) * step, w, step);
 }
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -176,28 +213,42 @@ export function TimeControl({
 }) {
   const def = HORIZONS[horizon];
   const w = availability ? windowFor(horizon, now, availability) : null;
+  // The instant actually on screen. Not clamped: this is what the boards were
+  // evaluated at, and a readout that clamped it would name an instant nobody
+  // asked for.
   const at = asOf ?? now;
   const projecting = isProjection(asOf, now, horizon);
+  // A hull whose availability has not opened (or has closed) has no notch on
+  // `now`. Live still works — no parameter is sent and the server answers from
+  // its own clock — but the slider cannot point at the present, so it says so
+  // rather than sitting at one end implying it does.
+  const nowOutside = w !== null && (now < w.start || now >= w.end);
+  // What the slider is allowed to show. `<input type="range">` silently coerces
+  // an out-of-range value to a bound, so feeding it `now` on a future
+  // availability made the thumb read as an instant it was not at — and playback
+  // then stepped from `now`, requesting instants the API refuses with a 422 that
+  // surfaced as a bogus "out of scope" on every module.
+  const knob = w ? clampInto(at, w, def.step) : at;
 
   // Playback. One step per beat, stopping at the window's end rather than
   // wrapping — a loop would quietly re-run the day and read as live data
-  // refreshing. The interval is held in a ref so a re-render mid-play does not
-  // stack timers.
-  const beat = useRef<number | null>(null);
+  // refreshing.
   useEffect(() => {
     if (!playing || !w) return undefined;
     const id = window.setInterval(() => {
-      const next = (asOf ?? now) + def.step;
-      if (next >= w.end - 1) {
-        onAsOf(w.end - 1);
+      // From the knob, never from `at`: starting outside the window would walk
+      // the whole run of requests out of range.
+      const end = lastNotch(w, def.step);
+      const next = clampInto(at, w, def.step) + def.step;
+      if (next >= end) {
+        onAsOf(end);
         onPlaying(false);
       } else {
         onAsOf(next);
       }
     }, 800);
-    beat.current = id;
     return () => window.clearInterval(id);
-  }, [playing, asOf, now, def.step, w?.end, onAsOf, onPlaying, w]);
+  }, [playing, at, def.step, onAsOf, onPlaying, w]);
 
   // Changing horizon must leave the instant inside the new window, and re-snap it
   // to the new step. Scrubbing to Thursday at Week and switching to Shift would
@@ -207,7 +258,7 @@ export function TimeControl({
     onHorizon(h);
     if (asOf === null || !availability) return;
     const next = windowFor(h, now, availability);
-    onAsOf(snap(Math.min(next.end - 1, Math.max(next.start, asOf)), next, HORIZONS[h].step));
+    onAsOf(snap(clampInto(asOf, next, HORIZONS[h].step), next, HORIZONS[h].step));
   };
 
   const chip = (active: boolean): React.CSSProperties => ({
@@ -275,9 +326,9 @@ export function TimeControl({
           <input
             type="range"
             min={w.start}
-            max={w.end - 1}
+            max={lastNotch(w, def.step)}
             step={def.step}
-            value={at}
+            value={knob}
             aria-label={`Evaluation instant, ${def.gloss}`}
             onChange={(e) => {
               onPlaying(false);
@@ -292,6 +343,15 @@ export function TimeControl({
           <span style={{ fontFamily: "monospace", color: C.dim, minWidth: 42 }}>
             {fmtOffset(at, now, horizon)}
           </span>
+
+          {nowOutside && asOf === null && (
+            <span
+              title="Now falls outside this hull's availability, so the scrubber cannot point at the present. The boards are live; scrub to read a date inside the availability."
+              style={{ color: C.dim }}
+            >
+              · now is outside this availability
+            </span>
+          )}
 
           {projecting ? (
             <span

@@ -31,10 +31,16 @@ fn seg(n: u128, code: &str, upstream: Option<u128>, comps: &[&str]) -> Segment {
     }
 }
 
+/// Undated work: the topology analysis is time-invariant, so these tests say so
+/// by leaving the window off rather than picking an arbitrary one. Whether a
+/// compartment's hours are booked *at an instant* is a question for the surfaces;
+/// whether they strand downstream scope is a question for the topology, and it
+/// has the same answer on every day of the availability.
 fn work(budget: i64, earned: i64) -> SpaceWork {
     SpaceWork {
         budget: ManHours::new(budget),
         earned: ManHours::new(earned),
+        window: None,
     }
 }
 
@@ -232,7 +238,7 @@ proptest! {
         let keys: Vec<CompartmentNo> = p.spaces.keys().cloned().collect();
         for (key, e) in keys.iter().zip(earned.iter()) {
             let budget = p.spaces[key].budget;
-            p.spaces.insert(key.clone(), SpaceWork { budget, earned: ManHours::new(*e) });
+            p.spaces.insert(key.clone(), SpaceWork { budget, earned: ManHours::new(*e), window: None });
         }
         let a = p.analyse();
 
@@ -259,7 +265,7 @@ proptest! {
         let keys: Vec<CompartmentNo> = p.spaces.keys().cloned().collect();
         for (key, e) in keys.iter().zip(earned.iter()) {
             let budget = p.spaces[key].budget;
-            p.spaces.insert(key.clone(), SpaceWork { budget, earned: ManHours::new(*e) });
+            p.spaces.insert(key.clone(), SpaceWork { budget, earned: ManHours::new(*e), window: None });
         }
         prop_assert_eq!(p.analyse(), p.analyse());
     }

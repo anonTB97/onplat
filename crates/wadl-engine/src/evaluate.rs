@@ -12,6 +12,13 @@
 //! Every trace step carries the [`RuleVersionId`] that produced it, which is
 //! what makes a decision from 2027 explainable in 2031 after the rule has
 //! changed twice.
+//!
+//! The evaluation instant is data, not a clock read, so [`evaluate`] answers for
+//! **any** instant a caller names. That is what a planner scrubbing to Thursday
+//! is doing, and the two places the instant bites are the two ends of a hold: a
+//! hazard not yet raised contributes nothing, and a hold that has elapsed
+//! contributes nothing. A hold gated on a verification instead of a clock never
+//! elapses, which is the distinction the whole time dimension is built to show.
 
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::RuleVersionId;
@@ -35,6 +42,22 @@ pub struct Hazard {
     pub since: Timestamp,
     /// Human label for the trace, e.g. `CT-3160-4 · final coat, curing`.
     pub label: String,
+}
+
+impl Hazard {
+    /// Whether this hazard has been raised by `at`.
+    ///
+    /// There is no `until` here, and that is deliberate: when a hazard stops
+    /// mattering is the *rule's* judgement, not the hazard's. The same open
+    /// coating ticket blocks the deck above for eight hours (R03) and suspends
+    /// the shared trunk for eight (R09); a different rule set could price them
+    /// differently from the same ticket. So the end of a hold is priced per
+    /// trace step from the rule's own `hold`, and the hazard carries only when
+    /// it began.
+    #[must_use]
+    pub const fn raised_by(&self, at: Timestamp) -> bool {
+        at.epoch_millis() >= self.since.epoch_millis()
+    }
 }
 
 /// The hazard kinds the platform recognises. A rule binds to one of these
@@ -69,6 +92,11 @@ pub struct EvaluationRequest<'a> {
     /// The hazards live across the space set.
     pub hazards: &'a [Hazard],
     /// The instant the decision is made at, supplied by the caller.
+    ///
+    /// Not necessarily now. A caller may ask for any instant — that is how a
+    /// planner sees Thursday and how a decision from 2027 is re-derived in 2031
+    /// — and the answer is a real evaluation with a real trace, never an
+    /// interpolation.
     pub at: Timestamp,
 }
 
@@ -176,26 +204,66 @@ fn step(
     }
 }
 
-/// Evaluates the authorization state of `req.subject` under `req.rules`.
+/// Records `step` unless its hold has already elapsed at `at`.
+///
+/// This is the whole difference between the platform's two kinds of hold, and it
+/// is what lets the product answer *what is still stopped on Thursday*:
+///
+/// - a step with a `hold` **clears itself**. At `earliest_clear` the cure is
+///   done and nobody had to do anything.
+/// - a step without one (`earliest_clear: None`) is gated on a **verification** —
+///   a marine chemist's certificate, a verified zero-energy state — and no
+///   amount of elapsed time discharges it.
+///
+/// Comparing with `>=` matches the half-open reading used everywhere else: the
+/// space clears *at* the instant the hold expires, not a millisecond later.
+fn push_live(trace: &mut Vec<TraceStep>, step: TraceStep, at: Timestamp) {
+    // Reads as: keep the step if it has no clock (a verification hold), or if its
+    // clock has not run out yet.
+    if step.earliest_clear.is_none_or(|clear| at < clear) {
+        trace.push(step);
+    }
+}
+
+/// Evaluates the authorization state of `req.subject` under `req.rules`, **as of
+/// `req.at`**.
 ///
 /// With no rule firing the state is [`DecisionState::Allow`] and the trace is
 /// empty — an explicit "nothing applies here", not an absence of information.
+///
+/// `req.at` is load-bearing in two places, and it is the only reason this
+/// function can be asked about an instant other than now. A hazard not yet
+/// raised at `at` contributes nothing, and a step whose hold has elapsed by `at`
+/// contributes nothing. Everything else about the answer is time-invariant, so a
+/// decision handed a fixed instant is reproducible for a board of inquiry — the
+/// point of taking the instant as data rather than reading a clock.
 #[must_use]
 pub fn evaluate(req: &EvaluationRequest<'_>) -> Decision {
     let mut trace = Vec::new();
 
     for hazard in req.hazards {
+        // A hazard that has not been raised yet is not a reason for anything.
+        // Without this, asking for an instant before a hazard began would hold
+        // the space anyway, and a schedule of future work would read as a hull
+        // that is shut today.
+        if !hazard.raised_by(req.at) {
+            continue;
+        }
         for entry in req.rules.for_hazard(hazard.kind) {
             match &entry.applies {
                 Applies::SameSpace => {
                     if &hazard.origin == req.subject {
-                        trace.push(step(
-                            entry,
-                            hazard,
-                            HopDepth::ZERO,
-                            vec![hazard.origin.clone()],
-                            Vec::new(),
-                        ));
+                        push_live(
+                            &mut trace,
+                            step(
+                                entry,
+                                hazard,
+                                HopDepth::ZERO,
+                                vec![hazard.origin.clone()],
+                                Vec::new(),
+                            ),
+                            req.at,
+                        );
                     }
                 }
                 Applies::Coupled { code, max_hops } => {
@@ -211,7 +279,11 @@ pub fn evaluate(req: &EvaluationRequest<'_>) -> Decision {
                             .iter()
                             .map(|edge| edge.code.as_str().to_owned())
                             .collect();
-                        trace.push(step(entry, hazard, hit.depth, path, via));
+                        push_live(
+                            &mut trace,
+                            step(entry, hazard, hit.depth, path, via),
+                            req.at,
+                        );
                     }
                 }
             }
@@ -372,6 +444,90 @@ mod tests {
         });
         assert_eq!(in_space.state, DecisionState::Suspend);
         assert_eq!(adjacent.state, DecisionState::Allow);
+    }
+
+    /// The eight-hour cure is priced from the hazard's `since`, so an evaluation
+    /// after it has elapsed must not still block the deck above. Before this was
+    /// wired the instant was ignored entirely and the demo hull showed a coat
+    /// that had cured three months earlier as a live BLOCK.
+    #[test]
+    fn a_cure_that_has_elapsed_no_longer_holds_the_space() {
+        let (graph, hazards) = coating_world();
+        let rules = RuleSet::seed_usn_hot_work();
+        let subject = CompartmentNo::new("2-160-2-Q");
+        let decide_at = |ms: i64| {
+            evaluate(&EvaluationRequest {
+                subject: &subject,
+                graph: &graph,
+                rules: &rules,
+                hazards: &hazards,
+                at: Timestamp::from_epoch_millis(ms),
+            })
+        };
+        let cure = 480 * 60_000;
+
+        assert_eq!(
+            decide_at(0).state,
+            DecisionState::Block,
+            "coat just applied"
+        );
+        assert_eq!(
+            decide_at(cure - 1).state,
+            DecisionState::Block,
+            "one millisecond short of cured is still cured-not"
+        );
+        // Half-open: the space clears AT the instant the hold expires.
+        let cleared = decide_at(cure);
+        assert_eq!(cleared.state, DecisionState::Allow);
+        assert!(cleared.trace.is_empty(), "an elapsed hold is not a reason");
+        assert_eq!(cleared.earliest_clear, None);
+    }
+
+    /// The other half of the distinction: a hold gated on a verification does not
+    /// discharge itself, however long the caller waits.
+    #[test]
+    fn a_verification_gated_hold_never_elapses() {
+        let graph = AdjacencyGraph::new(vec![edge("3-148-2-E", "3-148-0-L", "shared_bulkhead", 2)]);
+        let hazards = vec![Hazard {
+            origin: CompartmentNo::new("3-148-2-E"),
+            kind: HazardKind::EnergisedBus,
+            since: Timestamp::from_epoch_millis(0),
+            label: "Bus 3-SG-2 energised".to_owned(),
+        }];
+        let rules = RuleSet::seed_usn_hot_work();
+        let subject = CompartmentNo::new("3-148-2-E");
+        let ten_years = 10 * 365 * 24 * 3_600_000;
+        let d = evaluate(&EvaluationRequest {
+            subject: &subject,
+            graph: &graph,
+            rules: &rules,
+            hazards: &hazards,
+            at: Timestamp::from_epoch_millis(ten_years),
+        });
+        assert_ne!(d.state, DecisionState::Allow, "still unisolated");
+        assert!(
+            d.trace.iter().all(|s| s.earliest_clear.is_none()),
+            "nothing here is priced on a clock"
+        );
+    }
+
+    /// Asking for an instant before the coat was applied must not report the
+    /// space as held — otherwise a schedule of future hazards reads as a hull
+    /// that is already shut.
+    #[test]
+    fn a_hazard_not_yet_raised_holds_nothing() {
+        let (graph, hazards) = coating_world();
+        let rules = RuleSet::seed_usn_hot_work();
+        let subject = CompartmentNo::new("2-160-2-Q");
+        let d = evaluate(&EvaluationRequest {
+            subject: &subject,
+            graph: &graph,
+            rules: &rules,
+            hazards: &hazards,
+            at: Timestamp::from_epoch_millis(-1),
+        });
+        assert_eq!(d.state, DecisionState::Allow);
+        assert!(d.trace.is_empty());
     }
 
     #[test]

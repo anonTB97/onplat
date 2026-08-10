@@ -6,6 +6,7 @@
 
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::{VesselId, WorkOrderId};
+use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::ManHours;
 
 /// A deck level, ordered. `ordinal` ascends *downward*, which is what makes
@@ -38,6 +39,18 @@ pub struct VesselSummary {
     /// Planner-facing confidence label from the prototype: `At Risk`,
     /// `On Track`, `Planning`.
     pub confidence: String,
+    /// The availability window this hull is in.
+    ///
+    /// It is the domain of every as-of question about the hull. An instant
+    /// outside it is refused rather than answered: the hull has no hazards, no
+    /// schedule and no rules on file for a date before the availability opened,
+    /// so a decision there would be a confident statement about nothing.
+    ///
+    /// `None` when the availability carries no dates — the columns are nullable
+    /// and a hull in planning may legitimately have neither. A hull with no
+    /// window cannot be asked about another instant at all, which is the honest
+    /// answer rather than inventing bounds to scrub between.
+    pub availability: Option<Window>,
 }
 
 /// A compartment in the register, with its deck ordering so "directly above" is
@@ -93,6 +106,11 @@ pub struct WorkOrderSummary {
     pub source_ref: String,
     /// Whether the provenance has been confirmed by a planner.
     pub source_verified: bool,
+    /// When the order is planned to be worked.
+    ///
+    /// `None` when the schedule of record does not say — see
+    /// [`WorkOrderSummary::booked_at`] for why that is not treated as "never".
+    pub planned: Option<Window>,
 }
 
 impl WorkOrderSummary {
@@ -100,6 +118,18 @@ impl WorkOrderSummary {
     #[must_use]
     pub fn remaining_hours(&self) -> ManHours {
         self.budget_hours - self.earned_hours
+    }
+
+    /// Whether this order counts as booked at `at`.
+    ///
+    /// Undated orders count at every instant, matching
+    /// [`wadl_plan::SpaceWork::booked_at`]. The two must agree: a compartment's
+    /// hours come from both sources, and if one hid undated work while the other
+    /// showed it, the deck plan and the work-order list would disagree about
+    /// whether anybody is held up in that space.
+    #[must_use]
+    pub fn booked_at(&self, at: Timestamp) -> bool {
+        self.planned.is_none_or(|w| w.contains(at))
     }
 }
 

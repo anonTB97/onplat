@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::{SegmentId, WorkOrderId};
+use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::ManHours;
 
 /// One segment of a package: a trunk, branch, riser, run or header.
@@ -39,6 +40,13 @@ pub struct SpaceWork {
     pub budget: ManHours,
     /// Earned man-hours.
     pub earned: ManHours,
+    /// When this compartment's share of the package is planned to be worked.
+    ///
+    /// `None` means the schedule of record does not say. That is a real and
+    /// common condition — a footprint authored against the class before dates
+    /// were loaded — and it is kept distinct from an empty window on purpose:
+    /// see [`SpaceWork::booked_at`].
+    pub window: Option<Window>,
 }
 
 impl SpaceWork {
@@ -57,6 +65,18 @@ impl SpaceWork {
     #[must_use]
     pub fn is_complete(self) -> bool {
         self.remaining() == ManHours::ZERO
+    }
+
+    /// Whether this work counts as booked at `at`.
+    ///
+    /// Undated work counts at **every** instant. That asymmetry is deliberate: a
+    /// space with unscheduled hours in it is still a space with hours in it, and
+    /// hiding it from a scrubbed view would quietly shrink the outstanding work
+    /// as soon as a planner touched the time control. The surface's job is to
+    /// label those hours as undated, not to drop them.
+    #[must_use]
+    pub fn booked_at(self, at: Timestamp) -> bool {
+        self.window.is_none_or(|w| w.contains(at))
     }
 }
 

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::{CouplingTypeId, OrgId, SegmentId, VesselId, WorkOrderId};
-use wadl_domain::time::Timestamp;
+use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::{HopDepth, ManHours};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
@@ -27,10 +27,21 @@ use crate::model::{
 use crate::repo::Repositories;
 use crate::scope::TenantScope;
 
-/// The instant the demo's coating ticket was opened — 07:15 on the demo shift.
-/// A fixed constant, not `now()`: the demo world must tell the same story on
-/// every run, and the engine reads no clock anyway.
-pub const DEMO_COAT_OPENED_AT: i64 = 1_778_649_300_000;
+/// The demo world's notional "now" when no anchor is supplied — 07:15 on the
+/// demo shift. Fixed, not `now()`, so tests and golden snapshots read the same
+/// on every run.
+///
+/// The seed expresses its whole story as offsets from an anchor rather than as
+/// absolute instants, because the story has to stay true. Written as fixed
+/// dates, the demo's eight-hour cure elapsed in May and every later run showed a
+/// hull held by a hazard that had long since cleared — visible in the product as
+/// a SUSPEND whose `earliest_clear` was three months in the past. Anchoring the
+/// story to the instant the store is seeded keeps the coat curing when a reader
+/// arrives.
+pub const DEMO_ANCHOR_MS: i64 = 1_778_649_300_000;
+
+const MS_PER_MIN: i64 = 60_000;
+const MIN_PER_DAY: i64 = 24 * 60;
 
 struct VesselRow {
     id: VesselId,
@@ -40,6 +51,11 @@ struct VesselRow {
     class_code: &'static str,
     availability_code: &'static str,
     confidence: &'static str,
+    /// The availability window, in days either side of the anchor. It bounds
+    /// every as-of query: an instant outside the availability is not a question
+    /// this hull's data can answer.
+    avail_from_day: i64,
+    avail_to_day: i64,
 }
 
 struct CompartmentRow {
@@ -64,6 +80,11 @@ struct WorkOrderRow {
     earned: i64,
     source_ref: &'static str,
     source_verified: bool,
+    /// When this order is planned to be worked, in days either side of the
+    /// anchor. Days rather than minutes because that is the resolution a
+    /// schedule of record actually carries for a work item.
+    from_day: i64,
+    to_day: i64,
 }
 
 /// A directed coupling edge in the seed. Symmetric couplings appear twice, as
@@ -86,7 +107,10 @@ struct HazardRow {
     vessel: VesselId,
     origin: &'static str,
     kind: HazardKind,
-    since_ms: i64,
+    /// When the hazard was raised, in minutes either side of the anchor.
+    /// Minutes, not days: a cure clock is priced in minutes and the demo's whole
+    /// point is that the coat is part-way through one.
+    since_min: i64,
     label: &'static str,
 }
 
@@ -123,10 +147,19 @@ struct PackageSpaceRow {
     compartment: &'static str,
     budget: i64,
     earned: i64,
+    /// This compartment's share of the package, in days either side of the
+    /// anchor. Per-space rather than per-package because that is the fact the
+    /// topology already asserts: a trunk is worked before the branches hanging
+    /// off it, so the footprint moves through the hull over the availability.
+    from_day: i64,
+    to_day: i64,
 }
 
 /// The seeded in-memory store.
 pub struct InMemoryStore {
+    /// The instant the demo's story is told relative to. Every dated row is an
+    /// offset from here, resolved on read.
+    anchor: Timestamp,
     vessels: Vec<VesselRow>,
     compartments: Vec<CompartmentRow>,
     work_orders: Vec<WorkOrderRow>,
@@ -189,9 +222,23 @@ impl DemoWorld {
 }
 
 impl InMemoryStore {
-    /// Builds the seeded store and returns it alongside the demo identifiers.
+    /// Builds the seeded store on the fixed [`DEMO_ANCHOR_MS`] anchor.
+    ///
+    /// Use this where byte-stable output matters — golden snapshots, tests that
+    /// assert on specific instants. A served demo wants [`Self::demo_at`] with
+    /// the real clock, so the story is current for whoever is reading it.
     #[must_use]
     pub fn demo() -> (Self, DemoWorld) {
+        Self::demo_at(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS))
+    }
+
+    /// Builds the seeded store with its story anchored on `anchor`.
+    ///
+    /// The anchor is the demo's notional "now": the coating ticket is three hours
+    /// into its eight-hour cure, work is in progress in five spaces, and the
+    /// availability runs from two weeks before to twenty-four weeks after.
+    #[must_use]
+    pub fn demo_at(anchor: Timestamp) -> (Self, DemoWorld) {
         let world = DemoWorld {
             yard_org: OrgId::from_uuid(id(0x01)),
             navy_org: OrgId::from_uuid(id(0x02)),
@@ -203,6 +250,7 @@ impl InMemoryStore {
             navy_hull: VesselId::from_uuid(id(0x68)),
         };
         let store = Self {
+            anchor,
             vessels: Self::seed_vessels(&world),
             compartments: Self::seed_compartments(&world),
             work_orders: Self::seed_work_orders(&world),
@@ -213,6 +261,27 @@ impl InMemoryStore {
             package_spaces: Self::seed_package_spaces(),
         };
         (store, world)
+    }
+
+    /// An instant `minutes` either side of the anchor.
+    fn at_minutes(&self, minutes: i64) -> Timestamp {
+        Timestamp::from_epoch_millis(
+            self.anchor
+                .epoch_millis()
+                .saturating_add(minutes.saturating_mul(MS_PER_MIN)),
+        )
+    }
+
+    /// A window running from the start of `from_day` to the start of `to_day`,
+    /// both counted in days from the anchor.
+    ///
+    /// Half-open, per [`Window`]: a task ending on day 3 and one starting on day
+    /// 3 hand over cleanly instead of both counting on the changeover.
+    fn day_window(&self, from_day: i64, to_day: i64) -> Window {
+        Window::new(
+            self.at_minutes(from_day.saturating_mul(MIN_PER_DAY)),
+            self.at_minutes(to_day.saturating_mul(MIN_PER_DAY)),
+        )
     }
 
     /// The two distributed packages from the prototype. They deliberately share
@@ -331,39 +400,52 @@ impl InMemoryStore {
         ]
     }
 
+    /// The per-compartment work in each package, with the days it is planned for.
+    ///
+    /// The dates are not decoration. They are ordered to match what the topology
+    /// already asserts — a trunk is worked before the branches hanging off it —
+    /// so scrubbing the availability shows the footprint moving through the hull
+    /// instead of the whole package lighting up at every instant. Completed
+    /// spaces sit in the past, in-progress spaces straddle the anchor, and
+    /// unstarted spaces sit ahead of it, so `earned` and the window tell the same
+    /// story rather than contradicting each other.
     fn seed_package_spaces() -> Vec<PackageSpaceRow> {
-        let hvac = |compartment, budget, earned| PackageSpaceRow {
+        let hvac = |compartment, budget, earned, from_day, to_day| PackageSpaceRow {
             package_code: "WI-2201",
             compartment,
             budget,
             earned,
+            from_day,
+            to_day,
         };
-        let cable = |compartment, budget, earned| PackageSpaceRow {
+        let cable = |compartment, budget, earned, from_day, to_day| PackageSpaceRow {
             package_code: "WI-3310",
             compartment,
             budget,
             earned,
+            from_day,
+            to_day,
         };
         vec![
             // HVAC footprint — 11 compartments. The trunk (T1) is open at
             // 3-160-2-Q, which is also where the coating cascade lands, so the
             // authorization hold and the completion hold meet in one space.
-            hvac("3-172-0-M", 620, 620),
-            hvac("3-160-2-Q", 380, 300),
-            hvac("3-148-0-L", 240, 240),
-            hvac("2-160-1-Q", 560, 410),
-            hvac("2-152-0-Q", 400, 180),
-            hvac("3-148-2-E", 320, 96),
-            hvac("3-140-0-Q", 480, 0),
-            hvac("3-184-0-Q", 340, 300),
-            hvac("3-192-2-E", 210, 210),
-            hvac("2-176-0-Q", 300, 165),
-            hvac("1-160-0-Q", 300, 60),
+            hvac("3-172-0-M", 620, 620, -12, -6),
+            hvac("3-160-2-Q", 380, 300, -2, 3),
+            hvac("3-148-0-L", 240, 240, -6, -2),
+            hvac("2-160-1-Q", 560, 410, -1, 5),
+            hvac("2-152-0-Q", 400, 180, 1, 8),
+            hvac("3-148-2-E", 320, 96, 0, 6),
+            hvac("3-140-0-Q", 480, 0, 6, 14),
+            hvac("3-184-0-Q", 340, 300, -8, -1),
+            hvac("3-192-2-E", 210, 210, -10, -4),
+            hvac("2-176-0-Q", 300, 165, 2, 9),
+            hvac("1-160-0-Q", 300, 60, 10, 20),
             // Cableway footprint — 4 compartments.
-            cable("3-148-0-L", 410, 410),
-            cable("3-152-0-Q", 260, 240),
-            cable("3-140-0-Q", 520, 310),
-            cable("3-148-2-E", 300, 40),
+            cable("3-148-0-L", 410, 410, -9, -3),
+            cable("3-152-0-Q", 260, 240, -3, 2),
+            cable("3-140-0-Q", 520, 310, 4, 12),
+            cable("3-148-2-E", 300, 40, 0, 7),
         ]
     }
 
@@ -423,13 +505,21 @@ impl InMemoryStore {
 
     /// The hazards live on the demo hull. One open coating ticket, which is what
     /// makes the Deck Explorer light up.
+    ///
+    /// The two are timed to demonstrate the difference the whole time dimension
+    /// turns on. The coat is **three hours into an eight-hour cure**, so it clears
+    /// itself five hours after the anchor and a planner scrubbing to tomorrow
+    /// watches it go. The energised bus was raised two days ago and clears on a
+    /// *verified* zero-energy state, so no amount of scrubbing discharges it —
+    /// it is still there at the end of the availability, waiting for someone to
+    /// go and isolate it.
     fn seed_hazards(w: &DemoWorld) -> Vec<HazardRow> {
         vec![
             HazardRow {
                 vessel: w.cvn73,
                 origin: "3-160-2-Q",
                 kind: HazardKind::CoatingOpen,
-                since_ms: DEMO_COAT_OPENED_AT,
+                since_min: -3 * 60,
                 label: "CT-3160-4 · final coat, curing",
             },
             // Bus 3-SG-2 is live in the switchgear room. Duct penetration and
@@ -439,7 +529,7 @@ impl InMemoryStore {
                 vessel: w.cvn73,
                 origin: "3-148-2-E",
                 kind: HazardKind::EnergisedBus,
-                since_ms: DEMO_COAT_OPENED_AT,
+                since_min: -2 * MIN_PER_DAY,
                 label: "Bus 3-SG-2 energised — no verified zero-energy state",
             },
         ]
@@ -455,6 +545,8 @@ impl InMemoryStore {
                 class_code: "CVN-68",
                 availability_code: "PIA-26",
                 confidence: "At Risk",
+                avail_from_day: -14,
+                avail_to_day: 166,
             },
             VesselRow {
                 id: w.cvn71,
@@ -464,6 +556,8 @@ impl InMemoryStore {
                 class_code: "CVN-68",
                 availability_code: "SRA-26",
                 confidence: "On Track",
+                avail_from_day: -40,
+                avail_to_day: 20,
             },
             VesselRow {
                 id: w.cvn75,
@@ -473,6 +567,8 @@ impl InMemoryStore {
                 class_code: "CVN-68",
                 availability_code: "DPIA-28",
                 confidence: "Planning",
+                avail_from_day: 60,
+                avail_to_day: 300,
             },
             VesselRow {
                 id: w.ddg,
@@ -482,6 +578,8 @@ impl InMemoryStore {
                 class_code: "DDG-51 Flt IIA",
                 availability_code: "DSRA-26",
                 confidence: "On Track",
+                avail_from_day: -5,
+                avail_to_day: 120,
             },
             VesselRow {
                 id: w.lpd,
@@ -491,6 +589,8 @@ impl InMemoryStore {
                 class_code: "LPD-17",
                 availability_code: "PSA-26",
                 confidence: "Planning",
+                avail_from_day: -60,
+                avail_to_day: 60,
             },
             VesselRow {
                 id: w.navy_hull,
@@ -500,6 +600,8 @@ impl InMemoryStore {
                 class_code: "CVN-68",
                 availability_code: "INACT-26",
                 confidence: "Planning",
+                avail_from_day: -30,
+                avail_to_day: 150,
             },
         ]
     }
@@ -785,6 +887,8 @@ impl InMemoryStore {
                 earned: 512,
                 source_ref: "AWR 73-26-3318",
                 source_verified: true,
+                from_day: -9,
+                to_day: 4,
             },
             WorkOrderRow {
                 vessel: w.cvn73,
@@ -798,6 +902,8 @@ impl InMemoryStore {
                 earned: 0,
                 source_ref: "AWR 73-26-3402",
                 source_verified: true,
+                from_day: 5,
+                to_day: 12,
             },
             WorkOrderRow {
                 vessel: w.cvn73,
@@ -811,6 +917,8 @@ impl InMemoryStore {
                 earned: 12,
                 source_ref: "AWR 73-26-4471",
                 source_verified: true,
+                from_day: 7,
+                to_day: 26,
             },
             WorkOrderRow {
                 vessel: w.cvn73,
@@ -824,6 +932,8 @@ impl InMemoryStore {
                 earned: 0,
                 source_ref: "AWR 73-26-3905",
                 source_verified: false,
+                from_day: 2,
+                to_day: 11,
             },
             // Stranded: switchboard rip-out is ready but cannot proceed until the
             // Aft IC & Gyro Room cableway work (a different compartment) closes.
@@ -839,6 +949,8 @@ impl InMemoryStore {
                 earned: 0,
                 source_ref: "AWR 73-26-1905",
                 source_verified: false,
+                from_day: 12,
+                to_day: 18,
             },
             // Stranded: fan-room duct insulation waits on the same upstream room.
             WorkOrderRow {
@@ -853,6 +965,8 @@ impl InMemoryStore {
                 earned: 0,
                 source_ref: "AWR 73-26-5571",
                 source_verified: true,
+                from_day: 12,
+                to_day: 16,
             },
         ]
     }
@@ -913,6 +1027,7 @@ impl InMemoryStore {
                     SpaceWork {
                         budget: ManHours::new(s.budget),
                         earned: ManHours::new(s.earned),
+                        window: Some(self.day_window(s.from_day, s.to_day)),
                     },
                 )
             })
@@ -928,14 +1043,20 @@ impl InMemoryStore {
     }
 }
 
-fn summarise_vessel(v: &VesselRow) -> VesselSummary {
-    VesselSummary {
-        vessel_id: v.id,
-        hull_no: v.hull_no.to_owned(),
-        name: v.name.to_owned(),
-        class_code: v.class_code.to_owned(),
-        availability_code: v.availability_code.to_owned(),
-        confidence: v.confidence.to_owned(),
+impl InMemoryStore {
+    /// Projects a seed row, resolving its availability offsets against the
+    /// anchor. A method rather than a free function because the window is not in
+    /// the row — the row carries offsets, and only the store knows from what.
+    fn summarise_vessel(&self, v: &VesselRow) -> VesselSummary {
+        VesselSummary {
+            vessel_id: v.id,
+            hull_no: v.hull_no.to_owned(),
+            name: v.name.to_owned(),
+            class_code: v.class_code.to_owned(),
+            availability_code: v.availability_code.to_owned(),
+            confidence: v.confidence.to_owned(),
+            availability: Some(self.day_window(v.avail_from_day, v.avail_to_day)),
+        }
     }
 }
 
@@ -945,7 +1066,7 @@ impl Repositories for InMemoryStore {
         self.vessels
             .iter()
             .filter(|v| v.org == scope.org && scope.is_assigned(v.id))
-            .map(summarise_vessel)
+            .map(|v| self.summarise_vessel(v))
             .collect()
     }
 
@@ -954,7 +1075,8 @@ impl Repositories for InMemoryStore {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<VesselSummary, StoreError> {
-        self.scoped_vessel(scope, vessel).map(summarise_vessel)
+        self.scoped_vessel(scope, vessel)
+            .map(|v| self.summarise_vessel(v))
     }
 
     async fn list_compartments(
@@ -1014,6 +1136,7 @@ impl Repositories for InMemoryStore {
                 earned_hours: ManHours::new(w.earned),
                 source_ref: w.source_ref.to_owned(),
                 source_verified: w.source_verified,
+                planned: Some(self.day_window(w.from_day, w.to_day)),
             })
             .collect())
     }
@@ -1160,7 +1283,7 @@ impl Repositories for InMemoryStore {
             .map(|h| Hazard {
                 origin: CompartmentNo::new(h.origin),
                 kind: h.kind,
-                since: Timestamp::from_epoch_millis(h.since_ms),
+                since: self.at_minutes(h.since_min),
                 label: h.label.to_owned(),
             })
             .collect())

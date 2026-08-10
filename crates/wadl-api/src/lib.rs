@@ -70,6 +70,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/vessels/:id/stranded-hours",
             get(handlers::stranded_hours),
         )
+        .route("/api/vessels/:id/timeframe", get(handlers::timeframe))
         .route(
             "/api/vessels/:id/compartments/:no/state",
             get(handlers::compartment_state),
@@ -84,8 +85,14 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Builds a router and state over the seeded demo world, returning the world's
 /// identifiers too. Used by the server binary's demo mode and by the leak test.
+///
+/// The world is anchored on the clock rather than on a fixed date, so the demo's
+/// story is current for whoever is reading it: the coat is part-way through its
+/// cure *now*, not in a May that has already passed. [`InMemoryStore::demo`] keeps
+/// the fixed anchor for tests that need byte-stable instants.
 pub fn demo_app() -> (Router, DemoWorld) {
-    let (store, world) = InMemoryStore::demo();
-    let state = AppState::new(Arc::new(store), Arc::new(SystemClock));
+    let clock = SystemClock;
+    let (store, world) = InMemoryStore::demo_at(clock.now());
+    let state = AppState::new(Arc::new(store), Arc::new(clock));
     (build_router(state), world)
 }

@@ -1,13 +1,14 @@
 //! Request handlers. Thin: they resolve scope, call the store or the engine,
 //! and shape the result. No business logic lives here.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::VesselId;
+use wadl_domain::time::Timestamp;
 use wadl_domain::units::ManHours;
 use wadl_engine::{evaluate, Decision, EvaluationRequest};
 use wadl_plan::governing_constraint;
@@ -16,6 +17,61 @@ use wadl_plan::readiness::{roll_up, Readiness, SpaceReadiness};
 use crate::auth::Caller;
 use crate::error::ApiError;
 use crate::AppState;
+
+/// The `?as_of=` parameter: the instant the caller wants the answer for.
+///
+/// Epoch milliseconds, matching how [`Timestamp`] already crosses the wire, so a
+/// value read out of one response can be handed straight back in the next.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+pub(crate) struct AsOf {
+    as_of: Option<i64>,
+}
+
+impl AsOf {
+    /// Resolves to a concrete instant, defaulting to the clock and bounded by the
+    /// hull's availability.
+    ///
+    /// Three properties this has to hold, in order of how badly each would hurt:
+    ///
+    /// 1. **Omitting the parameter is exactly today's behaviour.** The clock is
+    ///    read only in that case, so every existing caller is unchanged and the
+    ///    default path never depends on a bound.
+    /// 2. **An instant outside the availability is refused, not clamped.** The
+    ///    hull has no hazards, no schedule and no rules on file out there;
+    ///    clamping would silently answer a different question than the one asked,
+    ///    and the caller would have no way to tell.
+    /// 3. **A hull with no dated availability refuses every `as_of`.** Not
+    ///    "accepts anything" — an unbounded scrub over a hull whose dates are
+    ///    unknown is a projection with nothing behind it.
+    fn resolve(
+        self,
+        state: &AppState,
+        vessel: &wadl_store::model::VesselSummary,
+    ) -> Result<Timestamp, ApiError> {
+        let Some(ms) = self.as_of else {
+            return Ok(state.clock.now());
+        };
+        let at = Timestamp::from_epoch_millis(ms);
+        let Some(window) = vessel.availability else {
+            return Err(ApiError::OutOfRange(format!(
+                "{} {} carries no availability dates, so it can only be read as of now",
+                vessel.hull_no, vessel.availability_code
+            )));
+        };
+        if window.contains(at) {
+            Ok(at)
+        } else {
+            Err(ApiError::OutOfRange(format!(
+                "as_of {}ms is outside {} {} ({}ms – {}ms)",
+                ms,
+                vessel.hull_no,
+                vessel.availability_code,
+                window.start.epoch_millis(),
+                window.end.epoch_millis()
+            )))
+        }
+    }
+}
 
 pub(crate) async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "decision_support_only": true }))
@@ -52,16 +108,54 @@ pub(crate) async fn list_compartments(
     Ok(Json(json!(compartments)))
 }
 
+/// The work orders on a hull, each marked with whether it is planned for `as_of`.
+///
+/// The list is never filtered by the instant. A planner scrubbing to next week
+/// still needs to see the order that finished last week — what changes is whether
+/// it reads as in progress, and that is a flag, not an omission.
 pub(crate) async fn list_work_orders(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
-    let orders = state
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let orders = state.store.list_work_orders(&scope, vessel).await?;
+    let rows: Vec<Value> = orders
+        .into_iter()
+        .map(|o| {
+            let mut row = json!(o);
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("in_window".to_owned(), json!(o.booked_at(at)));
+            }
+            row
+        })
+        .collect();
+    Ok(Json(json!(rows)))
+}
+
+/// The hull's time frame: the server's clock and the availability it bounds
+/// `as_of` with.
+///
+/// One read, and the shell's whole time control is built from it. Serving the
+/// server's `now` matters more than it looks: a browser clock that is minutes or
+/// hours out would otherwise make the shell mark a live view as a projection, or
+/// worse, mark a projection as live.
+pub(crate) async fn timeframe(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = state
         .store
-        .list_work_orders(&scope, VesselId::from_uuid(id))
+        .get_vessel(&scope, VesselId::from_uuid(id))
         .await?;
-    Ok(Json(json!(orders)))
+    Ok(Json(json!({
+        "now": state.clock.now(),
+        "availability_code": vessel.availability_code,
+        "availability": vessel.availability,
+    })))
 }
 
 pub(crate) async fn stranded_hours(
@@ -100,11 +194,13 @@ pub(crate) async fn compartment_state(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
+    Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
-    let decision = decide(&state, &scope, vessel, &compartment).await?;
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let decision = decide(&state, &scope, vessel, &compartment, at).await?;
     Ok(Json(
-        json!({ "compartment": compartment, "decision": decision }),
+        json!({ "compartment": compartment, "decision": decision, "as_of": at }),
     ))
 }
 
@@ -164,15 +260,26 @@ fn booked_work(
     orders: &[wadl_store::model::WorkOrderSummary],
     packages: &[PackageWork],
     stranded: &wadl_store::model::StrandedReport,
+    at: Timestamp,
 ) -> BookedWork {
+    // Work counts as booked here only if it is planned for `at`. This is what
+    // makes readiness a question about a moment rather than about the whole
+    // availability: a space with nobody due in it is idle, not held, and a board
+    // that ignored the dates would report every space as held from the first day
+    // of the availability to the last.
     let in_space: Vec<_> = orders
         .iter()
-        .filter(|o| &o.compartment_no == compartment)
+        .filter(|o| &o.compartment_no == compartment && o.booked_at(at))
         .collect();
     // Every package whose footprint includes this compartment, with hours left.
     let in_packages: Vec<_> = packages
         .iter()
-        .filter_map(|p| p.spaces.get(compartment).map(|w| (p, w.remaining())))
+        .filter_map(|p| {
+            p.spaces
+                .get(compartment)
+                .filter(|w| w.booked_at(at))
+                .map(|w| (p, w.remaining()))
+        })
         .filter(|(_, remaining)| remaining.get() > 0)
         .collect();
 
@@ -215,8 +322,10 @@ pub(crate) async fn deck_states(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let compartments = state.store.list_compartments(&scope, vessel).await?;
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
     let hazards = state.store.live_hazards(&scope, vessel).await?;
@@ -224,7 +333,6 @@ pub(crate) async fn deck_states(
     let orders = state.store.list_work_orders(&scope, vessel).await?;
     let packages = packages_with_footprints(&state, &scope, vessel).await?;
     let stranded = state.store.stranded_hours(&scope, vessel).await?;
-    let at = state.clock.now();
 
     let rows: Vec<Value> = compartments
         .into_iter()
@@ -236,7 +344,13 @@ pub(crate) async fn deck_states(
                 hazards: &hazards,
                 at,
             });
-            let work = booked_work(&compartment.compartment_no, &orders, &packages, &stranded);
+            let work = booked_work(
+                &compartment.compartment_no,
+                &orders,
+                &packages,
+                &stranded,
+                at,
+            );
             let remaining = work.remaining.get();
 
             json!({
@@ -282,8 +396,10 @@ pub(crate) async fn readiness(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let compartments = state.store.list_compartments(&scope, vessel).await?;
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
     let hazards = state.store.live_hazards(&scope, vessel).await?;
@@ -297,7 +413,6 @@ pub(crate) async fn readiness(
     // segment topology by `wadl_plan`, so it is the right source.
     let stranded = state.store.stranded_hours(&scope, vessel).await?;
     let packages = packages_with_footprints(&state, &scope, vessel).await?;
-    let at = state.clock.now();
 
     // Hours in the hull's work that name a compartment the register does not
     // contain. Handed to the rollup rather than dropped: a footprint authored
@@ -323,7 +438,13 @@ pub(crate) async fn readiness(
                 hazards: &hazards,
                 at,
             });
-            let work = booked_work(&compartment.compartment_no, &orders, &packages, &stranded);
+            let work = booked_work(
+                &compartment.compartment_no,
+                &orders,
+                &packages,
+                &stranded,
+                at,
+            );
 
             SpaceReadiness {
                 compartment_no: compartment.compartment_no.as_str().to_owned(),
@@ -371,8 +492,10 @@ pub(crate) async fn get_package(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path((id, code)): Path<(Uuid, String)>,
+    Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let package = state.store.get_package(&scope, vessel, &code).await?;
     let analysis = package.analyse();
 
@@ -380,7 +503,6 @@ pub(crate) async fn get_package(
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
     let hazards = state.store.live_hazards(&scope, vessel).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let at = state.clock.now();
     let decide_space = |compartment: &CompartmentNo| {
         evaluate(&EvaluationRequest {
             subject: compartment,
@@ -444,6 +566,7 @@ async fn decide(
     scope: &wadl_store::TenantScope,
     vessel: VesselId,
     compartment: &str,
+    at: Timestamp,
 ) -> Result<Decision, ApiError> {
     // Scope is enforced by each store call; the first failure short-circuits.
     let graph = state.store.adjacency_graph(scope, vessel).await?;
@@ -455,6 +578,6 @@ async fn decide(
         graph: &graph,
         rules: &rules,
         hazards: &hazards,
-        at: state.clock.now(),
+        at,
     }))
 }

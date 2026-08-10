@@ -54,7 +54,7 @@ wadl-plan = { path = "crates/wadl-plan" }
 
 # Backend (never pulled into wadl-engine or wadl-domain)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "tower-log"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "tower-log"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "timeout", "limit"] }
 tracing = "0.1"

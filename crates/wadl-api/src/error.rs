@@ -17,6 +17,13 @@ pub(crate) enum ApiError {
     Unauthorized,
     /// The resource does not exist within the caller's scope.
     NotFound,
+    /// The request is well-formed but asks for something the data cannot answer —
+    /// today, only an `as_of` instant outside the hull's availability.
+    ///
+    /// Carries a `detail` because this is the one refusal a caller can fix by
+    /// changing the request, and "unprocessable" with no reason is a dead end for
+    /// whoever is holding the time control.
+    OutOfRange(String),
     /// An internal failure. Detail is logged, never returned.
     Internal,
 }
@@ -35,15 +42,21 @@ impl From<StoreError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, title) = match self {
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            Self::NotFound => (StatusCode::NOT_FOUND, "not found"),
-            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        let (status, title, detail) = match self {
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", None),
+            Self::NotFound => (StatusCode::NOT_FOUND, "not found", None),
+            Self::OutOfRange(detail) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "instant out of range",
+                Some(detail),
+            ),
+            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error", None),
         };
         let body = serde_json::json!({
             "type": "about:blank",
             "title": title,
             "status": status.as_u16(),
+            "detail": detail,
         });
         let body = serde_json::to_string(&body).unwrap_or_else(|_| {
             // A serde_json failure on a fixed literal object is not reachable;

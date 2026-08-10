@@ -58,6 +58,7 @@ use sqlx::Row;
 
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::{OrgId, VesselId};
+use wadl_domain::time::{Timestamp, Window};
 
 use crate::error::StoreError;
 use crate::model::{CompartmentSummary, DeckSummary, VesselSummary};
@@ -94,14 +95,19 @@ impl PgStore {
         // No org filter in the SQL: RLS supplies it. The availability picked is
         // the latest by start date — a hull in successive availabilities should
         // show the current one, not an arbitrary row.
+        // The availability bounds come back as epoch milliseconds rather than
+        // dates, converted where the dates live. Both columns are nullable, so a
+        // hull in planning can legitimately have no window — see below.
         let rows = sqlx::query(
             "SELECT v.vessel_id, v.hull_no, COALESCE(v.name, v.hull_no) AS name,
                     c.code AS class_code,
-                    COALESCE(a.code, '—') AS availability_code
+                    COALESCE(a.code, '—') AS availability_code,
+                    (EXTRACT(EPOCH FROM a.start_on) * 1000)::bigint AS avail_start_ms,
+                    (EXTRACT(EPOCH FROM a.end_on) * 1000)::bigint   AS avail_end_ms
                FROM vessel v
                JOIN ship_class c ON c.class_id = v.class_id
                LEFT JOIN LATERAL (
-                    SELECT code FROM availability
+                    SELECT code, start_on, end_on FROM availability
                      WHERE availability.vessel_id = v.vessel_id
                      ORDER BY start_on DESC NULLS LAST
                      LIMIT 1
@@ -121,6 +127,18 @@ impl PgStore {
                 if !scope.is_assigned(vessel_id) {
                     return None;
                 }
+                // Only a window with BOTH ends is a window. A half-dated
+                // availability cannot bound an as-of query, and substituting a
+                // default for the missing end would invent the very bound the
+                // check exists to enforce.
+                let start: Option<i64> = row.get("avail_start_ms");
+                let end: Option<i64> = row.get("avail_end_ms");
+                let availability = start.zip(end).map(|(s, e)| {
+                    Window::new(
+                        Timestamp::from_epoch_millis(s),
+                        Timestamp::from_epoch_millis(e),
+                    )
+                });
                 Some(VesselSummary {
                     vessel_id,
                     hull_no: row.get("hull_no"),
@@ -130,6 +148,7 @@ impl PgStore {
                     // Not yet modelled in the schema — see the note in
                     // `Repositories`' PostgreSQL gap list.
                     confidence: "Unknown".to_owned(),
+                    availability,
                 })
             })
             .collect())

@@ -13,6 +13,7 @@ members = [
   "crates/wadl-domain",
   "crates/wadl-engine",
   "crates/wadl-plan",
+  "crates/wadl-mitigate",
   "crates/wadl-store",
   "crates/wadl-api",
   "crates/wadl-ingest",
@@ -51,6 +52,7 @@ wadl-store = { path = "crates/wadl-store" }
 wadl-ingest = { path = "crates/wadl-ingest" }
 wadl-api = { path = "crates/wadl-api" }
 wadl-plan = { path = "crates/wadl-plan" }
+wadl-mitigate = { path = "crates/wadl-mitigate" }
 
 # Backend (never pulled into wadl-engine or wadl-domain)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }

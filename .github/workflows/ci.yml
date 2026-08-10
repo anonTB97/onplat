@@ -76,6 +76,11 @@ jobs:
         run: cargo build -p wadl-engine --target wasm32-unknown-unknown
       - name: build planning math for wasm
         run: cargo build -p wadl-plan --target wasm32-unknown-unknown
+      # Mitigation options are counterfactual engine verdicts, so they must be
+      # computable where the engine is — including in a browser at the compartment
+      # door with no network on the ship.
+      - name: build mitigation options for wasm
+        run: cargo build -p wadl-mitigate --target wasm32-unknown-unknown
 
   migrations:
     name: migrations + RLS on PostgreSQL

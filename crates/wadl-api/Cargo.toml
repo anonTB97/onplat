@@ -11,6 +11,7 @@ publish.workspace = true
 wadl-domain.workspace = true
 wadl-engine.workspace = true
 wadl-plan.workspace = true
+wadl-mitigate.workspace = true
 wadl-store.workspace = true
 axum.workspace = true
 tower.workspace = true

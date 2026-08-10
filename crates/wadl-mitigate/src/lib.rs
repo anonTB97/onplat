@@ -1,0 +1,583 @@
+//! Mitigation options for a detected issue.
+//!
+//! # What this crate is for
+//!
+//! [`wadl_engine`] answers *why is this space refused* — the rule, the hazard, the
+//! path it travelled, who may clear it. That is a **diagnosis**: a statement about
+//! the world as it is.
+//!
+//! A mitigation is a different object. It is a **counterfactual**: *if X were
+//! true, would the answer change, and what would that cost?* Nothing in a
+//! diagnosis answers that, and the question a planner actually has to settle is
+//! not "what is wrong with this space" but:
+//!
+//! > What is the smallest number of things I can do today that unlocks the most
+//! > work?
+//!
+//! Note that this is an inversion of how the rest of the product reports. Every
+//! other surface is organised *per space*. Options are organised **per action**,
+//! because an action is the thing a person can be sent to do, and one action may
+//! free spaces held by several different authorities.
+//!
+//! # Why the answers can be trusted
+//!
+//! [`wadl_engine::evaluate`] takes every input as data — graph, rules, hazards,
+//! instant — and reads no clock. So a hypothetical world is cheap to build, and
+//! the verdict that comes back for it is **a real evaluation with a real trace**,
+//! not a heuristic from a lookup table of remedies. Every number in an [`Effect`]
+//! was computed by evaluating the hull, twice: once as it is, once as it would be.
+//!
+//! That discipline is the same one the time dimension follows, and for the same
+//! reason: a plausible fabrication is indistinguishable from a fact on screen.
+//!
+//! Being pure, this also builds for `wasm32`, which is what lets a mechanic
+//! standing at a locked compartment see what would open it with no network on the
+//! ship.
+//!
+//! # What this crate deliberately does not do
+//!
+//! * **It decides nothing.** It ranks proposals. A planner chooses, and the
+//!   choice is recorded elsewhere. Nothing here writes to a schedule.
+//! * **It proposes no waivers.** [`wadl_engine::RuleEntry`] carries `waivable`,
+//!   and hazard cascades set it false, so the data would keep a waiver proposal
+//!   from being catastrophic. It is still a safety judgement that needs an
+//!   authored set of compensatory measures behind it, and there is none yet. The
+//!   seam is named in [`Action`]'s documentation; nothing fills it.
+//! * **It reports harm, not just benefit.** See [`Effect::closes`]. An option
+//!   that frees six spaces and shuts one is not the same as an option that frees
+//!   six, and a tool that only counted upside would confidently propose the
+//!   former as though it were the latter.
+
+#![forbid(unsafe_code)]
+// See wadl-domain: doc_markdown fires on domain acronyms; allowed deliberately.
+#![allow(clippy::doc_markdown)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use wadl_domain::compartment::CompartmentNo;
+use wadl_domain::time::Timestamp;
+use wadl_domain::units::ManHours;
+use wadl_engine::{
+    evaluate, AdjacencyGraph, Decision, DecisionState, EvaluationRequest, Hazard, RuleSet,
+};
+
+/// A compartment and the man-hours booked in it at the instant under evaluation.
+///
+/// The hours are what turn "a space opens" into "so many hours are recovered",
+/// and they must be the hours booked *at that instant* — which is why the caller
+/// supplies them rather than this crate deriving them. Space with no booked hours
+/// still counts as freed, but frees nothing: that is latent capacity, and the
+/// distinction is the readiness taxonomy's, kept here deliberately.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpaceLoad {
+    /// The compartment.
+    pub compartment: CompartmentNo,
+    /// Man-hours booked here at the evaluation instant.
+    pub booked: ManHours,
+}
+
+/// Everything an option is computed against: the engine's own inputs, plus what
+/// work is booked where.
+#[derive(Debug, Clone, Copy)]
+pub struct World<'a> {
+    /// The hull's resolved adjacency graph.
+    pub graph: &'a AdjacencyGraph,
+    /// The rules in force.
+    pub rules: &'a RuleSet,
+    /// The hazards live on the hull.
+    pub hazards: &'a [Hazard],
+    /// The instant everything is evaluated at.
+    pub at: Timestamp,
+    /// Every space in the register, with the hours booked in it at `at`.
+    pub spaces: &'a [SpaceLoad],
+}
+
+/// An owned variant of a [`World`] — the hypothetical an [`Action`] produces.
+struct Variant {
+    graph: AdjacencyGraph,
+    hazards: Vec<Hazard>,
+    at: Timestamp,
+}
+
+impl Variant {
+    fn decide(&self, rules: &RuleSet, subject: &CompartmentNo) -> Decision {
+        evaluate(&EvaluationRequest {
+            subject,
+            graph: &self.graph,
+            rules,
+            hazards: &self.hazards,
+            at: self.at,
+        })
+    }
+}
+
+/// Something a person could do that would change the verdict.
+///
+/// Each variant maps onto exactly one perturbation of the engine's inputs, which
+/// is what keeps the set honest — an action this crate cannot express as a change
+/// to the world is an action it cannot price, and it does not invent one.
+///
+/// The absent variant is a waiver. `RuleEntry::waivable` is already in the rule
+/// data, so the seam exists; filling it needs an authored compensatory-measure
+/// set and a safety authority behind it, and until then proposing "get it waived"
+/// would be the platform putting its name to a judgement it has no basis for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Action {
+    /// Discharge the condition at a hazard's source — an isolation verified, a
+    /// stop-work lifted, a stow struck down. Models as removing the hazard.
+    Discharge {
+        /// Where the hazard is.
+        origin: CompartmentNo,
+        /// The hazard's label, as the trace renders it.
+        hazard: String,
+        /// Who the rule says may clear it.
+        actor: String,
+    },
+    /// Let every timed hold elapse. Nobody is sent; the space opens itself.
+    ///
+    /// Only ever generated when *all* of the subject's holds are timed. A space
+    /// with one verification-gated hold never opens by waiting, and offering
+    /// "wait" there would be the single most misleading thing this crate could
+    /// say.
+    Wait {
+        /// The instant the last hold expires.
+        until: Timestamp,
+    },
+    /// Interrupt the path the hazard travels — blank a duct, close a penetration,
+    /// erect a barrier. Models as removing that coupling between two spaces.
+    ///
+    /// Carries [`Confidence::AssumesOwnAuthorization`] always: the closure is
+    /// itself work in a compartment, and this crate does not model whether *that*
+    /// work is authorized.
+    Interrupt {
+        /// The upstream space.
+        from: CompartmentNo,
+        /// The downstream space.
+        to: CompartmentNo,
+        /// The coupling type code being interrupted.
+        coupling: String,
+    },
+}
+
+impl Action {
+    /// A stable sort key, so ranking is deterministic across runs and machines.
+    fn key(&self) -> String {
+        match self {
+            Self::Wait { until } => format!("0:{}", until.epoch_millis()),
+            Self::Discharge { origin, hazard, .. } => format!("1:{origin}:{hazard}"),
+            Self::Interrupt { from, to, coupling } => format!("2:{from}:{to}:{coupling}"),
+        }
+    }
+
+    /// How expensive the action is to mount, lowest first. Used only to break a
+    /// tie on recovered hours: waiting costs nobody anything, discharging costs
+    /// an attendance, and interrupting a coupling is itself a job needing its own
+    /// authorization.
+    const fn cost_rank(&self) -> u8 {
+        match self {
+            Self::Wait { .. } => 0,
+            Self::Discharge { .. } => 1,
+            Self::Interrupt { .. } => 2,
+        }
+    }
+
+    /// What the platform knows versus what it is assuming.
+    const fn confidence(&self) -> Confidence {
+        match self {
+            // A cure elapsing is a matter of record: the hold's expiry was priced
+            // by the rule from the hazard's own start.
+            Self::Wait { .. } => Confidence::Computed,
+            // Whether the named authority can actually attend, and when, is
+            // outside anything this platform holds.
+            Self::Discharge { .. } => Confidence::AssumesActor,
+            Self::Interrupt { .. } => Confidence::AssumesOwnAuthorization,
+        }
+    }
+}
+
+/// How much of an option is computed and how much is assumed.
+///
+/// Stated on every option rather than implied, because the effect and the
+/// feasibility have completely different standing: the effect is always a real
+/// re-evaluation, while "the chemist can be here by 1400" is a guess the platform
+/// is not entitled to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    /// Effect re-evaluated, and the precondition is a matter of record.
+    Computed,
+    /// Effect re-evaluated, but whether the named actor can attend in time is
+    /// outside what the platform knows.
+    AssumesActor,
+    /// Effect re-evaluated, but the action is itself work needing its own
+    /// authorization, which is not modelled here.
+    AssumesOwnAuthorization,
+}
+
+/// What taking an action would do to the hull, computed by evaluating it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Effect {
+    /// Spaces that go from refusing work to permitting it.
+    pub frees: Vec<CompartmentNo>,
+    /// Spaces that go from permitting work to refusing it.
+    ///
+    /// Usually empty, and never ignorable. Waiting is the case that bites: a
+    /// hazard whose start is still ahead of the instant becomes live once the
+    /// clock passes it, so "wait five hours for the coat to cure" can walk
+    /// straight into hot work starting in three. An option that reported only
+    /// upside would recommend it.
+    pub closes: Vec<CompartmentNo>,
+    /// Booked man-hours in the freed spaces.
+    pub freed_hours: ManHours,
+    /// Booked man-hours in the closed spaces.
+    pub closed_hours: ManHours,
+}
+
+impl Effect {
+    /// Hours recovered net of hours lost. The ranking key.
+    #[must_use]
+    pub fn net_hours(&self) -> i64 {
+        self.freed_hours.get() - self.closed_hours.get()
+    }
+
+    /// Whether taking this action would shut a space that is currently open.
+    #[must_use]
+    pub fn does_harm(&self) -> bool {
+        !self.closes.is_empty()
+    }
+}
+
+/// One ranked proposal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Mitigation {
+    /// What someone would do.
+    pub action: Action,
+    /// The re-evaluated consequence across the whole hull.
+    pub effect: Effect,
+    /// What is computed and what is assumed.
+    pub confidence: Confidence,
+    /// The state the subject would be in afterwards. Present so a reader can see
+    /// that an option took a space to WARN rather than ALLOW — both permit work,
+    /// and they are not the same thing to a supervisor.
+    pub subject_state: DecisionState,
+}
+
+/// One independent hold on a space: a hazard and the rule it fired.
+///
+/// Reported when no single action clears the subject, which is itself the answer
+/// a planner needs — "this needs both the isolation and the cure" is actionable,
+/// and much better than an empty list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Hold {
+    /// The rule that fired.
+    pub rule_code: String,
+    /// Where the hazard is.
+    pub origin: CompartmentNo,
+    /// The hazard's label.
+    pub hazard: String,
+    /// Who may clear it.
+    pub clearing_authority: String,
+    /// When it expires on a clock, or `None` when it clears on verification.
+    pub earliest_clear: Option<Timestamp>,
+}
+
+/// The full answer for one detected issue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Assessment {
+    /// The space the issue is on.
+    pub subject: CompartmentNo,
+    /// Its current state.
+    pub state: DecisionState,
+    /// Man-hours booked in it at the instant.
+    pub booked: ManHours,
+    /// Every independent hold on it.
+    pub holds: Vec<Hold>,
+    /// Ranked options, best first. Empty when no single action clears it — read
+    /// `holds` then, which names everything that must be addressed together.
+    pub options: Vec<Mitigation>,
+}
+
+impl Assessment {
+    /// Whether the subject needs more than one action addressed to open.
+    #[must_use]
+    pub fn is_compound(&self) -> bool {
+        self.options.is_empty() && self.holds.len() > 1
+    }
+}
+
+fn decide(world: &World<'_>, subject: &CompartmentNo) -> Decision {
+    evaluate(&EvaluationRequest {
+        subject,
+        graph: world.graph,
+        rules: world.rules,
+        hazards: world.hazards,
+        at: world.at,
+    })
+}
+
+/// The world with one hazard removed.
+fn without_hazard(world: &World<'_>, origin: &CompartmentNo, label: &str) -> Variant {
+    Variant {
+        graph: world.graph.clone(),
+        hazards: world
+            .hazards
+            .iter()
+            .filter(|h| !(&h.origin == origin && h.label == label))
+            .cloned()
+            .collect(),
+        at: world.at,
+    }
+}
+
+/// The world with one coupling removed, in both directions.
+///
+/// Both, because a physical closure is not directional — blanking a duct stops
+/// the air whichever way it was flowing — and the schema stores symmetric
+/// couplings as two rows.
+fn without_coupling(
+    world: &World<'_>,
+    from: &CompartmentNo,
+    to: &CompartmentNo,
+    coupling: &str,
+) -> Variant {
+    let cut = |a: &CompartmentNo, b: &CompartmentNo, code: &str| {
+        code == coupling && ((a == from && b == to) || (a == to && b == from))
+    };
+    Variant {
+        graph: AdjacencyGraph::new(
+            world
+                .graph
+                .edges()
+                .filter(|e| !cut(&e.from, &e.to, e.code.as_str()))
+                .cloned()
+                .collect(),
+        ),
+        hazards: world.hazards.to_vec(),
+        at: world.at,
+    }
+}
+
+/// The world at a later instant.
+fn at_instant(world: &World<'_>, until: Timestamp) -> Variant {
+    Variant {
+        graph: world.graph.clone(),
+        hazards: world.hazards.to_vec(),
+        at: until,
+    }
+}
+
+fn variant_for(world: &World<'_>, action: &Action) -> Variant {
+    match action {
+        Action::Discharge { origin, hazard, .. } => without_hazard(world, origin, hazard),
+        Action::Wait { until } => at_instant(world, *until),
+        Action::Interrupt { from, to, coupling } => without_coupling(world, from, to, coupling),
+    }
+}
+
+/// The holds on a space, one per (rule, hazard) that fired, deduplicated.
+fn holds_of(decision: &Decision) -> Vec<Hold> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for step in &decision.trace {
+        let key = (
+            step.rule_code.clone(),
+            step.source.clone(),
+            step.hazard.clone(),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(Hold {
+            rule_code: step.rule_code.clone(),
+            origin: step.source.clone(),
+            hazard: step.hazard.clone(),
+            clearing_authority: step.clearing_authority.clone(),
+            earliest_clear: step.earliest_clear,
+        });
+    }
+    out
+}
+
+/// Candidate actions for a refused space, drawn from its own trace.
+///
+/// Generated from the trace rather than from the whole world, which is what keeps
+/// this tractable: the trace names the specific holds and the specific hops the
+/// hazard took, so the candidate set is proportional to the trace and not to the
+/// hull. Enumerating subsets of hazards and couplings would explode, and would be
+/// answering a different question anyway — a planner executes one action, not a
+/// combination found by search.
+fn candidates(decision: &Decision) -> Vec<Action> {
+    let mut out: Vec<Action> = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    // Waiting only ever clears a space where every hold is on a clock. One
+    // verification-gated hold and no amount of time helps.
+    let all_timed =
+        !decision.trace.is_empty() && decision.trace.iter().all(|s| s.earliest_clear.is_some());
+    if let (true, Some(until)) = (all_timed, decision.earliest_clear) {
+        out.push(Action::Wait { until });
+    }
+
+    for step in &decision.trace {
+        if seen.insert(("d", step.source.to_string(), step.hazard.clone())) {
+            out.push(Action::Discharge {
+                origin: step.source.clone(),
+                hazard: step.hazard.clone(),
+                actor: step.clearing_authority.clone(),
+            });
+        }
+        // Each hop the hazard travelled is a place the path could be cut. `path`
+        // is source-first and `via` names the coupling used for each step of it,
+        // so hop i runs path[i] -> path[i + 1] via via[i].
+        for (i, coupling) in step.via.iter().enumerate() {
+            let (Some(from), Some(to)) = (step.path.get(i), step.path.get(i + 1)) else {
+                continue;
+            };
+            if seen.insert(("i", format!("{from}->{to}"), coupling.clone())) {
+                out.push(Action::Interrupt {
+                    from: from.clone(),
+                    to: to.clone(),
+                    coupling: coupling.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The consequence of an action across every space in the register.
+fn effect_of(world: &World<'_>, action: &Action) -> Effect {
+    let variant = variant_for(world, action);
+    let mut effect = Effect::default();
+    for load in world.spaces {
+        let before = decide(world, &load.compartment).permits_work();
+        let after = variant
+            .decide(world.rules, &load.compartment)
+            .permits_work();
+        if !before && after {
+            effect.frees.push(load.compartment.clone());
+            effect.freed_hours = effect.freed_hours + load.booked;
+        } else if before && !after {
+            effect.closes.push(load.compartment.clone());
+            effect.closed_hours = effect.closed_hours + load.booked;
+        }
+    }
+    effect
+}
+
+/// Orders proposals: most work recovered, then least harm, then cheapest to
+/// mount, then a stable key so the order never depends on iteration chance.
+fn rank(options: &mut [Mitigation]) {
+    options.sort_by(|a, b| {
+        b.effect
+            .net_hours()
+            .cmp(&a.effect.net_hours())
+            .then_with(|| a.effect.closes.len().cmp(&b.effect.closes.len()))
+            .then_with(|| a.action.cost_rank().cmp(&b.action.cost_rank()))
+            .then_with(|| a.action.key().cmp(&b.action.key()))
+    });
+}
+
+/// Assesses one refused space and ranks the single actions that would open it.
+///
+/// An option is kept only if the subject actually permits work in the
+/// hypothetical. That is the crate's central contract: **every option offered has
+/// been shown to work**, by evaluating it. A list that included plausible
+/// candidates without checking them would be worse than no list, because a
+/// planner would send someone.
+#[must_use]
+pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
+    let decision = decide(world, subject);
+    let booked = world
+        .spaces
+        .iter()
+        .find(|s| &s.compartment == subject)
+        .map_or(ManHours::ZERO, |s| s.booked);
+
+    let mut assessment = Assessment {
+        subject: subject.clone(),
+        state: decision.state,
+        booked,
+        holds: holds_of(&decision),
+        options: Vec::new(),
+    };
+    // Nothing to mitigate on a space that already permits work. Said explicitly:
+    // an empty option list on an open space means "no issue", not "no idea".
+    if decision.permits_work() {
+        return assessment;
+    }
+
+    for action in candidates(&decision) {
+        let variant = variant_for(world, &action);
+        let after = variant.decide(world.rules, subject);
+        if !after.permits_work() {
+            continue;
+        }
+        assessment.options.push(Mitigation {
+            confidence: action.confidence(),
+            effect: effect_of(world, &action),
+            subject_state: after.state,
+            action,
+        });
+    }
+    rank(&mut assessment.options);
+    assessment
+}
+
+/// The hull's highest-leverage actions, regardless of which space you started from.
+///
+/// This is the screen that answers the planner's real question. [`assess`] is
+/// per-space and answers "what opens *this*"; this is per-action across the whole
+/// hull and answers "what is worth doing at all". They share every primitive, so
+/// the two can never disagree about what an action would achieve.
+///
+/// Deduplicated by action, because the same isolation shows up in the trace of
+/// every space it holds, and a list that repeated it six times would bury the
+/// five other things worth doing.
+#[must_use]
+pub fn leverage(world: &World<'_>) -> Vec<Mitigation> {
+    let mut by_action: BTreeMap<String, Action> = BTreeMap::new();
+    for load in world.spaces {
+        let decision = decide(world, &load.compartment);
+        if decision.permits_work() {
+            continue;
+        }
+        for action in candidates(&decision) {
+            by_action.entry(action.key()).or_insert(action);
+        }
+    }
+
+    let mut out: Vec<Mitigation> = by_action
+        .into_values()
+        .map(|action| {
+            let effect = effect_of(world, &action);
+            Mitigation {
+                confidence: action.confidence(),
+                // Hull-wide, so there is no one subject. The state reported is the
+                // aggregate claim the option makes: it frees at least one space.
+                subject_state: if effect.frees.is_empty() {
+                    DecisionState::Block
+                } else {
+                    DecisionState::Allow
+                },
+                effect,
+                action,
+            }
+        })
+        // An action that frees nothing is not leverage. It can happen: cutting one
+        // of two parallel couplings leaves the cascade arriving by the other.
+        .filter(|m| !m.effect.frees.is_empty())
+        .collect();
+    rank(&mut out);
+    out
+}

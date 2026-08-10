@@ -78,6 +78,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/vessels/:id/decks", get(handlers::list_decks))
         .route("/api/vessels/:id/deck-states", get(handlers::deck_states))
         .route("/api/vessels/:id/readiness", get(handlers::readiness))
+        .route(
+            "/api/vessels/:id/compartments/:no/mitigations",
+            get(handlers::mitigations),
+        )
+        .route("/api/vessels/:id/leverage", get(handlers::leverage))
         .route("/api/vessels/:id/packages", get(handlers::list_packages))
         .route("/api/vessels/:id/packages/:no", get(handlers::get_package))
         .with_state(state)

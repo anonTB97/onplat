@@ -1,0 +1,25 @@
+[package]
+name = "wadl-mitigate"
+description = "Mitigation options for a detected issue, priced by re-evaluating the hull. Pure, no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Pure like wadl-engine and wadl-plan: no I/O, no async, no clock. Two reasons
+# beyond consistency. Every option here is a counterfactual verdict that a
+# planner may act on, so it has to be property-testable in isolation. And being
+# pure it builds for wasm32, which is what lets a mechanic standing at a locked
+# compartment see what would open it with no network on the ship.
+[dependencies]
+wadl-domain.workspace = true
+wadl-engine.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -473,6 +473,101 @@ pub(crate) async fn readiness(
     Ok(Json(json!(roll_up(&spaces, unattributed))))
 }
 
+/// Assembles the world mitigation options are computed against.
+///
+/// The hours per space are the hours booked **at `at`**, from the same
+/// [`booked_work`] every other surface uses. That matters more than it looks: the
+/// leverage figure an option is ranked by is a man-hour count, and if it came from
+/// a second implementation of "what is booked here" the options board and the
+/// readiness board would rank the same action differently.
+async fn mitigation_inputs(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    at: Timestamp,
+) -> Result<
+    (
+        wadl_engine::AdjacencyGraph,
+        Vec<wadl_engine::Hazard>,
+        wadl_engine::RuleSet,
+        Vec<wadl_mitigate::SpaceLoad>,
+    ),
+    ApiError,
+> {
+    let compartments = state.store.list_compartments(scope, vessel).await?;
+    let graph = state.store.adjacency_graph(scope, vessel).await?;
+    let hazards = state.store.live_hazards(scope, vessel).await?;
+    let rules = state.store.rules_in_force(scope, vessel).await?;
+    let orders = state.store.list_work_orders(scope, vessel).await?;
+    let packages = packages_with_footprints(state, scope, vessel).await?;
+    let stranded = state.store.stranded_hours(scope, vessel).await?;
+
+    let spaces = compartments
+        .into_iter()
+        .map(|c| wadl_mitigate::SpaceLoad {
+            booked: booked_work(&c.compartment_no, &orders, &packages, &stranded, at).remaining,
+            compartment: c.compartment_no,
+        })
+        .collect();
+    Ok((graph, hazards, rules, spaces))
+}
+
+/// What could be done about one refused compartment, ranked by work recovered.
+///
+/// Every option in the response is a **counterfactual engine verdict**: the world
+/// was rebuilt with that one action taken and the whole hull re-evaluated. None of
+/// it is a remedy looked up in a table, which is why each option can state what it
+/// frees *and what it would shut*.
+///
+/// Decision support, not automation. This proposes; a planner chooses; nothing
+/// here changes a hazard, a schedule or an authorization.
+pub(crate) async fn mitigations(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path((id, compartment)): Path<(Uuid, String)>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let (graph, hazards, rules, spaces) = mitigation_inputs(&state, &scope, vessel, at).await?;
+    let world = wadl_mitigate::World {
+        graph: &graph,
+        rules: &rules,
+        hazards: &hazards,
+        at,
+        spaces: &spaces,
+    };
+    let subject = CompartmentNo::new(compartment);
+    Ok(Json(json!(wadl_mitigate::assess(&world, &subject))))
+}
+
+/// The hull's highest-leverage actions — the answer to *what is worth doing at
+/// all*, as opposed to *what opens this one space*.
+///
+/// Deduplicated by action across every held space, so the one isolation holding
+/// six compartments appears once with its full effect rather than six times.
+pub(crate) async fn leverage(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let (graph, hazards, rules, spaces) = mitigation_inputs(&state, &scope, vessel, at).await?;
+    let world = wadl_mitigate::World {
+        graph: &graph,
+        rules: &rules,
+        hazards: &hazards,
+        at,
+        spaces: &spaces,
+    };
+    Ok(Json(json!({
+        "as_of": at,
+        "actions": wadl_mitigate::leverage(&world),
+    })))
+}
+
 /// The distributed packages on a hull.
 pub(crate) async fn list_packages(
     State(state): State<AppState>,

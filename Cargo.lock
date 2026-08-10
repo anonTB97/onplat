@@ -2159,6 +2159,7 @@ dependencies = [
  "uuid",
  "wadl-domain",
  "wadl-engine",
+ "wadl-mitigate",
  "wadl-plan",
  "wadl-store",
 ]
@@ -2205,6 +2206,17 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "wadl-domain",
+]
+
+[[package]]
+name = "wadl-mitigate"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "uuid",
+ "wadl-domain",
+ "wadl-engine",
 ]
 
 [[package]]

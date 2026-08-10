@@ -133,4 +133,15 @@ impl AdjacencyGraph {
     pub fn edge_count(&self) -> usize {
         self.edges.len()
     }
+
+    /// Every edge, in authored order.
+    ///
+    /// Exposed so a caller can build a *variant* of this graph — the engine still
+    /// treats what it is handed as immutable. `wadl_mitigate` uses it to model an
+    /// engineering mitigation: blanking a duct or closing a penetration is the
+    /// removal of a coupling, and the only honest way to price that is to rebuild
+    /// the graph without it and evaluate for real.
+    pub fn edges(&self) -> impl Iterator<Item = &CouplingEdge> {
+        self.edges.iter()
+    }
 }

@@ -2159,6 +2159,7 @@ dependencies = [
  "uuid",
  "wadl-domain",
  "wadl-engine",
+ "wadl-issues",
  "wadl-mitigate",
  "wadl-plan",
  "wadl-store",
@@ -2217,6 +2218,7 @@ dependencies = [
  "uuid",
  "wadl-domain",
  "wadl-engine",
+ "wadl-mitigate",
 ]
 
 [[package]]

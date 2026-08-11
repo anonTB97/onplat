@@ -26,6 +26,7 @@ import DailyOps from "./DailyOps";
 import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
 import DistributedPackages from "./DistributedPackages";
+import CascadeBoard from "./CascadeBoard";
 import LedgerBoard from "./LedgerBoard";
 import LeverageBoard from "./LeverageBoard";
 import SequenceBoard from "./SequenceBoard";
@@ -45,7 +46,7 @@ const MODULES: ModuleDef[] = [
   { group: "Yard", label: "Portfolio", id: "portfolio", icon: "portfolio", built: true },
   { group: "Authorization", label: "Distributed Packages", id: "distPackages", icon: "distPackages", built: true },
   { group: "", label: "Decisions Ledger", id: "ledger", icon: "ledger", built: true },
-  { group: "", label: "Deconfliction Cascade", id: "placeholder", icon: "cascade", built: false },
+  { group: "", label: "Deconfliction Cascade", id: "cascade", icon: "cascade", built: true },
 ];
 
 const DECK_EXPLORER = MODULES[1] as ModuleDef;
@@ -436,6 +437,17 @@ export default function App() {
               identity={DEMO_IDENTITY}
               vesselId={selected}
               hullLabel={hullLabel}
+              onOpenSpace={jump}
+            />
+          )}
+
+          {!error && selected && module.id === "cascade" && (
+            <CascadeBoard
+              identity={DEMO_IDENTITY}
+              vesselId={selected}
+              hullLabel={hullLabel}
+              asOf={asOf}
+              spaces={rows}
               onOpenSpace={jump}
             />
           )}

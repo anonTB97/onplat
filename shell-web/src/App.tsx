@@ -48,12 +48,41 @@ const MODULES: ModuleDef[] = [
 
 const DECK_EXPLORER = MODULES[1] as ModuleDef;
 
+/**
+ * The URL's share of the state: #/{hull}/{module}?as_of=…&space=… — enough to
+ * hand a colleague "this space, at this instant, on this screen" as a link.
+ * Parsed once at boot; written back with replaceState so scrubbing the clock
+ * does not bury the back button under a thousand instants.
+ */
+function parseHash(): { vessel?: string; module?: string; asOf?: number; space?: string } {
+  const h = window.location.hash.replace(/^#\/?/, "");
+  if (!h) return {};
+  const [path, query] = h.split("?");
+  const parts = (path ?? "").split("/").filter(Boolean);
+  const q = new URLSearchParams(query);
+  const asOf = Number(q.get("as_of"));
+  return {
+    vessel: parts[0],
+    module: parts[1],
+    asOf: Number.isFinite(asOf) && asOf > 0 ? asOf : undefined,
+    space: q.get("space") ?? undefined,
+  };
+}
+const BOOT = parseHash();
+
 export default function App() {
   const [vessels, setVessels] = useState<VesselSummary[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
   const [issues, setIssues] = useState<Issue[]>([]);
-  const [selected, setSelected] = useState<string>(PICKABLE_HULLS[0]?.id ?? "");
-  const [module, setModule] = useState<ModuleDef>(DECK_EXPLORER);
+  const [selected, setSelected] = useState<string>(BOOT.vessel ?? PICKABLE_HULLS[0]?.id ?? "");
+  const [module, setModule] = useState<ModuleDef>(
+    MODULES.find((m) => m.id === BOOT.module && m.built) ?? DECK_EXPLORER,
+  );
+  // Where a route-to-fix came FROM, so the door swings both ways: any jump
+  // from another module leaves a "back" chip over the Deck Explorer.
+  const [returnTo, setReturnTo] = useState<ModuleDef | null>(null);
+  /** The Deck Explorer's selection, reported up for the shareable URL. */
+  const [sharedSpace, setSharedSpace] = useState<string | null>(null);
   const [persona, setPersona] = useState<Persona>(PERSONAS[0] as Persona);
   const [altitude, setAltitude] = useState<Altitude>((PERSONAS[0] as Persona).altitude);
   const [focus, setFocus] = useState<string | null>(null);
@@ -62,7 +91,7 @@ export default function App() {
   // and the ship board would disagree about what is held, and neither would be
   // wrong. Held here for the same reason the altitude is.
   const [frame, setFrame] = useState<Timeframe | null>(null);
-  const [asOf, setAsOf] = useState<AsOf>(null);
+  const [asOf, setAsOf] = useState<AsOf>(BOOT.asOf ?? null);
   const [horizon, setHorizon] = useState<Horizon>((PERSONAS[0] as Persona).horizon);
   const [playing, setPlaying] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -153,7 +182,23 @@ export default function App() {
     setFrame(null);
   };
 
+  // A space named in the boot URL routes exactly like an alert would, once the
+  // register is here to resolve it.
+  useEffect(() => {
+    if (BOOT.space) setFocus(BOOT.space);
+  }, []);
+
+  // Write the shareable state back to the URL.
+  useEffect(() => {
+    const q = new URLSearchParams();
+    if (asOf !== null) q.set("as_of", String(asOf));
+    if (sharedSpace) q.set("space", sharedSpace);
+    const qs = q.toString();
+    window.history.replaceState(null, "", `#/${selected}/${module.id}${qs ? `?${qs}` : ""}`);
+  }, [selected, module, asOf, sharedSpace]);
+
   const jump = (compartment: string) => {
+    if (module.id !== DECK_EXPLORER.id) setReturnTo(module);
     setModule(DECK_EXPLORER);
     setAltitude("compartment");
     setFocus(compartment);
@@ -270,7 +315,12 @@ export default function App() {
           modules={MODULES}
           activeLabel={module.label}
           collapsed={collapsed}
-          onPick={setModule}
+          onPick={(m) => {
+            // Picking a module by hand is a new journey; the back chip from the
+            // last jump would point somewhere the reader has moved on from.
+            setReturnTo(null);
+            setModule(m);
+          }}
           issueCount={issues.length}
         />
 
@@ -296,6 +346,23 @@ export default function App() {
             <p style={{ color: C.dim, fontSize: 12.5 }}>Pick a hull to begin.</p>
           )}
 
+          {!error && selected && module.id === "deckExplorer" && returnTo && (
+            <button
+              onClick={() => {
+                const back = returnTo;
+                setReturnTo(null);
+                if (back) setModule(back);
+              }}
+              style={{
+                position: "sticky", top: MARKING_H + 6, zIndex: 30, marginBottom: 8,
+                font: "inherit", fontSize: 12, cursor: "pointer", padding: "5px 12px",
+                borderRadius: 6, background: "#20222b", color: C.text,
+                border: `1px solid ${C.accent}`, boxShadow: "0 6px 18px rgba(0,0,0,0.4)",
+              }}
+            >
+              ← Back to {returnTo.label}
+            </button>
+          )}
           {!error && selected && module.id === "deckExplorer" && (
             <DeckExplorer
               identity={DEMO_IDENTITY}
@@ -305,6 +372,7 @@ export default function App() {
               onAltitude={setAltitude}
               focusCompartment={focus}
               onFocused={() => setFocus(null)}
+              onSpaceChange={setSharedSpace}
               asOf={asOf}
             />
           )}

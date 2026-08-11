@@ -101,6 +101,7 @@ export default function DeckExplorer({
   onAltitude,
   focusCompartment,
   onFocused,
+  onSpaceChange,
   asOf,
 }: {
   identity: Identity;
@@ -112,6 +113,8 @@ export default function DeckExplorer({
   /** A compartment the chrome asked us to open — from search or an alert. */
   focusCompartment: string | null;
   onFocused: () => void;
+  /** Reports the selected space upward, for the shell's shareable URL. */
+  onSpaceChange?: (no: string | null) => void;
   /**
    * The instant to read the hull at; `null` is live.
    *
@@ -265,6 +268,13 @@ export default function DeckExplorer({
     setRevealNonce((n) => n + 1);
     onFocused();
   }, [focusCompartment, rows, onAltitude, onFocused]);
+
+  // The selection, reported up so the URL can carry it.
+  useEffect(() => {
+    onSpaceChange?.(selected);
+    // The callback identity is the shell's concern, not a reason to re-report.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
 
   // Esc backs out one layer at a time: the drawer first, then full screen.
   // Expected of anything that takes over the viewport, and the only way out if

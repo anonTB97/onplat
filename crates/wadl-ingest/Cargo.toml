@@ -12,6 +12,9 @@ wadl-domain.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 csv.workspace = true
+# Parses XER timestamps ("2026-08-10 03:00"). Never reads the clock — that door
+# stays wadl-domain's Clock.
+chrono.workspace = true
 
 [lints]
 workspace = true

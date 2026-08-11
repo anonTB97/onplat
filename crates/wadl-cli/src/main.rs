@@ -49,6 +49,12 @@ enum Command {
         #[arg(long)]
         input: PathBuf,
     },
+    /// Ingest a Primavera P6 XER export and print the graded report.
+    IngestXer {
+        /// Path to the .xer file.
+        #[arg(long)]
+        input: PathBuf,
+    },
     /// Write a redacted support bundle to a file.
     SupportBundle {
         /// Output path.
@@ -66,11 +72,71 @@ async fn main() -> Result<()> {
         Command::Migrate { database_url } => migrate(database_url).await,
         Command::Seed { database_url } => seed(database_url).await,
         Command::VerifyLedger { input } => verify_ledger(&input),
+        Command::IngestXer { input } => ingest_xer_file(&input),
         Command::SupportBundle {
             out,
             migrations_dir,
         } => support_bundle(&out, &migrations_dir),
     }
+}
+
+/// Runs the XER ingest and prints what a planner would want from a dry run:
+/// what was accepted, what was refused and why, and the schedule-quality
+/// findings — starting with negative lags, which P6 is perfectly happy with and
+/// the deconfliction engine exists to refuse.
+fn ingest_xer_file(input: &Path) -> Result<()> {
+    let text =
+        std::fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
+    let label = input.file_name().map_or_else(
+        || input.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let report = wadl_ingest::xer::ingest_xer(&text, &label);
+
+    println!(
+        "project {} — {} activities ({} milestones), {} relationships, {} rejected",
+        report.project.as_deref().unwrap_or("<unnamed>"),
+        report.activities.len(),
+        report.activities.iter().filter(|a| a.is_milestone).count(),
+        report.relationships.len(),
+        report.rejected.len(),
+    );
+    let budget: i64 = report.activities.iter().map(|a| a.budget_hours.get()).sum();
+    let earned: i64 = report.activities.iter().map(|a| a.earned_hours.get()).sum();
+    println!("hours: {budget} MH budgeted, {earned} MH earned");
+
+    let unmapped: Vec<&str> = report
+        .activities
+        .iter()
+        .filter(|a| a.work_order_code.is_none() && !a.is_milestone)
+        .map(|a| a.code.as_str())
+        .collect();
+    if !unmapped.is_empty() {
+        println!("unmapped to any work item: {}", unmapped.join(", "));
+    }
+    let unlocated: Vec<&str> = report
+        .activities
+        .iter()
+        .filter(|a| a.compartment_no.is_none() && !a.is_milestone)
+        .map(|a| a.code.as_str())
+        .collect();
+    if !unlocated.is_empty() {
+        println!(
+            "no located compartment (LOW grade): {}",
+            unlocated.join(", ")
+        );
+    }
+    for rel in report.relationships.iter().filter(|r| r.lag_hours < 0) {
+        println!(
+            "FINDING · negative lag: {} → {} ({} h) — the successor may start inside \
+             the predecessor. P6 accepts this; the hazard engine may not.",
+            rel.pred, rel.succ, rel.lag_hours
+        );
+    }
+    for reject in &report.rejected {
+        println!("REJECTED line {}: {}", reject.row, reject.reason);
+    }
+    Ok(())
 }
 
 async fn migrate(database_url: Option<String>) -> Result<()> {

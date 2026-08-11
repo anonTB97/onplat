@@ -20,6 +20,8 @@
     )
 )]
 
+pub mod xer;
+
 use std::io::Read;
 
 use wadl_domain::compartment::CompartmentNo;

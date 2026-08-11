@@ -2202,6 +2202,7 @@ dependencies = [
 name = "wadl-ingest"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "csv",
  "serde",
  "thiserror 1.0.69",

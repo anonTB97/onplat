@@ -3,8 +3,10 @@ import { clampZoom, planZoomAt, sheetZoomAt, wheelFactor } from "./camera";
 import {
   compartmentState,
   deckStates,
+  listActivities,
   listDecks,
   readiness,
+  type Activity,
   type AsOf,
   type Deck,
   type DeckStateRow,
@@ -14,6 +16,7 @@ import {
 } from "./api";
 import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
+import { ShipView } from "./ShipView";
 import { VerticalTrace } from "./VerticalTrace";
 import Mitigations from "./Mitigations";
 import { MARKING_H } from "./Chrome";
@@ -36,8 +39,8 @@ const TEXT = C.text;
 
 /** By space = colour by authorization. By trade = colour by who works here. */
 type Lens = "space" | "trade";
-/** What you are looking at: one deck, or three decks stacked. */
-type View = "single" | "vertical";
+/** What you are looking at: one deck, three decks stacked, or the whole hull. */
+type View = "single" | "vertical" | "ship";
 /** How it is drawn: the real general-arrangement plate, or a schematic strip. */
 type Mode = "drawing" | "schematic";
 /**
@@ -66,6 +69,18 @@ const READABLE_SCALE = 0.3;
 
 // A stable colour per trade, so a trade keeps its colour across decks.
 const TRADE_COLOURS = ["#3D6BFF", "#22c55e", "#f59e0b", "#c4b5fd", "#f472b6", "#2dd4bf"];
+/**
+ * A stable colour per zone, hashed from the name rather than indexed from a
+ * list: the zones-and-compartments shading exists so a reader can check the
+ * geometry was applied properly, and a zone that changed colour between decks
+ * or sessions would defeat the comparison it exists for.
+ */
+function zoneColour(zone: string): string {
+  let h = 0;
+  for (const ch of zone) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${h} 60% 62%)`;
+}
+
 function tradeColour(trade: string, all: string[]): string {
   const i = all.indexOf(trade);
   return i < 0 ? "#6e7480" : TRADE_COLOURS[i % TRADE_COLOURS.length];
@@ -120,6 +135,7 @@ export default function DeckExplorer({
 }) {
   const [decks, setDecks] = useState<Deck[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
+  const [activities, setActivities] = useState<Activity[]>([]);
   const [rollup, setRollup] = useState<Rollup | null>(null);
   const [selectedDeck, setSelectedDeck] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -143,6 +159,10 @@ export default function DeckExplorer({
   const [overlay, setOverlay] = useState(false);
   const [fullScreen, setFullScreen] = useState(false);
   const [restrictedOnly, setRestrictedOnly] = useState(false);
+  // The zones-and-compartments shading: translucent zone bands and compartment
+  // boxes over the plate, so a reader can SEE that the register's geometry was
+  // applied properly instead of trusting that it was.
+  const [zonesOn, setZonesOn] = useState(false);
   const [tradeFilter, setTradeFilter] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -198,6 +218,11 @@ export default function DeckExplorer({
         setRollup(null);
         setInstantError(String(e));
       });
+    // The register, for the whole-ship view: activities are the markers there,
+    // and they carry the instant like every other read on this screen.
+    listActivities(identity, vesselId, asOf)
+      .then((r) => setActivities(r.activities))
+      .catch(() => setActivities([]));
   }, [identity, vesselId, asOf]);
 
   // Selecting a compartment fetches its full trace from the engine-backed
@@ -588,6 +613,13 @@ export default function DeckExplorer({
                   >
                     Vertical trace
                   </button>
+                  <button
+                    style={seg(view === "ship")}
+                    onClick={() => setView("ship")}
+                    title="Every activity on every deck, one shared frame axis"
+                  >
+                    Whole ship
+                  </button>
                 </div>
 
                 <div style={{ display: "flex", gap: 6 }}>
@@ -607,6 +639,16 @@ export default function DeckExplorer({
                   <input type="checkbox" checked={restrictedOnly} onChange={(e) => setRestrictedOnly(e.target.checked)} />
                   Restricted only
                 </label>
+
+                {view === "single" && effMode === "drawing" && (
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: zonesOn ? TEXT : DIM, cursor: "pointer" }}
+                    title="Shade each zone's frame band and each compartment's footprint over the plate, so the applied geometry can be checked by eye."
+                  >
+                    <input type="checkbox" checked={zonesOn} onChange={(e) => setZonesOn(e.target.checked)} />
+                    Zones &amp; compartments
+                  </label>
+                )}
 
                 {lens === "trade" && !overlay && allTrades.length > 0 && (
                   <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
@@ -634,7 +676,19 @@ export default function DeckExplorer({
                 </button>
               </div>
 
-              {view === "vertical" ? (
+              {view === "ship" ? (
+                <ShipView
+                  decks={decks}
+                  rows={rows}
+                  activities={activities}
+                  selected={selected}
+                  onPick={(deckCode, compartment) => {
+                    setSelectedDeck(deckCode);
+                    setSelected(compartment);
+                    setRevealNonce((n) => n + 1);
+                  }}
+                />
+              ) : view === "vertical" ? (
                 <VerticalTrace
                   decks={decks}
                   rows={visible}
@@ -664,6 +718,11 @@ export default function DeckExplorer({
                   cascadeEdges={cascadeEdges}
                   overlay={overlay}
                   maxH={sheetMaxH}
+                  zonesOn={zonesOn}
+                  // Unfiltered deliberately: the shading exists to verify the
+                  // register's geometry, and a filter hiding half the zone
+                  // would make the check pass vacuously.
+                  zoneRows={rows.filter((r) => r.compartment.deck_code === selectedDeck)}
                 />
               ) : (
                 <PlanView
@@ -693,6 +752,15 @@ export default function DeckExplorer({
 
               {/* legend — whichever colouring is actually in force */}
               <div style={{ display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap", fontSize: 11, color: DIM }}>
+                {zonesOn && view === "single" && effMode === "drawing" &&
+                  [...new Set(rows.filter((r) => r.compartment.deck_code === selectedDeck).map((r) => r.compartment.zone))]
+                    .sort()
+                    .map((z) => (
+                      <span key={z} style={{ display: "flex", alignItems: "center", gap: 5 }} title={`Zone ${z} — band spans its spaces' frames on this deck`}>
+                        <span style={{ width: 9, height: 9, borderRadius: 2, background: zoneColour(z), opacity: 0.8 }} />
+                        {z}
+                      </span>
+                    ))}
                 {overlay
                   ? (["go", "wait", "stop", "none"] as const).map((b) => (
                       <span key={b} style={{ display: "flex", alignItems: "center", gap: 5 }} title={OVERLAY_STYLE[b].gloss}>
@@ -1002,7 +1070,7 @@ function ReadinessAltitude({
  */
 function SheetView({
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
-  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH,
+  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zoneRows,
 }: {
   sheet: DeckSheet;
   rows: DeckStateRow[];
@@ -1024,6 +1092,11 @@ function SheetView({
   /** Height budget in px. The caller owns this because only it knows whether the
    *  view is a panel in a page or a real full-screen fill of the viewport. */
   maxH: number;
+  /** Shade zone bands and compartment footprints over the plate. */
+  zonesOn: boolean;
+  /** Every space on this deck, unfiltered — the shading verifies the register,
+   *  and a filtered set would make the check pass vacuously. */
+  zoneRows: DeckStateRow[];
 }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<string | null>(null);
@@ -1254,6 +1327,62 @@ function SheetView({
             x={0} y={0} width={W} height={H}
             onLoad={() => setLoaded(sheet.file)}
           />
+
+          {/* Zones & compartments shading — the register's geometry made
+              visible so it can be CHECKED, not trusted. A zone is a band of
+              frames (the extent of its spaces on this deck, drawn edge to
+              edge); a compartment is a box at its own pin. Drawn under the
+              markers and over the plate, in the plate's own units so it scales
+              with the drawing it is claiming things about. */}
+          {zonesOn && cal && (
+            <g pointerEvents="none">
+              {[...new Set(zoneRows.map((r) => r.compartment.zone))].sort().map((zone) => {
+                const zFrames = zoneRows
+                  .filter((r) => r.compartment.zone === zone && r.compartment.frame !== null)
+                  .map((r) => r.compartment.frame ?? 0);
+                if (zFrames.length === 0) return null;
+                const colour = zoneColour(zone);
+                const xHi = sheetX(cal, Math.max(...zFrames) + 3);
+                const xLo = sheetX(cal, Math.min(...zFrames) - 3);
+                const [bandX, bandW] = xHi < xLo ? [xHi, xLo - xHi] : [xLo, xHi - xLo];
+                return (
+                  <g key={zone}>
+                    <rect x={bandX} y={0} width={bandW} height={H} fill={colour} opacity={0.08} />
+                    <line x1={bandX} y1={0} x2={bandX} y2={H} stroke={colour} strokeWidth={1.4 * u} strokeDasharray={`${8 * u} ${6 * u}`} opacity={0.55} />
+                    <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={H} stroke={colour} strokeWidth={1.4 * u} strokeDasharray={`${8 * u} ${6 * u}`} opacity={0.55} />
+                    {/* Named at both plate edges: whichever edge the camera is
+                        looking at, the band says whose it is. */}
+                    {[26 * u, H - 14 * u].map((ty) => (
+                      <text key={ty} x={bandX + 8 * u} y={ty} fill={colour} fontSize={13 * u} fontWeight={700} letterSpacing={0.8}>
+                        {zone}
+                      </text>
+                    ))}
+                  </g>
+                );
+              })}
+              {zoneRows.map((r) => {
+                const frame = r.compartment.frame;
+                if (frame === null) return null;
+                const colour = zoneColour(r.compartment.zone);
+                const cx = sheetX(cal, frame);
+                const cy = sheetY(cal, sheet, r.compartment.side, frame);
+                const halfW = Math.abs(sheetX(cal, frame - 2) - sheetX(cal, frame + 2)) / 2;
+                const halfH = H * 0.028;
+                return (
+                  <g key={r.compartment.compartment_no}>
+                    <rect
+                      x={cx - halfW} y={cy - halfH} width={halfW * 2} height={halfH * 2} rx={3 * u}
+                      fill={colour} opacity={0.16}
+                    />
+                    <rect
+                      x={cx - halfW} y={cy - halfH} width={halfW * 2} height={halfH * 2} rx={3 * u}
+                      fill="none" stroke={colour} strokeWidth={1.2 * u} opacity={0.85}
+                    />
+                  </g>
+                );
+              })}
+            </g>
+          )}
 
           {/* The hazard's path across this deck, drawn on the drawing itself. */}
           {cascadeEdges.map(([from, to]) => {

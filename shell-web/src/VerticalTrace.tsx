@@ -14,9 +14,14 @@
 // be a lie. Each lane is therefore positioned by its OWN calibration onto a
 // common frame window, so a plumb line drawn down the stack means what it says.
 
+import { useEffect, useRef, useState } from "react";
 import type { Deck, DeckStateRow } from "./api";
+import { clampZoom, planZoomAt, wheelFactor } from "./camera";
 import { sheetForDeck, sheetX, type DeckSheet, type SheetCalibration } from "./deckSheets";
 import { C, READINESS_STYLE, STATE_STYLE } from "./theme";
+
+/** The trace's zoom ceiling — deep enough to read one marker chip full-width. */
+const MAX_TRACE_ZOOM = 6;
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -107,6 +112,43 @@ export function VerticalTrace({
   toneOf: (r: DeckStateRow) => { fg: string; bg: string; border: string };
   cascadeEdges: [string, string][];
 }) {
+  // The trace camera. Same cursor-fixed solve as every other canvas
+  // (camera.ts, unit-tested); a translate/scale group like the plan view. The
+  // full-screen complaint this answers: three lanes of 9px placards on a wall
+  // display, with no way in.
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const wheelRef = useRef<HTMLDivElement>(null);
+  const camRef = useRef({ zoom, pan });
+  camRef.current = { zoom, pan };
+  const dragging = useRef<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    const el = wheelRef.current;
+    if (!el) return undefined;
+    const onWheel = (e: WheelEvent) => {
+      const svg = el.querySelector("svg");
+      if (!svg) return;
+      e.preventDefault();
+      const cam = camRef.current;
+      const zNew = clampZoom(cam.zoom * wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey), MAX_TRACE_ZOOM);
+      if (zNew === cam.zoom) return;
+      const box = svg.getBoundingClientRect();
+      // viewBox units per CSS pixel — uniform, because the aspect is preserved.
+      const perPx = W / box.width;
+      const cursor = { x: (e.clientX - box.left) * perPx, y: (e.clientY - box.top) * perPx };
+      setPan(planZoomAt(cam, cursor, zNew));
+      setZoom(zNew);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+  /** Button zoom, centred on the canvas rather than a cursor. */
+  const zoomTo = (zNew: number, viewH: number) => {
+    const clamped = clampZoom(zNew, MAX_TRACE_ZOOM);
+    setPan(planZoomAt(camRef.current, { x: W / 2, y: viewH / 2 }, clamped));
+    setZoom(clamped);
+  };
+
   const ordered = [...decks].sort((a, b) => a.ordinal - b.ordinal);
   const centreIdx = ordered.findIndex((d) => d.ordinal === centreOrdinal);
   const band = bandOf(ordered, centreIdx);
@@ -179,6 +221,20 @@ export function VerticalTrace({
           </span>
         )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
+          <button onClick={() => zoomTo(zoom / 1.4, H)} style={navBtn} title="Zoom out (or scroll on the canvas)">−</button>
+          <span style={{ fontSize: 9.5, color: DIM, fontWeight: 400, minWidth: 30, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
+            {zoom.toFixed(1)}×
+          </span>
+          <button onClick={() => zoomTo(zoom * 1.4, H)} style={navBtn} title="Zoom in (or scroll on the canvas)">+</button>
+          <button
+            onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
+            style={navBtn}
+            title="Reset the view"
+            disabled={zoom === 1 && pan.x === 0 && pan.y === 0}
+          >
+            ⟲
+          </button>
+          <span style={{ width: 1, height: 14, background: LINE, margin: "0 3px" }} />
           <button onClick={() => shift(-1)} style={navBtn} title="Shift the window up a deck" disabled={centreIdx <= 0}>▲</button>
           <button onClick={() => shift(1)} style={navBtn} title="Shift the window down a deck" disabled={centreIdx >= ordered.length - 1}>▼</button>
         </span>
@@ -219,7 +275,37 @@ export function VerticalTrace({
           })}
         </div>
 
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block", background: "#0b0c0e" }}>
+        <div ref={wheelRef} style={{ flex: 1, minWidth: 0 }}>
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          style={{
+            width: "100%",
+            display: "block",
+            background: "#0b0c0e",
+            cursor: zoom > 1 ? "grab" : "default",
+            touchAction: "none",
+          }}
+          onMouseDown={(e) => {
+            dragging.current = { x: e.clientX, y: e.clientY };
+          }}
+          onMouseMove={(e) => {
+            if (!dragging.current) return;
+            const box = e.currentTarget.getBoundingClientRect();
+            const perPx = W / box.width;
+            setPan({
+              x: pan.x + (e.clientX - dragging.current.x) * perPx,
+              y: pan.y + (e.clientY - dragging.current.y) * perPx,
+            });
+            dragging.current = { x: e.clientX, y: e.clientY };
+          }}
+          onMouseUp={() => {
+            dragging.current = null;
+          }}
+          onMouseLeave={() => {
+            dragging.current = null;
+          }}
+        >
+          <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
           <defs>
             {lanes.map((lane) => (
               <clipPath key={lane.deck.code} id={`lane-${lane.deck.code}`}>
@@ -255,7 +341,7 @@ export function VerticalTrace({
                     lanes comparable at all. */}
                 {lane.sheet?.calibration ? (
                   <g clipPath={`url(#lane-${lane.deck.code})`}>
-                    {platedLane(lane.sheet, lane.sheet.calibration, fLo, fHi, lane.top)}
+                    {plateSlice(lane.sheet, lane.sheet.calibration, fLo, fHi, lane.top, LANE_H, LABEL_W, W)}
                   </g>
                 ) : (
                   <text x={(W + LABEL_W) / 2} y={lane.top + LANE_H / 2} fill="#353842" fontSize={10} textAnchor="middle">
@@ -351,7 +437,9 @@ export function VerticalTrace({
               frame
             </text>
           </g>
+          </g>
         </svg>
+        </div>
       </div>
 
       {band.length < 2 && (
@@ -371,30 +459,37 @@ export function VerticalTrace({
 }
 
 /**
- * Positions one deck's plate so the frame window `fLo…fHi` spans the lane.
+ * Positions one deck's plate so the frame window `fLo…fHi` spans a lane.
  *
  * Two anchors do all the work: frame `fHi` lands on the lane's left edge and
  * `fLo` on its right. Because both come from THIS plate's calibration, lanes drawn
  * from plates at different scales end up frame-aligned with each other — which is
  * the only reason a plumb line down the stack is meaningful.
+ *
+ * Exported for the whole-ship view: twelve lanes or three, the alignment
+ * problem is the same one, and two implementations of it is how the two views
+ * come to disagree about where frame 160 is.
  */
-function platedLane(
+export function plateSlice(
   sheet: DeckSheet,
   cal: SheetCalibration,
   fLo: number,
   fHi: number,
   top: number,
+  laneH: number,
+  labelW: number,
+  width: number,
 ) {
   const left = sheetX(cal, fHi);
   const right = sheetX(cal, fLo);
   const spread = right - left;
   if (spread <= 0) return null;
-  const k = (W - LABEL_W) / spread;
+  const k = (width - labelW) / spread;
   return (
     <image
       href={`decks/${sheet.file}`}
-      x={LABEL_W - left * k}
-      y={top + LANE_H / 2 - cal.centrelineY * k}
+      x={labelW - left * k}
+      y={top + laneH / 2 - cal.centrelineY * k}
       width={sheet.width * k}
       height={sheet.height * k}
       // Inverted, not just dimmed. The plates are black ink on white paper, and

@@ -32,6 +32,7 @@ import {
   type DeckSheet,
 } from "./deckSheets";
 import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE, zoneColour } from "./theme";
+import { zoneBands, type ZoneGeometry } from "./zones";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -164,6 +165,29 @@ export default function DeckExplorer({
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+  // The hull's zone bands and audit — computed ONCE from all rows and shared
+  // by the single-deck plate and the whole-ship view, so the two can never
+  // disagree about where a zone ends. Hull-wide deliberately: a zone's band on
+  // one deck derived only from that deck's spaces would put the same boundary
+  // in two different places on two screens, which reads as inaccuracy even
+  // when both are internally consistent.
+  const zoneGeometry: ZoneGeometry = useMemo(
+    () =>
+      zoneBands(
+        rows.map((r) => ({
+          no: r.compartment.compartment_no,
+          zone: r.compartment.zone,
+          frame: r.compartment.frame,
+        })),
+        0,
+        Math.max(
+          280,
+          ...rows.map((r) => (r.compartment.frame ?? 0) + 8),
+        ),
+      ),
+    [rows],
+  );
+
   // Bumped when the chrome routes someone to a space — an alert, a worst-space
   // row, a leverage link — so the options panel can bring the fix into view.
   // Plain marker clicks do not bump it; a reader browsing the plan has not asked
@@ -672,6 +696,7 @@ export default function DeckExplorer({
                   selected={selected}
                   cascadeEdges={cascadeEdges}
                   zonesOn={zonesOn}
+                  zones={zoneGeometry}
                   onPick={(deckCode, compartment) => {
                     setSelectedDeck(deckCode);
                     setSelected(compartment);
@@ -709,6 +734,7 @@ export default function DeckExplorer({
                   overlay={overlay}
                   maxH={sheetMaxH}
                   zonesOn={zonesOn}
+                  zones={zoneGeometry}
                   // Unfiltered deliberately: the shading exists to verify the
                   // register's geometry, and a filter hiding half the zone
                   // would make the check pass vacuously.
@@ -742,15 +768,26 @@ export default function DeckExplorer({
 
               {/* legend — whichever colouring is actually in force */}
               <div style={{ display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap", fontSize: 11, color: DIM }}>
-                {zonesOn && view === "single" && effMode === "drawing" &&
-                  [...new Set(rows.filter((r) => r.compartment.deck_code === selectedDeck).map((r) => r.compartment.zone))]
-                    .sort()
-                    .map((z) => (
-                      <span key={z} style={{ display: "flex", alignItems: "center", gap: 5 }} title={`Zone ${z} — band spans its spaces' frames on this deck`}>
-                        <span style={{ width: 9, height: 9, borderRadius: 2, background: zoneColour(z), opacity: 0.8 }} />
-                        {z}
-                      </span>
-                    ))}
+                {zonesOn && view === "single" && effMode === "drawing" && (
+                  <>
+                    {[...new Set(rows.filter((r) => r.compartment.deck_code === selectedDeck).map((r) => r.compartment.zone))]
+                      .sort()
+                      .map((z) => (
+                        <span key={z} style={{ display: "flex", alignItems: "center", gap: 5 }} title={`Zone ${z} — band spans its spaces' true hull extent, shared with the whole-ship view`}>
+                          <span style={{ width: 9, height: 9, borderRadius: 2, background: zoneColour(z), opacity: 0.8 }} />
+                          {z}
+                        </span>
+                      ))}
+                    <span style={{ color: zoneGeometry.overlaps.length > 0 ? "#fbbf24" : "#22c55e" }}>
+                      bands inferred from the register ·{" "}
+                      {zoneGeometry.overlaps.length > 0
+                        ? zoneGeometry.overlaps
+                            .map((o) => `${o.a}∩${o.b} Fr ${o.lo}–${o.hi}`)
+                            .join(" · ")
+                        : "extents are disjoint — no anomalies"}
+                    </span>
+                  </>
+                )}
                 {overlay
                   ? (["go", "wait", "stop", "none"] as const).map((b) => (
                       <span key={b} style={{ display: "flex", alignItems: "center", gap: 5 }} title={OVERLAY_STYLE[b].gloss}>
@@ -1060,7 +1097,7 @@ function ReadinessAltitude({
  */
 function SheetView({
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
-  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zoneRows,
+  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zones, zoneRows,
 }: {
   sheet: DeckSheet;
   rows: DeckStateRow[];
@@ -1084,6 +1121,8 @@ function SheetView({
   maxH: number;
   /** Shade zone bands and compartment footprints over the plate. */
   zonesOn: boolean;
+  /** The hull's zone bands and audit, shared with the whole-ship view. */
+  zones: ZoneGeometry;
   /** Every space on this deck, unfiltered — the shading verifies the register,
    *  and a filtered set would make the check pass vacuously. */
   zoneRows: DeckStateRow[];
@@ -1326,17 +1365,15 @@ function SheetView({
               with the drawing it is claiming things about. */}
           {zonesOn && cal && (
             <g pointerEvents="none">
-              {[...new Set(zoneRows.map((r) => r.compartment.zone))].sort().map((zone) => {
-                const zFrames = zoneRows
-                  .filter((r) => r.compartment.zone === zone && r.compartment.frame !== null)
-                  .map((r) => r.compartment.frame ?? 0);
-                if (zFrames.length === 0) return null;
-                const colour = zoneColour(zone);
-                const xHi = sheetX(cal, Math.max(...zFrames) + 3);
-                const xLo = sheetX(cal, Math.min(...zFrames) - 3);
+              {/* The hull's tiled bands from zones.ts — the same boundaries the
+                  whole-ship view draws, clipped by this plate's own camera. */}
+              {zones.bands.map((band) => {
+                const colour = zoneColour(band.zone);
+                const xHi = sheetX(cal, band.hi);
+                const xLo = sheetX(cal, band.lo);
                 const [bandX, bandW] = xHi < xLo ? [xHi, xLo - xHi] : [xLo, xHi - xLo];
                 return (
-                  <g key={zone}>
+                  <g key={band.zone}>
                     <rect x={bandX} y={0} width={bandW} height={H} fill={colour} opacity={0.08} />
                     <line x1={bandX} y1={0} x2={bandX} y2={H} stroke={colour} strokeWidth={1.4 * u} strokeDasharray={`${8 * u} ${6 * u}`} opacity={0.55} />
                     <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={H} stroke={colour} strokeWidth={1.4 * u} strokeDasharray={`${8 * u} ${6 * u}`} opacity={0.55} />
@@ -1344,7 +1381,7 @@ function SheetView({
                         looking at, the band says whose it is. */}
                     {[26 * u, H - 14 * u].map((ty) => (
                       <text key={ty} x={bandX + 8 * u} y={ty} fill={colour} fontSize={13 * u} fontWeight={700} letterSpacing={0.8}>
-                        {zone}
+                        {band.zone}
                       </text>
                     ))}
                   </g>

@@ -28,6 +28,7 @@ import { clampZoom, planZoomAt, wheelFactor } from "./camera";
 import { plateSlice } from "./VerticalTrace";
 import { sheetForDeck } from "./deckSheets";
 import { C, STATE_STYLE, zoneColour } from "./theme";
+import type { ZoneGeometry } from "./zones";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -58,6 +59,17 @@ interface PlacedChip {
   level: number;
 }
 
+/** Chips that could not fit the lane at this zoom, rolled up not dropped. */
+interface MoreChip {
+  frame: number;
+  compartment: string;
+  deckCode: string;
+  codes: string[];
+}
+
+/** Chip stack rows a lane can hold above its state-box strip. */
+const MAX_CHIP_LEVELS = 4;
+
 function tickStep(span: number): number {
   for (const step of [5, 10, 20, 50, 100]) {
     if (span / step <= 12) return step;
@@ -72,6 +84,7 @@ export function ShipView({
   selected,
   cascadeEdges,
   zonesOn,
+  zones,
   onPick,
 }: {
   decks: Deck[];
@@ -83,6 +96,9 @@ export function ShipView({
   cascadeEdges: [string, string][];
   /** Shade the zone bands across the whole hull. */
   zonesOn: boolean;
+  /** The hull's zone bands and audit, shared with the single-deck plate so the
+   *  two views cannot disagree about where a zone ends. */
+  zones: ZoneGeometry;
   /** Routes to the space (deck + compartment), with the options in view. */
   onPick: (deckCode: string, compartment: string) => void;
 }) {
@@ -143,34 +159,53 @@ export function ShipView({
     });
   }
 
-  // The frame window is fitted to everything drawn — spaces and work alike.
+  // The frame window is the WHOLE hull, not the work's extent: the content is
+  // the entire deck level and framing the work is the camera's job. Fitting
+  // the window to the work made zooming out a no-op — the rest of the ship
+  // was cropped away before the camera ever saw it.
   const frames = [
     ...placeable.map((p) => p.frame),
     ...rows.map((r) => r.compartment.frame).filter((f): f is number => f !== null),
   ];
-  const fLo = frames.length > 0 ? Math.min(...frames) - PAD_FRAMES : 0;
-  const fHi = frames.length > 0 ? Math.max(...frames) + PAD_FRAMES : 280;
+  const fLo = 0;
+  const fHi = Math.max(280, ...frames.map((f) => f + PAD_FRAMES));
   const fSpan = Math.max(1, fHi - fLo);
   const xOf = (frame: number) => LABEL_W + ((fHi - frame) / fSpan) * (W - LABEL_W);
   /** Half-width of a state box: about two frames of hull, clamped legible. */
   const boxHalfW = Math.min(34, Math.max(12, (2.2 * (W - LABEL_W)) / fSpan));
 
-  // Chip stack levels per lane so chips at the same frame do not overlap.
-  const gap = (fSpan * 60) / (W - LABEL_W);
-  const perDeck = new Map<string, PlacedChip[]>();
+  // Chip stack levels per lane so chips at the same frame do not overlap. The
+  // collision gap shrinks as the camera zooms in — chips spread back out into
+  // their own columns — and whatever still cannot fit within the lane at the
+  // current zoom rolls up into a "+n" chip rather than bleeding into the deck
+  // below. Aggregated, never dropped: the "+n" names its activities and
+  // routes like any chip.
+  const gapEff = (fSpan * 60) / ((W - LABEL_W) * zoom);
+  const perDeck = new Map<string, { chips: PlacedChip[]; more: MoreChip[] }>();
   for (const deck of ordered) {
     const mine = placeable
       .filter((p) => p.deck === deck.code)
       .sort((a, b) => a.frame - b.frame || a.activity.code.localeCompare(b.activity.code));
     const occupied: number[] = [];
     const chips: PlacedChip[] = [];
+    const buckets = new Map<number, MoreChip>();
     for (const p of mine) {
       let level = 0;
-      while (level < occupied.length && p.frame - (occupied[level] ?? -Infinity) < gap) level += 1;
-      occupied[level] = p.frame;
-      chips.push({ activity: p.activity, deckCode: p.deck, frame: p.frame, compartment: p.compartment, level });
+      while (level < occupied.length && p.frame - (occupied[level] ?? -Infinity) < gapEff) level += 1;
+      if (level < MAX_CHIP_LEVELS) {
+        occupied[level] = p.frame;
+        chips.push({ activity: p.activity, deckCode: p.deck, frame: p.frame, compartment: p.compartment, level });
+      } else {
+        const slot = Math.round(p.frame / Math.max(1, gapEff));
+        const bucket = buckets.get(slot);
+        if (bucket) {
+          bucket.codes.push(p.activity.code);
+        } else {
+          buckets.set(slot, { frame: p.frame, compartment: p.compartment, deckCode: p.deck, codes: [p.activity.code] });
+        }
+      }
     }
-    perDeck.set(deck.code, chips);
+    perDeck.set(deck.code, { chips, more: [...buckets.values()] });
   }
 
   const lanesH = ordered.length * LANE_H;
@@ -272,7 +307,8 @@ export function ShipView({
             {ordered.map((deck, i) => {
               const top = i * LANE_H;
               const sheet = sheetForDeck(deck.code);
-              const mine = perDeck.get(deck.code) ?? [];
+              const lane = perDeck.get(deck.code);
+              const count = (lane?.chips.length ?? 0) + (lane?.more.reduce((s, m) => s + m.codes.length, 0) ?? 0);
               return (
                 <g key={deck.code}>
                   <rect x={0} y={top} width={W} height={LANE_H} fill={i % 2 === 0 ? "#0e0f13" : "#101118"} />
@@ -292,31 +328,45 @@ export function ShipView({
                     {deck.label}
                   </text>
                   <text x={8} y={top + 26} fill="#4b5060" fontSize={8}>
-                    {mine.length === 0 ? "no activities" : `${mine.length} activit${mine.length === 1 ? "y" : "ies"}`}
+                    {count === 0 ? "no activities" : `${count} activit${count === 1 ? "y" : "ies"}`}
                   </text>
                 </g>
               );
             })}
 
-            {/* Boundary layer: zone bands across every deck at once, so "zones
-                applied properly" is one look at the hull, not twelve. */}
+            {/* Boundary layer: the hull's zone bands — inferred once in
+                zones.ts, tiled edge to edge, shared with the single-deck plate
+                so no two views can disagree about where a zone ends. */}
             {zonesOn &&
-              [...new Set(rows.map((r) => r.compartment.zone))].sort().map((zone) => {
-                const zFrames = rows
-                  .filter((r) => r.compartment.zone === zone && r.compartment.frame !== null)
-                  .map((r) => r.compartment.frame ?? 0);
-                if (zFrames.length === 0) return null;
-                const colour = zoneColour(zone);
-                const x1 = xOf(Math.max(...zFrames) + 3);
-                const x2 = xOf(Math.min(...zFrames) - 3);
+              zones.bands.map((band) => {
+                const colour = zoneColour(band.zone);
+                const x1 = xOf(band.hi);
+                const x2 = xOf(band.lo);
                 const [bandX, bandW] = x1 < x2 ? [x1, x2 - x1] : [x2, x1 - x2];
                 return (
-                  <g key={zone} pointerEvents="none">
+                  <g key={band.zone} pointerEvents="none">
                     <rect x={bandX} y={0} width={bandW} height={lanesH} fill={colour} opacity={0.06} />
                     <line x1={bandX} y1={0} x2={bandX} y2={lanesH} stroke={colour} strokeWidth={1} strokeDasharray="7 5" opacity={0.5} />
                     <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={lanesH} stroke={colour} strokeWidth={1} strokeDasharray="7 5" opacity={0.5} />
                     <text x={bandX + 5} y={9} fill={colour} fontSize={9} fontWeight={700} letterSpacing={0.8}>
-                      {zone}
+                      {band.zone}
+                    </text>
+                  </g>
+                );
+              })}
+
+            {/* Where extents overlap, the double shading already shows it; the
+                bracket names it, so the reader knows the view knows. */}
+            {zonesOn &&
+              zones.overlaps.map((o) => {
+                const x1 = xOf(o.hi);
+                const x2 = xOf(o.lo);
+                const [ox, ow] = x1 < x2 ? [x1, x2 - x1] : [x2, x1 - x2];
+                return (
+                  <g key={`${o.a}-${o.b}`} pointerEvents="none">
+                    <rect x={ox} y={0} width={ow} height={lanesH} fill="none" stroke="#f59e0b" strokeWidth={0.8} strokeDasharray="3 3" opacity={0.7} />
+                    <text x={ox + ow / 2} y={lanesH - 5} fill="#f59e0b" fontSize={8} fontWeight={700} textAnchor="middle">
+                      {o.a} ∩ {o.b}
                     </text>
                   </g>
                 );
@@ -358,7 +408,7 @@ export function ShipView({
             {/* Work layer: the chips, stems dropping into the space they
                 happen in. Blue on red is the sentence this view speaks. */}
             {ordered.map((deck) =>
-              (perDeck.get(deck.code) ?? []).map((p) => {
+              (perDeck.get(deck.code)?.chips ?? []).map((p) => {
                 const a = p.activity;
                 const top = laneTop.get(deck.code) ?? 0;
                 const doomed = a.executability.verdict === "not_executable";
@@ -383,6 +433,28 @@ export function ShipView({
                     />
                     <text x={x} y={y + 3} fill={fg} fontSize={7} textAnchor="middle" fontFamily="monospace">
                       {a.code}
+                    </text>
+                  </g>
+                );
+              }),
+            )}
+
+            {/* The roll-ups: chips the lane could not hold at this zoom. */}
+            {ordered.map((deck) =>
+              (perDeck.get(deck.code)?.more ?? []).map((m) => {
+                const top = laneTop.get(deck.code) ?? 0;
+                const x = xOf(m.frame);
+                const y = top + 10 + MAX_CHIP_LEVELS * 12;
+                return (
+                  <g
+                    key={`${deck.code}-more-${m.frame}`}
+                    onClick={() => onPick(m.deckCode, m.compartment)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <title>{`${m.codes.length} more here — zoom in to spread them out\n${m.codes.join(", ")}`}</title>
+                    <rect x={x - 13} y={y - 5} width={26} height={10} rx={2.5} fill="#0b0c0eE6" stroke="#6e7480" strokeWidth={0.8} />
+                    <text x={x} y={y + 3} fill="#94a3b8" fontSize={6.5} textAnchor="middle" fontFamily="monospace">
+                      +{m.codes.length}
                     </text>
                   </g>
                 );
@@ -450,6 +522,28 @@ export function ShipView({
         <span><span style={{ color: STATUS_FG.not_started }}>■</span> not started</span>
         <span><span style={{ color: STATUS_FG.complete }}>■</span> complete</span>
         <span><span style={{ color: "#ef4444" }}>■</span> not executable</span>
+        {zonesOn && (
+          <>
+            <span style={{ width: 1, height: 12, background: LINE }} />
+            <span
+              style={{ color: zones.overlaps.length > 0 ? "#fbbf24" : "#22c55e" }}
+              title="Each band is its zone's spaces' true extent, padded two frames — inferred from the register until a zones register carries authored bounds. Overlaps are reported as facts: legitimate where zones are functional rather than longitudinal, and the place to look hard where a scheme is supposed to partition."
+            >
+              bands inferred from the register ·{" "}
+              {zones.overlaps.length > 0
+                ? zones.overlaps
+                    .map((o) => `${o.a}∩${o.b} Fr ${o.lo}–${o.hi} (${o.spaces} spaces)`)
+                    .join(" · ")
+                : "extents are disjoint — no anomalies"}
+            </span>
+            {zones.unplaced > 0 && (
+              <span style={{ color: "#f59e0b" }}>{zones.unplaced} spaces carry no frame (not shaded)</span>
+            )}
+            {zones.bandless.length > 0 && (
+              <span style={{ color: "#f59e0b" }}>no band for {zones.bandless.join(", ")}</span>
+            )}
+          </>
+        )}
         {unlocated > 0 && (
           <span style={{ color: "#f59e0b" }} title="The schedule did not say which compartment — visible on the Sequence Board, undrawable here.">
             {unlocated} unlocated (not drawn)

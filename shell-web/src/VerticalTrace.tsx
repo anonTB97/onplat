@@ -165,15 +165,18 @@ export function VerticalTrace({
     top: i * LANE_H,
   }));
 
-  // The frame window is fitted to the work actually in the stack, not to the
-  // hull's whole 0–280 range. Fitting to the hull left the markers bunched in a
-  // third of the canvas with two thirds of empty ship either side, which wastes
-  // the only axis this view has.
+  // The frame window is the WHOLE deck, not the work's extent. It used to be
+  // fitted to the markers — defensible when the view had no camera, because
+  // fitting to the hull bunched the work into a third of the canvas. Now the
+  // camera exists, the division of labour is the right one: the content is the
+  // entire deck level, and framing the work is what zoom is for. Fitting the
+  // window to the work made zooming OUT a no-op — the rest of the deck was
+  // cropped away before the camera ever saw it.
   const frames = lanes
     .flatMap((l) => l.rows.map((r) => r.compartment.frame))
     .filter((f): f is number => f !== null);
-  const fLo = frames.length > 0 ? Math.min(...frames) - PAD_FRAMES : 0;
-  const fHi = frames.length > 0 ? Math.max(...frames) + PAD_FRAMES : 280;
+  const fLo = 0;
+  const fHi = Math.max(280, ...frames.map((f) => f + PAD_FRAMES));
   const fSpan = Math.max(1, fHi - fLo);
 
   /** Shared axis: bow right, so the highest frame is the leftmost pixel. */
@@ -186,7 +189,7 @@ export function VerticalTrace({
   // Marker positions on the shared axis, for the cascade connectors.
   const placed = new Map<string, { x: number; y: number }>();
   for (const lane of lanes) {
-    const levels = laneLevels(lane.rows, fSpan);
+    const levels = laneLevels(lane.rows, fSpan / zoom);
     for (const r of lane.rows) {
       const frame = r.compartment.frame;
       if (frame === null) continue;
@@ -325,7 +328,7 @@ export function VerticalTrace({
 
           {lanes.map((lane) => {
             const isCentre = lane.deck.ordinal === centreOrdinal;
-            const levels = laneLevels(lane.rows, fSpan);
+            const levels = laneLevels(lane.rows, fSpan / zoom);
             return (
               <g key={lane.deck.code}>
                 <rect x={0} y={lane.top} width={W} height={LANE_H} fill={isCentre ? "#141720" : "#0e0f13"} />

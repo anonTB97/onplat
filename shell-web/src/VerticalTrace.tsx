@@ -186,6 +186,16 @@ export function VerticalTrace({
   const selectedRow = rows.find((r) => r.compartment.compartment_no === selected);
   const plumbFrame = selectedRow?.compartment.frame ?? null;
 
+  // Violation focus. Selecting a space the engine refuses turns the stack into
+  // an answer about THAT violation: the selected space and every space on the
+  // hazard's route stay lit, everything else dims. The cascade edges name the
+  // route; this makes the route the only thing your eye can land on. A space
+  // that permits work focuses nothing — there is no violation to isolate.
+  const violationFocus = selectedRow !== undefined && !selectedRow.permits_work;
+  const involved = new Set<string>(
+    violationFocus && selected !== null ? [selected, ...cascadeEdges.flat()] : [],
+  );
+
   // Marker positions on the shared axis, for the cascade connectors.
   const placed = new Map<string, { x: number; y: number }>();
   for (const lane of lanes) {
@@ -221,6 +231,13 @@ export function VerticalTrace({
         {plumbFrame !== null && (
           <span style={{ color: STATE_STYLE.SUSPEND.fg, fontWeight: 400 }}>
             · plumb at Fr {plumbFrame}
+          </span>
+        )}
+        {violationFocus && (
+          <span style={{ color: STATE_STYLE.SUSPEND.fg, fontWeight: 400 }}>
+            · violation focus — {involved.size === 1
+              ? "the hold is in this space itself"
+              : `${involved.size} spaces on the hazard's route`}; everything else dimmed
           </span>
         )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
@@ -375,11 +392,27 @@ export function VerticalTrace({
                   const no = r.compartment.compartment_no;
                   const tone = toneOf(r);
                   const isSel = no === selected;
+                  const inViolation = involved.has(no);
+                  const dimmed = violationFocus && !inViolation;
                   const x = xOf(frame);
                   const y = lane.top + 34 + (levels.get(no) ?? 0) * 20;
                   return (
-                    <g key={no} onClick={() => onSelect(no)} style={{ cursor: "pointer" }}>
+                    <g
+                      key={no}
+                      onClick={() => onSelect(no)}
+                      style={{ cursor: "pointer" }}
+                      opacity={dimmed ? 0.18 : 1}
+                    >
                       <line x1={x} y1={y} x2={x} y2={lane.top + LANE_H} stroke={tone.fg} strokeWidth={0.7} opacity={0.4} />
+                      {/* The violation's own spaces get a halo, so the route
+                          reads even where lit and dimmed markers sit close. */}
+                      {violationFocus && inViolation && (
+                        <rect
+                          x={x - 44} y={y - 12} width={88} height={24} rx={5}
+                          fill="none" stroke={isSel ? C.accent : STATE_STYLE.SUSPEND.fg}
+                          strokeWidth={1.2} opacity={0.75}
+                        />
+                      )}
                       <rect
                         x={x - 40} y={y - 8} width={80} height={16} rx={3}
                         fill="#0b0c0eE6" stroke={isSel ? C.accent : tone.border} strokeWidth={isSel ? 2 : 1}

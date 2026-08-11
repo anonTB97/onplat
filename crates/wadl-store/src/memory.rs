@@ -927,7 +927,7 @@ impl InMemoryStore {
                 name: "CPO Living Space",
                 deck_code: "3rd",
                 deck_ordinal: 3,
-                zone: "Z5",
+                zone: "Z7",
                 category: "Living",
             },
             CompartmentRow {
@@ -1058,7 +1058,7 @@ impl InMemoryStore {
                 name: "AC Plant No. 2 Machinery Room",
                 deck_code: "3rd",
                 deck_ordinal: 3,
-                zone: "Z5",
+                zone: "Z7",
                 category: "Machinery / electrical",
             },
         ]
@@ -1111,7 +1111,7 @@ impl InMemoryStore {
                 name: "Wardroom Terminal Space",
                 deck_code: "2nd",
                 deck_ordinal: 2,
-                zone: "Z5",
+                zone: "Z7",
                 category: "Living",
             },
             CompartmentRow {
@@ -1147,7 +1147,7 @@ impl InMemoryStore {
                 name: "AC Plant No. 2",
                 deck_code: "3rd",
                 deck_ordinal: 3,
-                zone: "Z5",
+                zone: "Z7",
                 category: "Machinery / electrical",
             },
             CompartmentRow {
@@ -1156,7 +1156,7 @@ impl InMemoryStore {
                 name: "IC Terminal Room",
                 deck_code: "3rd",
                 deck_ordinal: 3,
-                zone: "Z5",
+                zone: "Z7",
                 category: "Electrical",
             },
         ]

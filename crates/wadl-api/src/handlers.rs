@@ -1225,6 +1225,180 @@ pub(crate) struct ImportSchedule {
     pub(crate) xer: String,
 }
 
+/// The audit that joins a zone chart to the compartment register: which
+/// assigned spaces fall outside their zone's authored bounds, which zones
+/// carry spaces but no bound, which bounds name a zone with no spaces.
+///
+/// Computed HERE, once, and served — the shell only draws it. The rule "is
+/// this space inside its zone" implemented twice, once per side of the wire,
+/// is how the deck plan and the whole-ship view would eventually disagree
+/// about the same placard.
+fn zone_audit(
+    compartments: &[wadl_store::model::CompartmentSummary],
+    bounds: &[wadl_store::model::ZoneBoundSummary],
+) -> Value {
+    let by_zone: std::collections::BTreeMap<&str, &wadl_store::model::ZoneBoundSummary> =
+        bounds.iter().map(|b| (b.zone.as_str(), b)).collect();
+    let mut out_of_bounds = Vec::new();
+    let mut zones_seen = std::collections::BTreeSet::new();
+    for c in compartments {
+        zones_seen.insert(c.zone.as_str());
+        let (Some(frame), Some(bound)) = (c.frame, by_zone.get(c.zone.as_str())) else {
+            continue;
+        };
+        if frame < bound.lo_frame || frame > bound.hi_frame {
+            out_of_bounds.push(json!({
+                "compartment": c.compartment_no,
+                "zone": c.zone,
+                "frame": frame,
+                "lo_frame": bound.lo_frame,
+                "hi_frame": bound.hi_frame,
+            }));
+        }
+    }
+    let unbounded_zones: Vec<&str> = zones_seen
+        .iter()
+        .filter(|z| !by_zone.contains_key(**z))
+        .copied()
+        .collect();
+    let unassigned_bounds: Vec<&str> = by_zone
+        .keys()
+        .filter(|z| !zones_seen.contains(**z))
+        .copied()
+        .collect();
+    json!({
+        "out_of_bounds": out_of_bounds,
+        "unbounded_zones": unbounded_zones,
+        "unassigned_bounds": unassigned_bounds,
+    })
+}
+
+/// The hull's zone chart, with the audit that joins it to the register.
+///
+/// `source` and `bounds` are the ingested chart, or null/empty when the views
+/// are still inferring bands from space extents. The audit is only non-empty
+/// once a chart exists: an inferred band cannot disagree with the spaces it
+/// was inferred from.
+pub(crate) async fn zones(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let register = state.store.zone_register(&scope, vessel).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let (source, bounds) = match register {
+        Some(r) => (Some(r.label), r.bounds),
+        None => (None, Vec::new()),
+    };
+    Ok(Json(json!({
+        "source": source,
+        "bounds": bounds,
+        "audit": zone_audit(&compartments, &bounds),
+    })))
+}
+
+/// The body of a zone-chart import: authored frame bounds per zone.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportZones {
+    /// Where the chart came from, shown wherever the bands are drawn.
+    pub(crate) label: String,
+    /// The authored bounds.
+    pub(crate) bounds: Vec<wadl_store::model::ZoneBoundSummary>,
+}
+
+/// Ingests a zone chart — authored frame bounds — as the hull's zone register.
+///
+/// All-or-nothing, like the schedule import: one malformed bound refuses the
+/// whole chart with every reason listed, because a partially loaded chart
+/// presenting as the authored one is the exact lie authored bounds exist to
+/// end. `?dry_run=true` answers with the audit the chart WOULD produce —
+/// including the spaces it would put out of bounds — without storing anything.
+pub(crate) async fn import_zones(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    Json(body): Json<ImportZones>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the chart carries no label".to_owned());
+    }
+    if body.bounds.is_empty() {
+        rejections.push("the chart carries no bounds".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for b in &body.bounds {
+        if b.zone.trim().is_empty() {
+            rejections.push(format!(
+                "a bound {}–{} names no zone",
+                b.lo_frame, b.hi_frame
+            ));
+        }
+        if b.lo_frame > b.hi_frame {
+            rejections.push(format!(
+                "{}: lo frame {} is aft of hi frame {}",
+                b.zone, b.lo_frame, b.hi_frame
+            ));
+        }
+        if !seen.insert(b.zone.as_str()) {
+            rejections.push(format!("{} is bounded twice", b.zone));
+        }
+    }
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the chart was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let audit = zone_audit(&compartments, &body.bounds);
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": body.label,
+            "zones": body.bounds.len(),
+            "audit": audit,
+        })));
+    }
+    let zones = body.bounds.len();
+    let label = body.label.clone();
+    state
+        .store
+        .set_zone_register(
+            &scope,
+            vessel,
+            wadl_store::memory::ZoneRegister {
+                label: body.label,
+                bounds: body.bounds,
+            },
+        )
+        .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "zones": zones,
+        "audit": audit,
+    })))
+}
+
+/// Discards the ingested zone chart; the views return to inferred bands.
+pub(crate) async fn revert_zones(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_zone_register(&scope, vessel).await?;
+    Ok(Json(json!({ "reverted": true })))
+}
+
 /// The distributed packages on a hull.
 pub(crate) async fn list_packages(
     State(state): State<AppState>,

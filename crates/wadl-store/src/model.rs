@@ -302,6 +302,24 @@ pub struct ScheduleEdgeSummary {
     pub lag_hours: i64,
 }
 
+/// One zone's authored frame bounds, from the yard's own zone chart.
+///
+/// Authored is the operative word: until a chart is ingested, every zone band
+/// a view draws is *inferred* from the spaces assigned to the zone, and says
+/// so. Once bounds arrive, the register's assignments can be checked against
+/// them — a space whose frame falls outside its zone's authored bounds is a
+/// finding about the data, and exactly the kind of disagreement the shading
+/// exists to make visible.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ZoneBoundSummary {
+    /// The zone, e.g. `Z5`.
+    pub zone: String,
+    /// The forward-most frame of the zone (inclusive).
+    pub lo_frame: i32,
+    /// The aft-most frame of the zone (inclusive).
+    pub hi_frame: i32,
+}
+
 /// An append-only ledger record, as a surface reads it.
 ///
 /// Hashes are hex rather than bytes because the only consumers are a JSON API and

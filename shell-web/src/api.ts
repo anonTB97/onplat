@@ -753,3 +753,66 @@ export async function listLedger(id: Identity, vesselId: string): Promise<Ledger
   if (!res.ok) throw new Error(`ledger → ${res.status}`);
   return (await res.json()) as LedgerReport;
 }
+
+/* --------------------------------------------------------------- zone chart */
+
+/** One zone's authored frame bounds, from the yard's zone chart. */
+export interface ZoneBound {
+  zone: string;
+  lo_frame: number;
+  hi_frame: number;
+}
+
+/** The server's join of chart to register — computed once, on the API. */
+export interface ZoneAudit {
+  /** Spaces assigned to a zone whose authored bounds they sit outside. */
+  out_of_bounds: {
+    compartment: string;
+    zone: string;
+    frame: number;
+    lo_frame: number;
+    hi_frame: number;
+  }[];
+  /** Zones carrying spaces the chart does not bound. */
+  unbounded_zones: string[];
+  /** Chart bounds naming a zone with no spaces — information, not error. */
+  unassigned_bounds: string[];
+}
+
+export interface ZoneChart {
+  /** The ingested chart's label, or null when bands are inferred. */
+  source: string | null;
+  bounds: ZoneBound[];
+  audit: ZoneAudit;
+}
+
+export async function getZoneChart(id: Identity, vesselId: string): Promise<ZoneChart> {
+  const res = await fetch(`/api/vessels/${vesselId}/zones`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`zones → ${res.status}`);
+  return (await res.json()) as ZoneChart;
+}
+
+/** Ingests a zone chart, all-or-nothing. `dryRun` previews the audit only. */
+export async function importZoneChart(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  bounds: ZoneBound[],
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; zones: number; audit: ZoneAudit }> {
+  const res = await fetch(`/api/vessels/${vesselId}/zones${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, bounds }),
+  });
+  if (!res.ok) throw new Error(`zone chart → ${res.status}: ${await res.text()}`);
+  return (await res.json()) as { stored: boolean; label: string; zones: number; audit: ZoneAudit };
+}
+
+export async function revertZoneChart(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/zones/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`zones revert → ${res.status}`);
+}

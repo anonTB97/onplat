@@ -95,6 +95,14 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/vessels/:id/ledger", get(handlers::ledger))
         .route(
+            "/api/vessels/:id/zones",
+            get(handlers::zones).post(handlers::import_zones),
+        )
+        .route(
+            "/api/vessels/:id/zones/revert",
+            post(handlers::revert_zones),
+        )
+        .route(
             "/api/vessels/:id/schedule-of-record",
             post(handlers::import_schedule),
         )

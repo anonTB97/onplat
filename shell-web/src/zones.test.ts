@@ -76,4 +76,61 @@ describe("zoneBands", () => {
     expect(g.bandless).toEqual(["Z9"]);
     expect(g.bands.map((b) => b.zone)).toEqual(["Z2"]);
   });
+
+  it("an ingested chart's bounds are drawn verbatim — no padding, no inference", () => {
+    const g = zoneBands(
+      [space("a", "Z5", 145), space("b", "Z5", 149)],
+      0,
+      280,
+      { label: "chart.csv", bounds: [{ zone: "Z5", lo_frame: 140, hi_frame: 151 }] },
+    );
+    expect(g.source).toBe("chart.csv");
+    expect(g.bands[0]).toMatchObject({
+      zone: "Z5", lo: 140, hi: 151, rawLo: 145, rawHi: 149, spaces: 2, authored: true,
+    });
+  });
+
+  it("zones the chart missed fall back to inference; authored empty zones still draw", () => {
+    const g = zoneBands(
+      [space("a", "Z5", 145), space("b", "Z6", 160)],
+      0,
+      280,
+      { label: "chart.csv", bounds: [{ zone: "Z5", lo_frame: 140, hi_frame: 151 }, { zone: "Z9", lo_frame: 200, hi_frame: 210 }] },
+    );
+    const byZone = new Map(g.bands.map((b) => [b.zone, b]));
+    expect(byZone.get("Z5")?.authored).toBe(true);
+    expect(byZone.get("Z6")).toMatchObject({ authored: false, lo: 158, hi: 162 });
+    expect(byZone.get("Z9")).toMatchObject({ authored: true, spaces: 0, lo: 200, hi: 210 });
+    expect(g.bandless).toEqual([]);
+  });
+
+  it("authored zones meeting at a frame are a chart drawn properly, not an overlap", () => {
+    const g = zoneBands(
+      [space("a", "Z5", 145), space("b", "Z6", 160)],
+      0,
+      280,
+      {
+        label: "chart.csv",
+        bounds: [
+          { zone: "Z5", lo_frame: 140, hi_frame: 151 },
+          { zone: "Z6", lo_frame: 151, hi_frame: 170 },
+        ],
+      },
+    );
+    expect(g.overlaps).toEqual([]);
+    // But bounds that genuinely share hull are still reported.
+    const h = zoneBands(
+      [space("a", "Z5", 145), space("b", "Z6", 160)],
+      0,
+      280,
+      {
+        label: "chart.csv",
+        bounds: [
+          { zone: "Z5", lo_frame: 140, hi_frame: 155 },
+          { zone: "Z6", lo_frame: 151, hi_frame: 170 },
+        ],
+      },
+    );
+    expect(h.overlaps[0]).toMatchObject({ a: "Z5", b: "Z6", lo: 151, hi: 155 });
+  });
 });

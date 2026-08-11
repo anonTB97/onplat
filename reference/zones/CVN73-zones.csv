@@ -1,0 +1,13 @@
+# CVN-73 PIA-26 zone chart — authored frame bounds per zone.
+# zone,lo_frame,hi_frame  (frames inclusive, bow-low numbering)
+#
+# Z7 deliberately ends at Fr 190: the compartment register assigns 3-192-2-E
+# (Fr 192) to Z7, so ingesting this chart surfaces exactly one out-of-bounds
+# finding — one of the two documents is wrong, and the tool's job is to say so,
+# not to pick.
+Z2,96,108
+Z3,108,126
+Z4,126,140
+Z5,140,151
+Z6,151,170
+Z7,170,190

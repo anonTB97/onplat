@@ -85,6 +85,7 @@ export function ShipView({
   cascadeEdges,
   zonesOn,
   zones,
+  zoneAlerts,
   onPick,
 }: {
   decks: Deck[];
@@ -99,6 +100,8 @@ export function ShipView({
   /** The hull's zone bands and audit, shared with the single-deck plate so the
    *  two views cannot disagree about where a zone ends. */
   zones: ZoneGeometry;
+  /** Spaces the server's audit puts outside their zone's authored bounds. */
+  zoneAlerts?: Set<string>;
   /** Routes to the space (deck + compartment), with the options in view. */
   onPick: (deckCode: string, compartment: string) => void;
 }) {
@@ -376,11 +379,14 @@ export function ShipView({
                 const x1 = xOf(band.hi);
                 const x2 = xOf(band.lo);
                 const [bandX, bandW] = x1 < x2 ? [x1, x2 - x1] : [x2, x1 - x2];
+                // Authored bounds draw solid — a chart's word; inferred bands
+                // stay dashed — this module's guess, and it says so.
+                const dash = band.authored ? undefined : "7 5";
                 return (
                   <g key={band.zone} pointerEvents="none">
                     <rect x={bandX} y={0} width={bandW} height={lanesH} fill={colour} opacity={0.06} />
-                    <line x1={bandX} y1={0} x2={bandX} y2={lanesH} stroke={colour} strokeWidth={1} strokeDasharray="7 5" opacity={0.5} />
-                    <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={lanesH} stroke={colour} strokeWidth={1} strokeDasharray="7 5" opacity={0.5} />
+                    <line x1={bandX} y1={0} x2={bandX} y2={lanesH} stroke={colour} strokeWidth={band.authored ? 1.3 : 1} strokeDasharray={dash} opacity={0.5} />
+                    <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={lanesH} stroke={colour} strokeWidth={band.authored ? 1.3 : 1} strokeDasharray={dash} opacity={0.5} />
                     <text x={bandX + 5} y={9} fill={colour} fontSize={9 / zoom} fontWeight={700} letterSpacing={0.8}>
                       {band.zone}
                     </text>
@@ -439,6 +445,17 @@ export function ShipView({
                       width={boxHalfW * 2 + 6 * sc} height={BOX_H * sc + 6 * sc} rx={4 * sc}
                       fill="none" stroke={isSel ? C.accent : STATE_STYLE.SUSPEND.fg}
                       strokeWidth={1.2 * sc} opacity={0.75}
+                    />
+                  )}
+                  {/* A space the audit puts outside its zone's authored
+                      bounds — the chart and the register disagree, and the
+                      drawing says so where the space actually sits. */}
+                  {zonesOn && zoneAlerts?.has(no) && (
+                    <rect
+                      x={c.x - boxHalfW - 3 * sc} y={y - 3 * sc}
+                      width={boxHalfW * 2 + 6 * sc} height={BOX_H * sc + 6 * sc} rx={4 * sc}
+                      fill="none" stroke="#f59e0b"
+                      strokeWidth={1.4 * sc} strokeDasharray={`${3 * sc} ${2 * sc}`} opacity={0.9}
                     />
                   )}
                   <rect

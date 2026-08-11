@@ -3,9 +3,12 @@ import { clampZoom, planZoomAt, sheetZoomAt, wheelFactor } from "./camera";
 import {
   compartmentState,
   deckStates,
+  getZoneChart,
+  importZoneChart,
   listActivities,
   listDecks,
   readiness,
+  revertZoneChart,
   type Activity,
   type AsOf,
   type Deck,
@@ -13,6 +16,8 @@ import {
   type Decision,
   type Identity,
   type Rollup,
+  type ZoneBound,
+  type ZoneChart,
 } from "./api";
 import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
@@ -155,6 +160,17 @@ export default function DeckExplorer({
   // boxes over the plate, so a reader can SEE that the register's geometry was
   // applied properly instead of trusting that it was.
   const [zonesOn, setZonesOn] = useState(false);
+  // The ingested zone chart (authored bounds + the server's audit), or null
+  // while bands are inferred. Fetched with the rows and refetched after an
+  // import or revert.
+  const [zoneChart, setZoneChart] = useState<ZoneChart | null>(null);
+  const [zoneMsg, setZoneMsg] = useState<string | null>(null);
+  const [zonePending, setZonePending] = useState<{
+    label: string;
+    bounds: ZoneBound[];
+    summary: string;
+  } | null>(null);
+  const [zoneNonce, setZoneNonce] = useState(0);
   const [tradeFilter, setTradeFilter] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -187,8 +203,25 @@ export default function DeckExplorer({
           280,
           ...rows.map((r) => (r.compartment.frame ?? 0) + 8),
         ),
+        zoneChart?.source
+          ? { label: zoneChart.source, bounds: zoneChart.bounds }
+          : null,
       ),
-    [rows],
+    [rows, zoneChart],
+  );
+
+  // The chart itself. Failure degrades to inferred bands rather than an
+  // error: the shading is still true, it just says so with less authority.
+  useEffect(() => {
+    getZoneChart(identity, vesselId)
+      .then(setZoneChart)
+      .catch(() => setZoneChart(null));
+  }, [identity, vesselId, zoneNonce]);
+
+  /** Spaces the server's audit puts outside their zone's authored bounds. */
+  const zoneAlerts = useMemo(
+    () => new Set((zoneChart?.audit.out_of_bounds ?? []).map((o) => o.compartment)),
+    [zoneChart],
   );
 
   // Bumped when the chrome routes someone to a space — an alert, a worst-space
@@ -676,6 +709,82 @@ export default function DeckExplorer({
                   </label>
                 )}
 
+                {/* The zone chart's import door — bands become authored, and
+                    the register can start disagreeing with the chart, which is
+                    the point. */}
+                {zonesOn && ((view === "single" && effMode === "drawing") || view === "ship") && (
+                  <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <label
+                      style={{ ...seg(false), display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer" }}
+                      title="Ingest the yard's zone chart (CSV: zone,lo_frame,hi_frame). All-or-nothing; previews its audit before storing."
+                    >
+                      ⭱ Zone chart
+                      <input
+                        type="file"
+                        accept=".csv,text/csv,text/plain"
+                        style={{ display: "none" }}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = "";
+                          if (!file) return;
+                          void file.text().then((text) => {
+                            const bounds: ZoneBound[] = [];
+                            for (const line of text.split("\n")) {
+                              const t = line.trim();
+                              if (!t || t.startsWith("#")) continue;
+                              const [zone, lo, hi] = t.split(",").map((p) => p.trim());
+                              bounds.push({
+                                zone: zone ?? "",
+                                lo_frame: Number(lo),
+                                hi_frame: Number(hi),
+                              });
+                            }
+                            importZoneChart(identity, vesselId, file.name, bounds, true)
+                              .then((r) => {
+                                const oob = r.audit.out_of_bounds;
+                                setZonePending({
+                                  label: file.name,
+                                  bounds,
+                                  summary:
+                                    `${r.zones} zones` +
+                                    (oob.length > 0
+                                      ? ` · would put ${oob.length} space${oob.length === 1 ? "" : "s"} out of bounds: ${oob.map((o) => o.compartment).join(", ")}`
+                                      : " · register agrees with the chart") +
+                                    (r.audit.unbounded_zones.length > 0
+                                      ? ` · unbounded: ${r.audit.unbounded_zones.join(", ")}`
+                                      : ""),
+                                });
+                                setZoneMsg(null);
+                              })
+                              .catch((err: unknown) => setZoneMsg(String(err)));
+                          });
+                        }}
+                      />
+                    </label>
+                    {zoneChart?.source && (
+                      <button
+                        style={seg(false)}
+                        title="Discard the ingested chart — bands return to inferred."
+                        onClick={() => {
+                          void revertZoneChart(identity, vesselId)
+                            .then(() => {
+                              setZoneMsg("✓ back to inferred bands");
+                              setZoneNonce((n) => n + 1);
+                            })
+                            .catch((err: unknown) => setZoneMsg(String(err)));
+                        }}
+                      >
+                        ⟲ Inferred
+                      </button>
+                    )}
+                    {zoneMsg && (
+                      <span style={{ fontSize: 11, color: zoneMsg.startsWith("✓") ? "#22c55e" : C.danger }}>
+                        {zoneMsg}
+                      </span>
+                    )}
+                  </span>
+                )}
+
                 {lens === "trade" && !overlay && allTrades.length > 0 && (
                   <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
                     <button style={seg(tradeFilter === null)} onClick={() => setTradeFilter(null)}>
@@ -702,6 +811,35 @@ export default function DeckExplorer({
                 </button>
               </div>
 
+              {/* The chart's dry run: everything the ingest would claim —
+                  including the spaces it would put out of bounds — before
+                  anything is stored. */}
+              {zonePending && (
+                <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, padding: "8px 12px", border: `1px solid #f59e0b66`, borderRadius: 8, background: "rgba(245,158,11,0.06)", fontSize: 12 }}>
+                  <b>{zonePending.label}</b>
+                  <span style={{ color: DIM }}>{zonePending.summary}</span>
+                  <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                    <button
+                      style={seg(true)}
+                      onClick={() => {
+                        const staged = zonePending;
+                        setZonePending(null);
+                        if (!staged) return;
+                        void importZoneChart(identity, vesselId, staged.label, staged.bounds, false)
+                          .then((r) => {
+                            setZoneMsg(`✓ ${r.label}: ${r.zones} zones authored`);
+                            setZoneNonce((n) => n + 1);
+                          })
+                          .catch((err: unknown) => setZoneMsg(String(err)));
+                      }}
+                    >
+                      Confirm chart
+                    </button>
+                    <button style={seg(false)} onClick={() => setZonePending(null)}>Cancel</button>
+                  </span>
+                </div>
+              )}
+
               {view === "ship" ? (
                 <ShipView
                   decks={decks}
@@ -711,6 +849,7 @@ export default function DeckExplorer({
                   cascadeEdges={cascadeEdges}
                   zonesOn={zonesOn}
                   zones={zoneGeometry}
+                  zoneAlerts={zoneAlerts}
                   onPick={(deckCode, compartment) => {
                     if (compartment === selected) {
                       setSelected(null);
@@ -753,6 +892,7 @@ export default function DeckExplorer({
                   maxH={sheetMaxH}
                   zonesOn={zonesOn}
                   zones={zoneGeometry}
+                  zoneAlerts={zoneAlerts}
                   // Unfiltered deliberately: the shading exists to verify the
                   // register's geometry, and a filter hiding half the zone
                   // would make the check pass vacuously.
@@ -797,13 +937,34 @@ export default function DeckExplorer({
                         </span>
                       ))}
                     <span style={{ color: zoneGeometry.overlaps.length > 0 ? "#fbbf24" : "#22c55e" }}>
-                      bands inferred from the register ·{" "}
+                      {zoneGeometry.source
+                        ? `bands authored by ${zoneGeometry.source}`
+                        : "bands inferred from the register"}
+                      {" · "}
                       {zoneGeometry.overlaps.length > 0
                         ? zoneGeometry.overlaps
                             .map((o) => `${o.a}∩${o.b} Fr ${o.lo}–${o.hi}`)
                             .join(" · ")
-                        : "extents are disjoint — no anomalies"}
+                        : zoneGeometry.source
+                          ? "no bounds share hull"
+                          : "extents are disjoint — no anomalies"}
                     </span>
+                    {(zoneChart?.audit.out_of_bounds.length ?? 0) > 0 && (
+                      <span
+                        style={{ color: "#f87171", fontWeight: 700 }}
+                        title="The register assigns these spaces to a zone whose authored bounds they sit outside. One of the two documents is wrong; the tool's job is to say so, not to pick."
+                      >
+                        out of authored bounds:{" "}
+                        {zoneChart?.audit.out_of_bounds
+                          .map((o) => `${o.compartment} (Fr ${o.frame} vs ${o.zone} ${o.lo_frame}–${o.hi_frame})`)
+                          .join(" · ")}
+                      </span>
+                    )}
+                    {(zoneChart?.audit.unbounded_zones.length ?? 0) > 0 && (
+                      <span style={{ color: "#f59e0b" }} title="Zones carrying spaces the chart does not bound — drawn inferred.">
+                        chart does not bound {zoneChart?.audit.unbounded_zones.join(", ")}
+                      </span>
+                    )}
                   </>
                 )}
                 {overlay
@@ -1115,7 +1276,7 @@ function ReadinessAltitude({
  */
 function SheetView({
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
-  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zones, zoneRows,
+  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zones, zoneAlerts, zoneRows,
 }: {
   sheet: DeckSheet;
   rows: DeckStateRow[];
@@ -1141,6 +1302,8 @@ function SheetView({
   zonesOn: boolean;
   /** The hull's zone bands and audit, shared with the whole-ship view. */
   zones: ZoneGeometry;
+  /** Spaces the server's audit puts outside their zone's authored bounds. */
+  zoneAlerts: Set<string>;
   /** Every space on this deck, unfiltered — the shading verifies the register,
    *  and a filtered set would make the check pass vacuously. */
   zoneRows: DeckStateRow[];
@@ -1405,11 +1568,14 @@ function SheetView({
                 const xHi = sheetX(cal, band.hi);
                 const xLo = sheetX(cal, band.lo);
                 const [bandX, bandW] = xHi < xLo ? [xHi, xLo - xHi] : [xLo, xHi - xLo];
+                // Authored bounds draw solid — a chart's word; inferred stay
+                // dashed — a guess, and the edge says so.
+                const dash = band.authored ? undefined : `${8 * u} ${6 * u}`;
                 return (
                   <g key={band.zone}>
                     <rect x={bandX} y={0} width={bandW} height={H} fill={colour} opacity={0.08} />
-                    <line x1={bandX} y1={0} x2={bandX} y2={H} stroke={colour} strokeWidth={1.4 * u} strokeDasharray={`${8 * u} ${6 * u}`} opacity={0.55} />
-                    <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={H} stroke={colour} strokeWidth={1.4 * u} strokeDasharray={`${8 * u} ${6 * u}`} opacity={0.55} />
+                    <line x1={bandX} y1={0} x2={bandX} y2={H} stroke={colour} strokeWidth={(band.authored ? 1.8 : 1.4) * u} strokeDasharray={dash} opacity={0.55} />
+                    <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={H} stroke={colour} strokeWidth={(band.authored ? 1.8 : 1.4) * u} strokeDasharray={dash} opacity={0.55} />
                     {/* Named at both plate edges: whichever edge the camera is
                         looking at, the band says whose it is. */}
                     {[26 * u, H - 14 * u].map((ty) => (
@@ -1428,6 +1594,9 @@ function SheetView({
                 const cy = sheetY(cal, sheet, r.compartment.side, frame);
                 const halfW = Math.abs(sheetX(cal, frame - 2) - sheetX(cal, frame + 2)) / 2;
                 const halfH = H * 0.028;
+                // The audit's disagreement, drawn where the space sits: the
+                // register says this zone, the chart's bounds say elsewhere.
+                const alert = zoneAlerts.has(r.compartment.compartment_no);
                 return (
                   <g key={r.compartment.compartment_no}>
                     <rect
@@ -1436,8 +1605,14 @@ function SheetView({
                     />
                     <rect
                       x={cx - halfW} y={cy - halfH} width={halfW * 2} height={halfH * 2} rx={3 * u}
-                      fill="none" stroke={colour} strokeWidth={1.2 * u} opacity={0.85}
+                      fill="none" stroke={alert ? "#f59e0b" : colour} strokeWidth={(alert ? 2.2 : 1.2) * u}
+                      strokeDasharray={alert ? `${5 * u} ${3 * u}` : undefined} opacity={alert ? 1 : 0.85}
                     />
+                    {alert && (
+                      <text x={cx} y={cy - halfH - 4 * u} fill="#f59e0b" fontSize={10 * u} fontWeight={700} textAnchor="middle">
+                        OUT OF {r.compartment.zone} BOUNDS
+                      </text>
+                    )}
                   </g>
                 );
               })}

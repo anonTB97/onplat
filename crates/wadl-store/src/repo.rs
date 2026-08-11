@@ -118,6 +118,42 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<(), StoreError>;
 
+    /// The hull's ingested zone chart — authored frame bounds per zone —
+    /// or `None` when no chart has been ingested and every band a view draws
+    /// is inferred from the register.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn zone_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::ZoneRegister>, StoreError>;
+
+    /// Replaces a hull's zone chart with an ingested one. All-or-nothing at
+    /// the caller: this stores what it is given, and the API layer upstream
+    /// refuses malformed charts whole.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_zone_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: crate::memory::ZoneRegister,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's ingested zone chart, returning the views to inferred
+    /// bands. A no-op when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_zone_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
     /// The stranded man-hours on a hull.
     ///
     /// # Errors

@@ -304,6 +304,10 @@ pub struct InMemoryStore {
     /// survive. Behind a lock for the same reason the ledger is: loading an
     /// export happens after the store is shared.
     schedule_of_record: std::sync::RwLock<BTreeMap<VesselId, ScheduleOfRecord>>,
+    /// An ingested zone chart per hull. When present, the views draw its
+    /// authored bounds instead of inferring bands from space extents — and can
+    /// check the register's assignments against them.
+    zone_register: std::sync::RwLock<BTreeMap<VesselId, ZoneRegister>>,
 }
 
 /// An ingested schedule of record, in the store's own read models.
@@ -321,6 +325,21 @@ pub struct ScheduleOfRecord {
     pub activities: Vec<ActivitySummary>,
     /// The dependency edges.
     pub edges: Vec<ScheduleEdgeSummary>,
+}
+
+/// An ingested zone chart: authored frame bounds per zone.
+///
+/// Deliberately NOT seeded. The demo's zone bands are inferred from the
+/// register and say so on screen; a chart arriving through the import door is
+/// how they become authored — the same seam discipline as the schedule of
+/// record, on the geometry axis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneRegister {
+    /// Where it came from, e.g. `CVN73-zones.csv` — surfaced to the reader so
+    /// authored bounds never present as inferred ones or vice versa.
+    pub label: String,
+    /// The authored bounds, one per zone.
+    pub bounds: Vec<crate::model::ZoneBoundSummary>,
 }
 
 /// The identifiers of the seeded demo world, handed back so the API and tests
@@ -414,6 +433,7 @@ impl InMemoryStore {
             package_spaces: Self::seed_package_spaces(),
             audit: std::sync::Mutex::new(Vec::new()),
             schedule_of_record: std::sync::RwLock::new(BTreeMap::new()),
+            zone_register: std::sync::RwLock::new(BTreeMap::new()),
         };
         (store, world)
     }
@@ -1377,6 +1397,14 @@ impl InMemoryStore {
             .get(&vessel)
             .cloned()
     }
+
+    fn ingested_zones(&self, vessel: VesselId) -> Option<ZoneRegister> {
+        self.zone_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
 }
 
 /// The schedule of record's edges, generated from the register the same way
@@ -1594,6 +1622,42 @@ impl Repositories for InMemoryStore {
     ) -> Result<Option<String>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
         Ok(self.ingested(vessel).map(|sor| sor.label))
+    }
+
+    async fn zone_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ZoneRegister>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.ingested_zones(vessel))
+    }
+
+    async fn set_zone_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: ZoneRegister,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.zone_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, register);
+        Ok(())
+    }
+
+    async fn clear_zone_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.zone_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
     }
 
     async fn stranded_hours(

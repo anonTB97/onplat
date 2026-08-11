@@ -1,26 +1,33 @@
-// The whole-of-ship view: every deck as a lane, every located activity drawn
-// on the deck it happens on, one shared frame axis top to bottom.
+// The whole-of-ship view: every deck as a lane, and on each lane the two facts
+// that only mean something TOGETHER — where the work is, and whether people
+// can work there.
 //
-// The vertical trace answers "what sits directly above this space"; this
-// answers the superintendent's wall question — "where is the WORK" — for the
-// entire hull at once. Same alignment discipline as the trace: each lane's
-// plate is placed by its own calibration onto the common frame window, so a
-// vertical line down the stack is the same frame on every deck.
+// Four layers, composed so the conflict is a colour collision instead of a
+// cross-referencing exercise:
 //
-// What a marker is here is different from every other canvas: these are
-// ACTIVITIES (the register's rows, the thing a crew is handed), not
-// compartment states. An activity is placed at its compartment's frame on its
-// compartment's deck, coloured by schedule status, and flagged red when the
-// A4 derivation says it cannot execute as planned. What cannot be placed is
-// counted, never hidden: unlocated activities and milestones have no
-// position, and the footer says exactly how many the drawing is not showing.
+//   ground   — every compartment's footprint box, filled with its ENGINE STATE
+//              (can people work here, right now); refused spaces read solid.
+//   work     — activity chips stacked above their space, coloured by SCHEDULE
+//              STATUS, stems dropping into the space they happen in. Blue
+//              chips on a red box IS "crews planned into a space that refuses
+//              work" — no lookup required.
+//   cause    — the selected space's hazard cascade drawn across the lanes, so
+//              "why" travels with "where", like the vertical trace.
+//   boundary — the zone bands as a toggle, so "zones applied properly" is
+//              checkable across the whole hull at once.
+//
+// Same alignment discipline as the vertical trace: each lane's plate is placed
+// by its own calibration onto one shared frame window, so a vertical line down
+// the stack is the same frame on every deck. What cannot be placed is counted,
+// never hidden: unlocated activities and milestones have no position, and the
+// footer says exactly how many the drawing is not showing.
 
 import { useEffect, useRef, useState } from "react";
 import type { Activity, Deck, DeckStateRow } from "./api";
 import { clampZoom, planZoomAt, wheelFactor } from "./camera";
 import { plateSlice } from "./VerticalTrace";
 import { sheetForDeck } from "./deckSheets";
-import { C } from "./theme";
+import { C, STATE_STYLE, zoneColour } from "./theme";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -28,12 +35,14 @@ const LINE = C.line;
 /** viewBox width — matches the trace so the maths reads the same. */
 const W = 1000;
 const LABEL_W = 92;
-/** Lane height: twelve decks have to fit a wall display without scrolling. */
-const LANE_H = 72;
+/** Lane height: chips above, the space's state box at the base. */
+const LANE_H = 86;
 const GUTTER = 2;
 const RULER_H = 26;
 const PAD_FRAMES = 8;
 const MAX_SHIP_ZOOM = 8;
+/** The state box strip at the base of each lane. */
+const BOX_H = 14;
 
 const STATUS_FG: Record<Activity["status"], string> = {
   not_started: "#94a3b8",
@@ -41,8 +50,7 @@ const STATUS_FG: Record<Activity["status"], string> = {
   complete: "#22c55e",
 };
 
-/** One placed activity chip. */
-interface Placed {
+interface PlacedChip {
   activity: Activity;
   deckCode: string;
   frame: number;
@@ -62,13 +70,19 @@ export function ShipView({
   rows,
   activities,
   selected,
+  cascadeEdges,
+  zonesOn,
   onPick,
 }: {
   decks: Deck[];
   rows: DeckStateRow[];
   activities: Activity[];
-  /** The selected compartment — its activities ring in accent. */
+  /** The selected compartment — its box and chips ring in accent. */
   selected: string | null;
+  /** The selected space's hazard route, compartment to compartment. */
+  cascadeEdges: [string, string][];
+  /** Shade the zone bands across the whole hull. */
+  zonesOn: boolean;
   /** Routes to the space (deck + compartment), with the options in view. */
   onPick: (deckCode: string, compartment: string) => void;
 }) {
@@ -99,15 +113,11 @@ export function ShipView({
   }, []);
 
   const ordered = [...decks].sort((a, b) => a.ordinal - b.ordinal);
+  const laneTop = new Map(ordered.map((d, i) => [d.code, i * LANE_H]));
 
-  // Where each compartment lives: the register rows carry deck and frame.
-  const spaceOf = new Map<string, { deck: string; frame: number | null }>();
-  for (const r of rows) {
-    spaceOf.set(r.compartment.compartment_no, {
-      deck: r.compartment.deck_code,
-      frame: r.compartment.frame,
-    });
-  }
+  // Where each compartment lives, per the register.
+  const spaceOf = new Map<string, DeckStateRow>();
+  for (const r of rows) spaceOf.set(r.compartment.compartment_no, r);
 
   // Place every activity that CAN be placed; count everything that cannot.
   // Milestones are events, not work — they have no compartment by design.
@@ -121,43 +131,66 @@ export function ShipView({
       continue;
     }
     const home = spaceOf.get(a.compartment_no);
-    if (!home || home.frame === null) {
-      // A located activity whose space the register cannot place — a real
-      // state once schedules are ingested, and worth its own count.
+    if (!home || home.compartment.frame === null) {
       offRegister += 1;
       continue;
     }
-    placeable.push({ activity: a, deck: home.deck, frame: home.frame, compartment: a.compartment_no });
+    placeable.push({
+      activity: a,
+      deck: home.compartment.deck_code,
+      frame: home.compartment.frame,
+      compartment: a.compartment_no,
+    });
   }
 
-  // The frame window is fitted to the placed work, like the trace.
-  const frames = placeable.map((p) => p.frame);
+  // The frame window is fitted to everything drawn — spaces and work alike.
+  const frames = [
+    ...placeable.map((p) => p.frame),
+    ...rows.map((r) => r.compartment.frame).filter((f): f is number => f !== null),
+  ];
   const fLo = frames.length > 0 ? Math.min(...frames) - PAD_FRAMES : 0;
   const fHi = frames.length > 0 ? Math.max(...frames) + PAD_FRAMES : 280;
   const fSpan = Math.max(1, fHi - fLo);
   const xOf = (frame: number) => LABEL_W + ((fHi - frame) / fSpan) * (W - LABEL_W);
+  /** Half-width of a state box: about two frames of hull, clamped legible. */
+  const boxHalfW = Math.min(34, Math.max(12, (2.2 * (W - LABEL_W)) / fSpan));
 
-  // Stack levels per lane so chips at the same frame do not overlap. Chips are
-  // 58 lane-units wide; the gap is that width in frames.
+  // Chip stack levels per lane so chips at the same frame do not overlap.
   const gap = (fSpan * 60) / (W - LABEL_W);
-  const perDeck = new Map<string, Placed[]>();
+  const perDeck = new Map<string, PlacedChip[]>();
   for (const deck of ordered) {
     const mine = placeable
       .filter((p) => p.deck === deck.code)
       .sort((a, b) => a.frame - b.frame || a.activity.code.localeCompare(b.activity.code));
     const occupied: number[] = [];
-    const placed: Placed[] = [];
+    const chips: PlacedChip[] = [];
     for (const p of mine) {
       let level = 0;
       while (level < occupied.length && p.frame - (occupied[level] ?? -Infinity) < gap) level += 1;
       occupied[level] = p.frame;
-      placed.push({ activity: p.activity, deckCode: p.deck, frame: p.frame, compartment: p.compartment, level });
+      chips.push({ activity: p.activity, deckCode: p.deck, frame: p.frame, compartment: p.compartment, level });
     }
-    perDeck.set(deck.code, placed);
+    perDeck.set(deck.code, chips);
   }
 
-  const H = ordered.length * LANE_H + RULER_H;
+  const lanesH = ordered.length * LANE_H;
+  const H = lanesH + RULER_H;
+  /** The centre of a compartment's state box, for stems and cascade edges. */
+  const boxCentre = (r: DeckStateRow): { x: number; y: number } | null => {
+    const frame = r.compartment.frame;
+    const top = laneTop.get(r.compartment.deck_code);
+    if (frame === null || top === undefined) return null;
+    return { x: xOf(frame), y: top + LANE_H - GUTTER - BOX_H / 2 };
+  };
+
   const refused = placeable.filter((p) => p.activity.executability.verdict === "not_executable").length;
+  // The composed fact this view exists for: spaces the engine refuses that
+  // have work planned into them.
+  const chipsBySpace = new Map<string, number>();
+  for (const p of placeable) chipsBySpace.set(p.compartment, (chipsBySpace.get(p.compartment) ?? 0) + 1);
+  const conflicted = rows.filter(
+    (r) => !r.permits_work && (chipsBySpace.get(r.compartment.compartment_no) ?? 0) > 0,
+  ).length;
 
   const zoomTo = (zNew: number) => {
     const clamped = clampZoom(zNew, MAX_SHIP_ZOOM);
@@ -168,13 +201,20 @@ export function ShipView({
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, fontSize: 11, fontWeight: 600, flexWrap: "wrap" }}>
-        <span>Whole ship — every activity, every deck</span>
+        <span>Whole ship — the work, and whether it can proceed</span>
         <span style={{ color: DIM, fontWeight: 400 }}>
-          {placeable.length} placed · one shared frame axis
-          {refused > 0 && (
+          {placeable.length} activities placed
+          {conflicted > 0 && (
             <>
               {" "}·{" "}
-              <b style={{ color: "#f87171" }}>{refused} not executable as planned</b>
+              <b style={{ color: "#f87171" }}>
+                {conflicted} space{conflicted === 1 ? "" : "s"} refuse{conflicted === 1 ? "s" : ""} work with work planned into {conflicted === 1 ? "it" : "them"}
+              </b>
+            </>
+          )}
+          {refused > 0 && (
+            <>
+              {" "}· <b style={{ color: "#fbbf24" }}>{refused} not executable as planned</b>
             </>
           )}
         </span>
@@ -228,6 +268,7 @@ export function ShipView({
               ))}
             </defs>
 
+            {/* Lane chrome: substrate plates, borders, labels. */}
             {ordered.map((deck, i) => {
               const top = i * LANE_H;
               const sheet = sheetForDeck(deck.code);
@@ -237,7 +278,7 @@ export function ShipView({
                   <rect x={0} y={top} width={W} height={LANE_H} fill={i % 2 === 0 ? "#0e0f13" : "#101118"} />
                   <rect x={LABEL_W} y={top + GUTTER} width={W - LABEL_W} height={LANE_H - GUTTER * 2} fill="#0b0c0e" />
                   {sheet?.calibration && (
-                    <g clipPath={`url(#ship-lane-${deck.code})`} opacity={0.75}>
+                    <g clipPath={`url(#ship-lane-${deck.code})`} opacity={0.7}>
                       {plateSlice(sheet, sheet.calibration, fLo, fHi, top, LANE_H, LABEL_W, W)}
                     </g>
                   )}
@@ -253,60 +294,139 @@ export function ShipView({
                   <text x={8} y={top + 26} fill="#4b5060" fontSize={8}>
                     {mine.length === 0 ? "no activities" : `${mine.length} activit${mine.length === 1 ? "y" : "ies"}`}
                   </text>
-
-                  {mine.map((p) => {
-                    const a = p.activity;
-                    const doomed = a.executability.verdict === "not_executable";
-                    const isSel = p.compartment === selected;
-                    const fg = doomed ? "#fca5a5" : STATUS_FG[a.status];
-                    const x = xOf(p.frame);
-                    const y = top + 12 + p.level * 13;
-                    return (
-                      <g
-                        key={a.activity_id}
-                        onClick={() => onPick(p.deckCode, p.compartment)}
-                        style={{ cursor: "pointer" }}
-                      >
-                        <title>
-                          {`${a.code} — ${a.name}\n${a.trade} · ${p.compartment} · ${a.status.replace("_", " ")}${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
-                        </title>
-                        <line x1={x} y1={y + 4} x2={x} y2={top + LANE_H - GUTTER} stroke={fg} strokeWidth={0.5} opacity={0.35} />
-                        <rect
-                          x={x - 28} y={y - 5} width={56} height={11} rx={2.5}
-                          fill={doomed ? "rgba(239,68,68,0.16)" : "#0b0c0eE6"}
-                          stroke={isSel ? C.accent : doomed ? "#ef4444" : fg}
-                          strokeWidth={isSel ? 1.6 : doomed ? 1.2 : 0.8}
-                        />
-                        <text x={x} y={y + 3} fill={fg} fontSize={7} textAnchor="middle" fontFamily="monospace">
-                          {a.code}
-                        </text>
-                      </g>
-                    );
-                  })}
                 </g>
+              );
+            })}
+
+            {/* Boundary layer: zone bands across every deck at once, so "zones
+                applied properly" is one look at the hull, not twelve. */}
+            {zonesOn &&
+              [...new Set(rows.map((r) => r.compartment.zone))].sort().map((zone) => {
+                const zFrames = rows
+                  .filter((r) => r.compartment.zone === zone && r.compartment.frame !== null)
+                  .map((r) => r.compartment.frame ?? 0);
+                if (zFrames.length === 0) return null;
+                const colour = zoneColour(zone);
+                const x1 = xOf(Math.max(...zFrames) + 3);
+                const x2 = xOf(Math.min(...zFrames) - 3);
+                const [bandX, bandW] = x1 < x2 ? [x1, x2 - x1] : [x2, x1 - x2];
+                return (
+                  <g key={zone} pointerEvents="none">
+                    <rect x={bandX} y={0} width={bandW} height={lanesH} fill={colour} opacity={0.06} />
+                    <line x1={bandX} y1={0} x2={bandX} y2={lanesH} stroke={colour} strokeWidth={1} strokeDasharray="7 5" opacity={0.5} />
+                    <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={lanesH} stroke={colour} strokeWidth={1} strokeDasharray="7 5" opacity={0.5} />
+                    <text x={bandX + 5} y={9} fill={colour} fontSize={9} fontWeight={700} letterSpacing={0.8}>
+                      {zone}
+                    </text>
+                  </g>
+                );
+              })}
+
+            {/* Ground layer: every compartment's footprint, filled with its
+                engine state. This is the "can people work here" answer the
+                chips land on. */}
+            {rows.map((r) => {
+              const c = boxCentre(r);
+              if (!c) return null;
+              const no = r.compartment.compartment_no;
+              const tone = STATE_STYLE[r.state];
+              const isSel = no === selected;
+              const y = c.y - BOX_H / 2;
+              return (
+                <g key={no} onClick={() => onPick(r.compartment.deck_code, no)} style={{ cursor: "pointer" }}>
+                  <title>
+                    {`${no} — ${r.compartment.name}\n${r.state}${r.permits_work ? "" : " — refuses work"} · ${r.compartment.zone}${r.clearing_authority ? `\ncleared by ${r.clearing_authority}` : ""}`}
+                  </title>
+                  <rect
+                    x={c.x - boxHalfW} y={y} width={boxHalfW * 2} height={BOX_H} rx={2}
+                    fill={tone.fg} opacity={r.permits_work ? 0.1 : 0.26}
+                  />
+                  <rect
+                    x={c.x - boxHalfW} y={y} width={boxHalfW * 2} height={BOX_H} rx={2}
+                    fill="none"
+                    stroke={isSel ? C.accent : tone.fg}
+                    strokeWidth={isSel ? 1.8 : r.permits_work ? 0.7 : 1.4}
+                    opacity={r.permits_work && !isSel ? 0.55 : 1}
+                  />
+                  <text x={c.x} y={y + BOX_H - 4} fill={tone.fg} fontSize={5.6} textAnchor="middle" fontFamily="monospace">
+                    {no}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Work layer: the chips, stems dropping into the space they
+                happen in. Blue on red is the sentence this view speaks. */}
+            {ordered.map((deck) =>
+              (perDeck.get(deck.code) ?? []).map((p) => {
+                const a = p.activity;
+                const top = laneTop.get(deck.code) ?? 0;
+                const doomed = a.executability.verdict === "not_executable";
+                const isSel = p.compartment === selected;
+                const fg = doomed ? "#fca5a5" : STATUS_FG[a.status];
+                const x = xOf(p.frame);
+                const y = top + 10 + p.level * 12;
+                return (
+                  <g key={a.activity_id} onClick={() => onPick(p.deckCode, p.compartment)} style={{ cursor: "pointer" }}>
+                    <title>
+                      {`${a.code} — ${a.name}\n${a.trade} · ${p.compartment} · ${a.status.replace("_", " ")}${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
+                    </title>
+                    <line
+                      x1={x} y1={y + 4} x2={x} y2={top + LANE_H - GUTTER - BOX_H}
+                      stroke={fg} strokeWidth={0.5} opacity={0.35}
+                    />
+                    <rect
+                      x={x - 28} y={y - 5} width={56} height={11} rx={2.5}
+                      fill={doomed ? "rgba(239,68,68,0.16)" : "#0b0c0eE6"}
+                      stroke={isSel ? C.accent : doomed ? "#ef4444" : fg}
+                      strokeWidth={isSel ? 1.6 : doomed ? 1.2 : 0.8}
+                    />
+                    <text x={x} y={y + 3} fill={fg} fontSize={7} textAnchor="middle" fontFamily="monospace">
+                      {a.code}
+                    </text>
+                  </g>
+                );
+              }),
+            )}
+
+            {/* Cause layer: the selected space's hazard route across the hull —
+                why the red box is red, travelling with where it is. */}
+            {cascadeEdges.map(([from, to]) => {
+              const a = spaceOf.get(from);
+              const b = spaceOf.get(to);
+              const ca = a && boxCentre(a);
+              const cb = b && boxCentre(b);
+              if (!ca || !cb) return null;
+              return (
+                <line
+                  key={`${from}-${to}`}
+                  x1={ca.x} y1={ca.y} x2={cb.x} y2={cb.y}
+                  stroke={STATE_STYLE.SUSPEND.fg} strokeWidth={1.6} strokeDasharray="6 4"
+                  pointerEvents="none"
+                />
               );
             })}
 
             {/* Shared frame ruler. */}
             <g>
-              <line x1={LABEL_W} y1={ordered.length * LANE_H} x2={W} y2={ordered.length * LANE_H} stroke="#2b2d36" />
+              <line x1={LABEL_W} y1={lanesH} x2={W} y2={lanesH} stroke="#2b2d36" />
               {(() => {
                 const step = tickStep(fSpan);
                 const ticks: number[] = [];
                 for (let f = Math.ceil(fLo / step) * step; f <= fHi; f += step) ticks.push(f);
                 return ticks.map((f) => (
                   <g key={f}>
-                    <line x1={xOf(f)} y1={ordered.length * LANE_H} x2={xOf(f)} y2={ordered.length * LANE_H + 4} stroke="#4b5060" />
-                    <text x={xOf(f)} y={ordered.length * LANE_H + 20} fill="#6e7480" fontSize={8.5} textAnchor="middle" fontFamily="monospace">
+                    <line x1={xOf(f)} y1={lanesH} x2={xOf(f)} y2={lanesH + 4} stroke="#4b5060" />
+                    <text x={xOf(f)} y={lanesH + 20} fill="#6e7480" fontSize={8.5} textAnchor="middle" fontFamily="monospace">
                       {f}
                     </text>
                   </g>
                 ));
               })()}
-              <text x={W - 2} y={ordered.length * LANE_H + 20} fill="#4b5060" fontSize={8} textAnchor="end">
+              <text x={W - 2} y={lanesH + 20} fill="#4b5060" fontSize={8} textAnchor="end">
                 bow →
               </text>
-              <text x={LABEL_W + 2} y={ordered.length * LANE_H + 20} fill="#4b5060" fontSize={8}>
+              <text x={LABEL_W + 2} y={lanesH + 20} fill="#4b5060" fontSize={8}>
                 frame
               </text>
             </g>
@@ -314,12 +434,22 @@ export function ShipView({
         </svg>
       </div>
 
-      {/* What the drawing is NOT showing, counted rather than hidden. */}
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", padding: "7px 11px", borderTop: `1px solid ${LINE}`, fontSize: 10.5, color: DIM }}>
+      {/* Two colour languages, said out loud; and what the drawing is NOT
+          showing, counted rather than hidden. */}
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", padding: "7px 11px", borderTop: `1px solid ${LINE}`, fontSize: 10.5, color: DIM }}>
+        <span style={{ color: "#6e7480", textTransform: "uppercase", fontSize: 8.5, letterSpacing: 0.8 }}>Boxes · space state</span>
+        {(["ALLOW", "WARN", "SUSPEND", "BLOCK"] as const).map((s) => (
+          <span key={s} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: STATE_STYLE[s].fg }} />
+            {s}
+          </span>
+        ))}
+        <span style={{ width: 1, height: 12, background: LINE }} />
+        <span style={{ color: "#6e7480", textTransform: "uppercase", fontSize: 8.5, letterSpacing: 0.8 }}>Chips · schedule</span>
         <span><span style={{ color: STATUS_FG.in_progress }}>■</span> in progress</span>
         <span><span style={{ color: STATUS_FG.not_started }}>■</span> not started</span>
         <span><span style={{ color: STATUS_FG.complete }}>■</span> complete</span>
-        <span><span style={{ color: "#ef4444" }}>■</span> not executable as planned</span>
+        <span><span style={{ color: "#ef4444" }}>■</span> not executable</span>
         {unlocated > 0 && (
           <span style={{ color: "#f59e0b" }} title="The schedule did not say which compartment — visible on the Sequence Board, undrawable here.">
             {unlocated} unlocated (not drawn)

@@ -31,7 +31,7 @@ import {
   SHEET_SOURCE,
   type DeckSheet,
 } from "./deckSheets";
-import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
+import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE, zoneColour } from "./theme";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -69,18 +69,6 @@ const READABLE_SCALE = 0.3;
 
 // A stable colour per trade, so a trade keeps its colour across decks.
 const TRADE_COLOURS = ["#3D6BFF", "#22c55e", "#f59e0b", "#c4b5fd", "#f472b6", "#2dd4bf"];
-/**
- * A stable colour per zone, hashed from the name rather than indexed from a
- * list: the zones-and-compartments shading exists so a reader can check the
- * geometry was applied properly, and a zone that changed colour between decks
- * or sessions would defeat the comparison it exists for.
- */
-function zoneColour(zone: string): string {
-  let h = 0;
-  for (const ch of zone) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  return `hsl(${h} 60% 62%)`;
-}
-
 function tradeColour(trade: string, all: string[]): string {
   const i = all.indexOf(trade);
   return i < 0 ? "#6e7480" : TRADE_COLOURS[i % TRADE_COLOURS.length];
@@ -640,10 +628,10 @@ export default function DeckExplorer({
                   Restricted only
                 </label>
 
-                {view === "single" && effMode === "drawing" && (
+                {((view === "single" && effMode === "drawing") || view === "ship") && (
                   <label
                     style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: zonesOn ? TEXT : DIM, cursor: "pointer" }}
-                    title="Shade each zone's frame band and each compartment's footprint over the plate, so the applied geometry can be checked by eye."
+                    title="Shade each zone's frame band and each compartment's footprint, so the applied geometry can be checked by eye."
                   >
                     <input type="checkbox" checked={zonesOn} onChange={(e) => setZonesOn(e.target.checked)} />
                     Zones &amp; compartments
@@ -682,6 +670,8 @@ export default function DeckExplorer({
                   rows={rows}
                   activities={activities}
                   selected={selected}
+                  cascadeEdges={cascadeEdges}
+                  zonesOn={zonesOn}
                   onPick={(deckCode, compartment) => {
                     setSelectedDeck(deckCode);
                     setSelected(compartment);

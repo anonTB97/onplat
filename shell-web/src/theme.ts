@@ -122,3 +122,18 @@ export const fmtClear = (ms: number | null): string =>
   ms === null
     ? "on verification, not on a clock"
     : `${new Date(ms).toISOString().replace("T", " ").slice(0, 16)}Z`;
+
+/**
+ * A stable colour per zone, hashed from the name rather than indexed from a
+ * list: zone shading exists so a reader can check the applied geometry by eye,
+ * and a zone that changed colour between decks, views or sessions would defeat
+ * the comparison it exists for.
+ */
+export function zoneColour(zone: string): string {
+  let h = 0;
+  for (const ch of zone) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  // Golden-angle spread: names one apart (Z4, Z5, Z6…) land ~137° apart on the
+  // wheel instead of a few degrees — sibling zones are exactly the ones that
+  // sit side by side and must not share a hue.
+  return `hsl(${Math.round((h * 137.508) % 360)} 60% 62%)`;
+}

@@ -74,6 +74,45 @@ export function sheetBoxHeight(cam: SheetCamera, zNew: number): number {
 }
 
 /**
+ * A visible slice of a time axis, epoch millis. The Gantt's camera is
+ * one-dimensional: zooming narrows the window, panning slides it, and the
+ * full extent is the hard boundary in both directions.
+ */
+export interface TimeWindow {
+  v0: number;
+  v1: number;
+}
+
+/**
+ * Time axis: the new window after zooming by `factor` (>1 = in) around the
+ * instant `t` — the instant under the cursor stays under the cursor. The
+ * result never leaves `full` and never gets narrower than `minSpan`.
+ */
+export function windowZoomAt(
+  win: TimeWindow,
+  full: TimeWindow,
+  t: number,
+  factor: number,
+  minSpan: number,
+): TimeWindow {
+  const span = win.v1 - win.v0;
+  const spanNew = Math.min(full.v1 - full.v0, Math.max(minSpan, span / factor));
+  // The cursor instant keeps its fractional position in the window…
+  const f = (t - win.v0) / span;
+  let v0 = t - f * spanNew;
+  // …except where the full extent forbids it.
+  v0 = Math.min(full.v1 - spanNew, Math.max(full.v0, v0));
+  return { v0, v1: v0 + spanNew };
+}
+
+/** Time axis: slide the window by `dt`, clamped to the full extent. */
+export function windowPan(win: TimeWindow, full: TimeWindow, dt: number): TimeWindow {
+  const span = win.v1 - win.v0;
+  const v0 = Math.min(full.v1 - span, Math.max(full.v0, win.v0 + dt));
+  return { v0, v1: v0 + span };
+}
+
+/**
  * Plate view: the new pan that keeps the sheet point under the cursor fixed
  * while zoom changes to `zNew`. `px`/`py` are the cursor in CSS pixels from
  * the box's top-left. Returned as a pan offset from the *current* centre, so

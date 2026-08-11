@@ -155,6 +155,10 @@ pub(crate) async fn list_work_orders(
 /// item against the work orders' and packages' own budgets. For the generated
 /// register the report is empty by construction; for an ingested schedule it
 /// is the honest account of what the export does and does not cover.
+///
+/// Dependency edges ride along (`edges`), at the activity-code grain, so a
+/// Gantt can draw the logic the dates were computed from — including the
+/// negative lags where cure-window inversions hide.
 pub(crate) async fn list_activities(
     State(state): State<AppState>,
     Caller(scope): Caller,
@@ -173,6 +177,7 @@ pub(crate) async fn list_activities(
         hazards: &hazards,
     };
     let source = state.store.schedule_source(&scope, vessel).await?;
+    let schedule_edges = state.store.list_schedule_edges(&scope, vessel).await?;
     let reconciliation = reconcile(&state, &scope, vessel, &activities).await?;
     let rows: Vec<Value> = activities
         .into_iter()
@@ -191,6 +196,7 @@ pub(crate) async fn list_activities(
         "as_of": at,
         "schedule_source": source,
         "reconciliation": reconciliation,
+        "edges": schedule_edges,
         "activities": rows,
     })))
 }

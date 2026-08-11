@@ -609,6 +609,19 @@ export interface ReconciliationMismatch {
   register_earned: number;
 }
 
+/**
+ * One dependency edge from the schedule of record, at the activity-code grain.
+ * A negative lag lets the successor start before its predecessor finishes —
+ * legitimate as an overlap, and exactly where cure-window inversions hide.
+ */
+export interface ScheduleEdge {
+  pred_code: string;
+  succ_code: string;
+  /** Relationship kind as the scheduler writes it, e.g. `PR_FS`. */
+  kind: string;
+  lag_hours: number;
+}
+
 export interface ActivityRegister {
   as_of: number;
   /** null = the generated demo register; a label = the ingested export it came from. */
@@ -618,6 +631,8 @@ export interface ActivityRegister {
     /** Budgeted hours the register maps to no work item at all. */
     unmapped_budget_hours: number;
   };
+  /** The schedule's logic — what the dates were computed from. */
+  edges: ScheduleEdge[];
   activities: Activity[];
 }
 

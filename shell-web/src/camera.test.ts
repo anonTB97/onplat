@@ -10,7 +10,10 @@ import {
   sheetBoxHeight,
   sheetZoomAt,
   wheelFactor,
+  windowPan,
+  windowZoomAt,
   type SheetCamera,
+  type TimeWindow,
 } from "./camera";
 
 // A deterministic LCG so the invariants run over many cameras without the test
@@ -137,5 +140,67 @@ describe("sheetZoomAt — the plate view's clamped-centre camera", () => {
     const pan = sheetZoomAt(cam, cam.boxW / 2, boxH / 2, cam.z);
     expect(pan.x).toBeCloseTo(cam.pan.x, 9);
     expect(pan.y).toBeCloseTo(cam.pan.y, 9);
+  });
+});
+
+describe("windowZoomAt — the Gantt's one-dimensional time camera", () => {
+  const DAY = 86_400_000;
+  const full: TimeWindow = { v0: 0, v1: 180 * DAY };
+
+  it("keeps the instant under the cursor at the same fraction of the window", () => {
+    const rnd = lcg(23);
+    for (let i = 0; i < 200; i++) {
+      const span = (10 + rnd() * 160) * DAY;
+      const v0 = rnd() * (full.v1 - span);
+      const win: TimeWindow = { v0, v1: v0 + span };
+      const t = win.v0 + rnd() * span;
+      const next = windowZoomAt(win, full, t, Math.exp((rnd() - 0.5) * 2), DAY);
+      // Skip the cases where a boundary clamp legitimately breaks the
+      // invariant — those are asserted separately below.
+      if (next.v0 > full.v0 && next.v1 < full.v1) {
+        const before = (t - win.v0) / span;
+        const after = (t - next.v0) / (next.v1 - next.v0);
+        expect(after).toBeCloseTo(before, 9);
+      }
+    }
+  });
+
+  it("never leaves the full extent and never gets narrower than minSpan", () => {
+    const rnd = lcg(59);
+    for (let i = 0; i < 200; i++) {
+      const span = (2 + rnd() * 170) * DAY;
+      const v0 = rnd() * (full.v1 - span);
+      const win: TimeWindow = { v0, v1: v0 + span };
+      const t = win.v0 + rnd() * span;
+      const next = windowZoomAt(win, full, t, Math.exp((rnd() - 0.5) * 6), DAY);
+      expect(next.v0).toBeGreaterThanOrEqual(full.v0);
+      expect(next.v1).toBeLessThanOrEqual(full.v1);
+      expect(next.v1 - next.v0).toBeGreaterThanOrEqual(DAY - 1e-6);
+    }
+  });
+
+  it("zooming out from anywhere lands back on the full extent, exactly", () => {
+    const win: TimeWindow = { v0: 40 * DAY, v1: 60 * DAY };
+    const next = windowZoomAt(win, full, 50 * DAY, 1e-9, DAY);
+    expect(next.v0).toBe(full.v0);
+    expect(next.v1).toBe(full.v1);
+  });
+});
+
+describe("windowPan", () => {
+  const DAY = 86_400_000;
+  const full: TimeWindow = { v0: 0, v1: 180 * DAY };
+
+  it("slides by dt and preserves the span", () => {
+    const win: TimeWindow = { v0: 30 * DAY, v1: 60 * DAY };
+    const next = windowPan(win, full, 5 * DAY);
+    expect(next.v0).toBe(35 * DAY);
+    expect(next.v1 - next.v0).toBe(30 * DAY);
+  });
+
+  it("clamps at both ends of the full extent", () => {
+    const win: TimeWindow = { v0: 30 * DAY, v1: 60 * DAY };
+    expect(windowPan(win, full, -400 * DAY).v0).toBe(0);
+    expect(windowPan(win, full, 400 * DAY).v1).toBe(full.v1);
   });
 });

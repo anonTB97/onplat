@@ -26,6 +26,7 @@ import {
   type DeckStateRow,
   type Identity,
   type ReconciliationMismatch,
+  type ScheduleEdge,
 } from "./api";
 import { ZoneLanes } from "./ZoneLanes";
 import { C, mh } from "./theme";
@@ -87,6 +88,7 @@ export default function SequenceBoard({
   const [reloadNonce, setReloadNonce] = useState(0);
   const [source, setSource] = useState<string | null>(null);
   const [mismatches, setMismatches] = useState<ReconciliationMismatch[]>([]);
+  const [edges, setEdges] = useState<ScheduleEdge[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [trade, setTrade] = useState<string | null>(null);
@@ -102,6 +104,7 @@ export default function SequenceBoard({
         setAsOfMs(r.as_of);
         setSource(r.schedule_source);
         setMismatches(r.reconciliation.mismatches);
+        setEdges(r.edges);
       })
       .catch((e: unknown) => {
         setActivities(null);
@@ -338,7 +341,7 @@ export default function SequenceBoard({
       )}
 
       {boardView === "lanes" && (
-        <ZoneLanes activities={activities} spaces={spaces} asOf={asOfMs} onOpenSpace={onOpenSpace} />
+        <ZoneLanes activities={activities} spaces={spaces} edges={edges} asOf={asOfMs} onOpenSpace={onOpenSpace} />
       )}
 
       {boardView === "register" && (<>

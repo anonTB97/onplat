@@ -301,3 +301,85 @@ async fn executability_is_indifferent_to_as_of() {
     };
     assert_eq!(verdicts(&now), verdicts(&later));
 }
+
+async fn post(
+    app: &axum::Router,
+    world: &DemoWorld,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("x-org-id", world.yard_org.as_uuid().to_string())
+        .header("x-assigned-vessels", world.cvn73.as_uuid().to_string())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// The issue lifecycle: an acknowledgement lands in the audit ledger and joins
+/// back onto the board's next read by the issue's stable key — the issue keeps
+/// deriving (nothing is closed or hidden), it just carries who answered for it.
+/// A key not on the board is refused, like a decision on an option not on offer.
+#[tokio::test]
+async fn an_acknowledgement_joins_the_ledger_to_the_board() {
+    let (app, world) = app_at_anchor();
+    let issues_path = format!("/api/vessels/{}/issues", world.cvn73.as_uuid());
+    let ack_path = format!("{issues_path}/acknowledge");
+
+    let (_, before) = get(&app, &world, &issues_path).await;
+    let rows = before["issues"].as_array().expect("issues array");
+    let first = &rows[0];
+    let key = first["key"].as_str().expect("every issue carries its key");
+    assert!(key.starts_with("issue:"), "{key}");
+    assert!(
+        first["acknowledged"].is_null(),
+        "nothing acknowledged yet: {first}"
+    );
+
+    let (status, recorded) = post(
+        &app,
+        &world,
+        &ack_path,
+        serde_json::json!({ "key": key, "note": "raised at the 0700" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    assert_eq!(recorded["recorded"]["action"], "ISSUE_ACKNOWLEDGED");
+    assert!(
+        recorded["recorded"]["entry_hash"].is_string(),
+        "chained: {recorded}"
+    );
+
+    // The board's next read carries it, on the same row, and the row is still
+    // there — acknowledged, not hidden.
+    let (_, after) = get(&app, &world, &issues_path).await;
+    let row = after["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == key)
+        .expect("the issue still derives");
+    assert_eq!(row["acknowledged"]["note"], "raised at the 0700");
+    assert!(row["acknowledged"]["at"].is_i64());
+
+    // A key that names no current finding is refused with the reason.
+    let (status, _) = post(
+        &app,
+        &world,
+        &ack_path,
+        serde_json::json!({ "key": "issue:held:9-999-9-Z", "note": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}

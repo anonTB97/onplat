@@ -893,24 +893,18 @@ pub(crate) async fn leverage(
     })))
 }
 
-/// The issue board: every way the platform can show planned work is in
-/// trouble, ranked by man-hours at risk.
-///
-/// Every row is a claim with evidence: a real engine refusal with crews booked,
-/// a compound hold straight from the options planner, an activity shown
-/// non-executable over its own window, a stranding read off real segment
-/// topology, or a schedule-quality finding read off the schedule of record's
-/// own dependency edges.
-pub(crate) async fn issues(
-    State(state): State<AppState>,
-    Caller(scope): Caller,
-    Path(id): Path<Uuid>,
-    Query(as_of): Query<AsOf>,
-) -> Result<Json<Value>, ApiError> {
-    let vessel = VesselId::from_uuid(id);
-    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
-    let activities = state.store.list_activities(&scope, vessel).await?;
+/// The full issue derivation for one hull at one instant, shared by the board
+/// read and the acknowledgement write — the write validates against exactly
+/// what the read would serve, so an ack can never attach to a finding that is
+/// not on the board.
+async fn derived_issues(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    at: Timestamp,
+) -> Result<Vec<wadl_issues::Issue>, ApiError> {
+    let inputs = mitigation_inputs(state, scope, vessel).await?;
+    let activities = state.store.list_activities(scope, vessel).await?;
     let loads = |instant: Timestamp| inputs.loads(instant);
     let world = wadl_mitigate::World {
         graph: &inputs.graph,
@@ -942,7 +936,7 @@ pub(crate) async fn issues(
             downstream_segments: s.downstream_segments.len(),
         })
         .collect();
-    let schedule_edges = state.store.list_schedule_edges(&scope, vessel).await?;
+    let schedule_edges = state.store.list_schedule_edges(scope, vessel).await?;
     let edges: Vec<wadl_issues::ScheduleEdge<'_>> = schedule_edges
         .iter()
         .map(|e| wadl_issues::ScheduleEdge {
@@ -951,13 +945,178 @@ pub(crate) async fn issues(
             lag_hours: e.lag_hours,
         })
         .collect();
-    let issues = wadl_issues::derive(&world, &rows, &stranded, &edges);
+    Ok(wadl_issues::derive(&world, &rows, &stranded, &edges))
+}
+
+/// The issue board: every way the platform can show planned work is in
+/// trouble, ranked by man-hours at risk.
+///
+/// Every row is a claim with evidence: a real engine refusal with crews booked,
+/// a compound hold straight from the options planner, an activity shown
+/// non-executable over its own window, a stranding read off real segment
+/// topology, or a schedule-quality finding read off the schedule of record's
+/// own dependency edges.
+///
+/// Each row also carries its lifecycle, joined from the audit ledger rather
+/// than stored on the issue — the issue is re-derived on every read and holds
+/// no state of its own. `acknowledged` is the ledger's `ISSUE_ACKNOWLEDGED`
+/// entry for this issue's stable key; `decision` is the latest mitigation
+/// disposition recorded against the issue's space. Both ride along and neither
+/// removes the row: an acknowledged issue is still an issue, it is just an
+/// issue somebody has answered for.
+pub(crate) async fn issues(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let issues = derived_issues(&state, &scope, vessel, at).await?;
     let hours_at_risk: i64 = issues.iter().map(|i| i.hours_at_risk().get()).sum();
+
+    // The lifecycle join. One ledger read; newest-first order means the first
+    // record seen per subject is the latest word on it.
+    let ledger = state.store.list_audit(&scope, vessel, None).await?;
+    let mut acks: std::collections::HashMap<&str, &wadl_store::model::AuditRecord> =
+        std::collections::HashMap::new();
+    let mut decisions: std::collections::HashMap<&str, &wadl_store::model::AuditRecord> =
+        std::collections::HashMap::new();
+    for rec in &ledger {
+        let Some(subject) = rec.subject_ref.as_deref() else {
+            continue;
+        };
+        match rec.action.as_str() {
+            "ISSUE_ACKNOWLEDGED" => {
+                acks.entry(subject).or_insert(rec);
+            }
+            "MITIGATION_ACCEPTED" | "MITIGATION_REJECTED" => {
+                decisions.entry(subject).or_insert(rec);
+            }
+            _ => {}
+        }
+    }
+    let field = |rec: &wadl_store::model::AuditRecord, name: &str| -> Value {
+        serde_json::from_str::<Value>(&rec.detail)
+            .ok()
+            .and_then(|d| d.get(name).cloned())
+            .unwrap_or(Value::Null)
+    };
+    let rows: Vec<Value> = issues
+        .iter()
+        .map(|i| {
+            let mut row = json!(i);
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("key".to_owned(), json!(i.key()));
+                let ack = acks
+                    .get(i.key().as_str())
+                    .map(|rec| json!({ "at": rec.occurred_at_ms, "note": field(rec, "note") }));
+                obj.insert("acknowledged".to_owned(), ack.unwrap_or(Value::Null));
+                let decision = i
+                    .space()
+                    .and_then(|c| decisions.get(c.as_str()))
+                    .map(|rec| {
+                        json!({
+                            "disposition": field(rec, "disposition"),
+                            "at": rec.occurred_at_ms,
+                            "reason": field(rec, "reason"),
+                        })
+                    });
+                obj.insert("decision".to_owned(), decision.unwrap_or(Value::Null));
+            }
+            row
+        })
+        .collect();
     Ok(Json(json!({
         "as_of": at,
         "hours_at_risk": hours_at_risk,
-        "issues": issues,
+        "issues": rows,
     })))
+}
+
+/// An acknowledgement, as posted: which finding, and what the acknowledger has
+/// to say for it.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct AckBody {
+    /// The issue's stable key, as served on the board.
+    key: String,
+    /// Why it is acknowledged — pressed for on the surface, optional here.
+    #[serde(default)]
+    note: String,
+    /// The instant the board was read at.
+    #[serde(default)]
+    as_of: Option<i64>,
+}
+
+/// The immutable content of an acknowledgement, in a fixed field order — the
+/// ledger chains on the serialised detail, so its byte layout must be stable
+/// (see [`DecisionDetail`]).
+#[derive(Debug, serde::Serialize)]
+struct AckDetail<'a> {
+    key: &'a str,
+    note: &'a str,
+    as_of_ms: i64,
+    /// The tenant, because that is the only identity milestone 1 has — same
+    /// honesty as `DecisionDetail::decided_by_org`.
+    acknowledged_by_org: String,
+    /// The issue **as the server derived it** when the ack landed — the claim
+    /// and its priced hours at that instant, not whatever a client believed.
+    issue: Value,
+}
+
+/// Records that somebody answered for an issue on the board.
+///
+/// This does not close, hide or fix anything — the issue keeps deriving as
+/// long as its facts hold, and the board keeps showing it. What changes is
+/// that the row now carries who answered for it and why, out of the same
+/// tamper-evident ledger as mitigation decisions. The key is validated
+/// against the board as derived *right now*: acknowledging a finding that is
+/// not on the board is refused, for the same reason a decision on an option
+/// not on offer is refused.
+pub(crate) async fn acknowledge_issue(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<AckBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    // Scope first, body second: a foreign hull is not-found before a malformed
+    // body can say anything else (see `record_decision`).
+    let hull = state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(ApiError::OutOfRange(rejection.body_text())),
+    };
+    let at = AsOf { as_of: body.as_of }.resolve(&state, &hull)?;
+
+    let issues = derived_issues(&state, &scope, vessel, at).await?;
+    let Some(issue) = issues.iter().find(|i| i.key() == body.key) else {
+        return Err(ApiError::OutOfRange(format!(
+            "{:?} is not on the issue board at this instant, so it cannot be acknowledged",
+            body.key
+        )));
+    };
+
+    let detail = AckDetail {
+        key: &body.key,
+        note: &body.note,
+        as_of_ms: at.epoch_millis(),
+        acknowledged_by_org: scope.org.to_string(),
+        issue: json!(issue),
+    };
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "ISSUE_ACKNOWLEDGED",
+            &detail,
+            Some(&body.key),
+            at.epoch_millis(),
+        )
+        .await?;
+    Ok(Json(json!({ "recorded": record })))
 }
 
 /// The import half of the schedule-of-record area: a P6 XER export, posted as

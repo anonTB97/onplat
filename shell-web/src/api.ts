@@ -543,11 +543,26 @@ export interface Refusal {
 /* -------------------------------------------------------------------- issues */
 
 /**
+ * The lifecycle an issue row carries, joined from the audit ledger on every
+ * read. Neither field removes the row: an acknowledged issue is still an
+ * issue, it is just an issue somebody has answered for.
+ */
+export interface IssueLifecycle {
+  /** The issue's stable key across derivations — what an ack attaches to. */
+  key: string;
+  /** The ledger's acknowledgement of this finding, if one was recorded. */
+  acknowledged: { at: number; note: string } | null;
+  /** The latest mitigation disposition recorded against the issue's space. */
+  decision: { disposition: string; at: number; reason: string } | null;
+}
+
+/**
  * One issue: a typed claim that planned work is in trouble, with its evidence.
  * The same fact can appear at several grains (a space, a plan, a crew's
  * morning) — that is deliberate; each grain routes to a different fix.
  */
-export type Issue =
+export type Issue = IssueLifecycle &
+  (
   | {
       kind: "not_executable_as_planned";
       activity: string;
@@ -586,7 +601,26 @@ export type Issue =
       succ: string;
       lag_hours: number;
       hours_at_risk: number;
-    };
+    }
+  );
+
+/**
+ * Records that somebody answered for an issue. Appends to the same
+ * tamper-evident ledger as mitigation decisions; closes and hides nothing.
+ */
+export async function acknowledgeIssue(
+  id: Identity,
+  vesselId: string,
+  key: string,
+  note: string,
+): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/issues/acknowledge`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ key, note }),
+  });
+  if (!res.ok) throw new Error(`acknowledge → ${res.status}: ${await res.text()}`);
+}
 
 export async function listIssues(
   id: Identity,

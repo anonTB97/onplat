@@ -159,6 +159,41 @@ impl Issue {
         }
     }
 
+    /// A stable identity for this finding across derivations — the handle an
+    /// acknowledgement in the audit ledger attaches to.
+    ///
+    /// Built from the fields that *name* the finding, never from the priced
+    /// ones: the hours move with every read, the subject does not. Two reads
+    /// that surface the same trouble produce the same key, which is exactly
+    /// what lets an acknowledgement recorded yesterday still attach today.
+    #[must_use]
+    pub fn key(&self) -> String {
+        match self {
+            Self::NotExecutableAsPlanned { activity, .. } => {
+                format!("issue:not_executable:{activity}")
+            }
+            Self::HeldWithCrewsBooked { compartment, .. } => format!("issue:held:{compartment}"),
+            Self::CompoundHold { compartment, .. } => format!("issue:compound:{compartment}"),
+            Self::StrandingConcentration { compartment, .. } => {
+                format!("issue:stranding:{compartment}")
+            }
+            Self::NegativeLag { pred, succ, .. } => format!("issue:negative_lag:{pred}->{succ}"),
+        }
+    }
+
+    /// The space whose options panel answers this issue — `None` for a
+    /// schedule finding, whose fix is a re-sequence rather than a place.
+    #[must_use]
+    pub const fn space(&self) -> Option<&CompartmentNo> {
+        match self {
+            Self::NotExecutableAsPlanned { compartment, .. }
+            | Self::HeldWithCrewsBooked { compartment, .. }
+            | Self::CompoundHold { compartment, .. }
+            | Self::StrandingConcentration { compartment, .. } => Some(compartment),
+            Self::NegativeLag { .. } => None,
+        }
+    }
+
     /// Tie-break order across kinds: the ones needing a person soonest first.
     const fn kind_rank(&self) -> u8 {
         match self {

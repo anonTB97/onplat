@@ -91,6 +91,22 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<Option<String>, StoreError>;
 
+    /// Replaces a hull's schedule of record with an ingested one.
+    ///
+    /// From this call on, the register, the edges and everything derived from
+    /// them serve the ingested schedule. All-or-nothing at the caller: this
+    /// method stores what it is given, and the mapping layer upstream refuses
+    /// partial ingests.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_schedule_of_record(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        sor: crate::memory::ScheduleOfRecord,
+    ) -> Result<(), StoreError>;
+
     /// The stranded man-hours on a hull.
     ///
     /// # Errors

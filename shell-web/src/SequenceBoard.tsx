@@ -17,12 +17,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  importSchedule,
   listActivities,
   type Activity,
   type AsOf,
+  type DeckStateRow,
   type Identity,
   type ReconciliationMismatch,
 } from "./api";
+import { ZoneLanes } from "./ZoneLanes";
 import { C, mh } from "./theme";
 
 type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
@@ -63,15 +66,22 @@ export default function SequenceBoard({
   vesselId,
   hullLabel,
   asOf,
+  spaces,
   onOpenSpace,
 }: {
   identity: Identity;
   vesselId: string;
   hullLabel: string;
   asOf: AsOf;
+  /** Per-space verdicts at the same instant — the zone lanes' gutters read them. */
+  spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
 }) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
+  const [asOfMs, setAsOfMs] = useState<number | null>(null);
+  const [boardView, setBoardView] = useState<"register" | "lanes">("register");
+  const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [source, setSource] = useState<string | null>(null);
   const [mismatches, setMismatches] = useState<ReconciliationMismatch[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +96,7 @@ export default function SequenceBoard({
     listActivities(identity, vesselId, asOf)
       .then((r) => {
         setActivities(r.activities);
+        setAsOfMs(r.as_of);
         setSource(r.schedule_source);
         setMismatches(r.reconciliation.mismatches);
       })
@@ -93,7 +104,7 @@ export default function SequenceBoard({
         setActivities(null);
         setError(String(e));
       });
-  }, [identity, vesselId, asOf]);
+  }, [identity, vesselId, asOf, reloadNonce]);
 
   const trades = useMemo(
     () => [...new Set((activities ?? []).map((a) => a.trade).filter((t) => t !== "—"))].sort(),
@@ -201,6 +212,81 @@ export default function SequenceBoard({
         )}
       </p>
 
+      {/* The board's two shapes, and the door schedules come in and out of.
+          Planning tool: the register reads, the lanes sequence, the import is
+          how a real P6 export becomes the thing on screen, and the export is
+          how what is on screen goes back to whoever plans in spreadsheets. */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+        <button style={chip(boardView === "register")} onClick={() => setBoardView("register")}>
+          Register
+        </button>
+        <button
+          style={chip(boardView === "lanes")}
+          onClick={() => setBoardView("lanes")}
+          title="Swim lanes per zone on one calendar — the cross-zone Gantt"
+        >
+          Zone lanes
+        </button>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+          {importMsg && <span style={{ fontSize: 11, color: importMsg.startsWith("✓") ? "#22c55e" : C.danger }}>{importMsg}</span>}
+          <label style={{ ...chip(false), display: "inline-flex", alignItems: "center", gap: 5 }} title="Import a Primavera P6 XER export as this hull's schedule of record. All-or-nothing: one rejected line refuses the file.">
+            ⭱ Import XER
+            <input
+              type="file"
+              accept=".xer,text/plain"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                void file.text().then((xer) =>
+                  importSchedule(identity, vesselId, file.name, xer)
+                    .then((r) => {
+                      setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);
+                      setReloadNonce((n) => n + 1);
+                    })
+                    .catch((err: unknown) => setImportMsg(String(err))),
+                );
+              }}
+            />
+          </label>
+          <button
+            style={chip(false)}
+            title="Download the register as CSV — every column, including executability and provenance."
+            onClick={() => {
+              const esc = (v: string) => `"${v.replaceAll('"', '""')}"`;
+              const lines = [
+                "code,name,work_order,compartment,reliability,trade,start,end,budget_mh,earned_mh,status,executability,source",
+                ...activities.map((a) =>
+                  [
+                    a.code, esc(a.name), a.work_order_code ?? "", a.compartment_no ?? "",
+                    a.compartment_reliability, a.trade,
+                    a.planned ? new Date(a.planned.start).toISOString() : "",
+                    a.planned ? new Date(a.planned.end).toISOString() : "",
+                    String(a.budget_hours), String(a.earned_hours), a.status,
+                    a.executability.verdict, esc(a.source_ref),
+                  ].join(","),
+                ),
+              ];
+              const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement("a");
+              link.href = url;
+              link.download = `register-${source ?? "generated"}.csv`;
+              link.click();
+              URL.revokeObjectURL(url);
+            }}
+          >
+            ⭳ Export CSV
+          </button>
+        </span>
+      </div>
+
+      {boardView === "lanes" && (
+        <ZoneLanes activities={activities} spaces={spaces} asOf={asOfMs} onOpenSpace={onOpenSpace} />
+      )}
+
+      {boardView === "register" && (<>
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
         <input
           value={search}
@@ -368,6 +454,7 @@ export default function SequenceBoard({
           </tbody>
         </table>
       </div>
+      </>)}
     </div>
   );
 }

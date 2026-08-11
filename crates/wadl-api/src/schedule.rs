@@ -65,19 +65,14 @@ pub fn schedule_of_record(label: &str, report: &XerIngestReport) -> ScheduleOfRe
     }
 }
 
-/// Parses an XER export and loads it as a hull's schedule of record.
+/// Parses an XER export into a schedule of record, without storing it.
 ///
 /// # Errors
 /// The rejection lines from the ingest, when any row could not be honestly
 /// accepted — a schedule of record is all-or-nothing, because a partially
 /// loaded schedule presenting as the whole one is exactly the lie the grading
 /// exists to prevent.
-pub fn load_xer(
-    store: &InMemoryStore,
-    vessel: VesselId,
-    label: &str,
-    input: &str,
-) -> Result<usize, String> {
+pub fn parse_xer(label: &str, input: &str) -> Result<ScheduleOfRecord, String> {
     let report = wadl_ingest::xer::ingest_xer(input, label);
     if !report.rejected.is_empty() {
         return Err(report
@@ -87,8 +82,21 @@ pub fn load_xer(
             .collect::<Vec<_>>()
             .join("; "));
     }
-    let sor = schedule_of_record(label, &report);
+    Ok(schedule_of_record(label, &report))
+}
+
+/// Parses an XER export and loads it as a hull's schedule of record.
+///
+/// # Errors
+/// See [`parse_xer`] — all-or-nothing, for the same reason.
+pub fn load_xer(
+    store: &InMemoryStore,
+    vessel: VesselId,
+    label: &str,
+    input: &str,
+) -> Result<usize, String> {
+    let sor = parse_xer(label, input)?;
     let count = sor.activities.len();
-    store.set_schedule_of_record(vessel, sor);
+    store.load_schedule_of_record(vessel, sor);
     Ok(count)
 }

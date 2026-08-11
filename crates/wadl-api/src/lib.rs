@@ -90,6 +90,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/vessels/:id/leverage", get(handlers::leverage))
         .route("/api/vessels/:id/issues", get(handlers::issues))
         .route(
+            "/api/vessels/:id/schedule-of-record",
+            post(handlers::import_schedule),
+        )
+        .route(
             "/api/vessels/:id/compartments/:no/decision",
             post(handlers::record_decision),
         )

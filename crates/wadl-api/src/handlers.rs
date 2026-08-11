@@ -954,6 +954,46 @@ pub(crate) async fn issues(
     })))
 }
 
+/// The import half of the schedule-of-record area: a P6 XER export, posted as
+/// text, becomes the hull's served register.
+///
+/// All-or-nothing: one rejected line refuses the whole import with the
+/// rejection reasons in the response, because a partially loaded schedule
+/// presenting as the whole one is the lie the ingest grading exists to
+/// prevent. The scope check runs first, so a foreign hull is not-found before
+/// the body is ever parsed.
+pub(crate) async fn import_schedule(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ImportSchedule>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let sor = crate::schedule::parse_xer(&body.label, &body.xer)
+        .map_err(|reasons| ApiError::OutOfRange(format!("XER rejected: {reasons}")))?;
+    let activities = sor.activities.len();
+    let edges = sor.edges.len();
+    state
+        .store
+        .set_schedule_of_record(&scope, vessel, sor)
+        .await?;
+    Ok(Json(json!({
+        "label": body.label,
+        "activities": activities,
+        "edges": edges,
+    })))
+}
+
+/// The body of a schedule-of-record import.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportSchedule {
+    /// Where the export came from, shown on the register as its source.
+    pub(crate) label: String,
+    /// The XER file, verbatim.
+    pub(crate) xer: String,
+}
+
 /// The distributed packages on a hull.
 pub(crate) async fn list_packages(
     State(state): State<AppState>,

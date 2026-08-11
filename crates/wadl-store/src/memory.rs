@@ -1360,10 +1360,10 @@ impl InMemoryStore {
 }
 
 impl InMemoryStore {
-    /// Loads an ingested schedule of record for a hull. Serving prefers it
-    /// over the generated register from the next read on; the screens do not
-    /// change, which is the whole point of the seam.
-    pub fn set_schedule_of_record(&self, vessel: VesselId, sor: ScheduleOfRecord) {
+    /// Loads an ingested schedule of record for a hull, unscoped — for boot
+    /// wiring (the serve binary's env hook) before any tenant exists. Request
+    /// paths go through the scoped trait method instead.
+    pub fn load_schedule_of_record(&self, vessel: VesselId, sor: ScheduleOfRecord) {
         self.schedule_of_record
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1561,6 +1561,17 @@ impl Repositories for InMemoryStore {
         }
         let activities = self.list_activities(scope, vessel).await?;
         Ok(schedule_edges_from(&activities))
+    }
+
+    async fn set_schedule_of_record(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        sor: ScheduleOfRecord,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.load_schedule_of_record(vessel, sor);
+        Ok(())
     }
 
     async fn schedule_source(

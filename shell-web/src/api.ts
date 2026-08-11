@@ -621,6 +621,23 @@ export interface ActivityRegister {
   activities: Activity[];
 }
 
+/** Imports a P6 XER export as the hull's schedule of record. All-or-nothing:
+ *  one rejected line refuses the whole file, with the reasons in the error. */
+export async function importSchedule(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  xer: string,
+): Promise<{ label: string; activities: number; edges: number }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, xer }),
+  });
+  if (!res.ok) throw new Error(`import → ${res.status}: ${await res.text()}`);
+  return (await res.json()) as { label: string; activities: number; edges: number };
+}
+
 export async function listActivities(
   id: Identity,
   vesselId: string,

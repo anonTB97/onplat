@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 import { listIssues, type AsOf, type Identity, type Issue } from "./api";
 import { C, fmtClear, mh } from "./theme";
 
-const KIND: Record<
+export const KIND: Record<
   Issue["kind"],
   { label: string; fg: string; bg: string; border: string }
 > = {
@@ -51,7 +51,7 @@ const fmtInstant = (ms: number): string =>
   new Date(ms).toISOString().slice(5, 16).replace("-", "/").replace("T", " ");
 
 /** What the issue is, in one line a planner can repeat in a meeting. */
-function claim(i: Issue): string {
+export function claim(i: Issue): string {
   switch (i.kind) {
     case "not_executable_as_planned":
       return `${i.activity} — ${i.name}`;
@@ -94,7 +94,7 @@ function evidence(i: Issue): string {
 }
 
 /** Where the fix lives: the space whose options panel answers this issue. */
-function fixSpace(i: Issue): string | null {
+export function fixSpace(i: Issue): string | null {
   switch (i.kind) {
     case "not_executable_as_planned":
     case "held_with_crews_booked":

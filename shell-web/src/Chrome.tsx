@@ -9,9 +9,10 @@
 // screenshot in the wrong hands or a decision taken against the wrong hull.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DeckStateRow, VesselSummary } from "./api";
+import type { DeckStateRow, Issue, VesselSummary } from "./api";
+import { claim, fixSpace, KIND } from "./IssuesBoard";
 import type { Horizon } from "./TimeControl";
-import { C, mh, READINESS_STYLE } from "./theme";
+import { C, mh } from "./theme";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -224,7 +225,9 @@ export function TopBar({
   persona,
   onPersona,
   rows,
+  issues,
   onJump,
+  onOpenIssues,
   outOfScope,
 }: {
   onCollapse: () => void;
@@ -235,7 +238,11 @@ export function TopBar({
   persona: Persona;
   onPersona: (p: Persona) => void;
   rows: DeckStateRow[];
+  /** The hull's issue board, ranked — the alert bell's currency. */
+  issues: Issue[];
   onJump: (compartment: string) => void;
+  /** Opens the Issues board (Conflicts & Risk). */
+  onOpenIssues: () => void;
   outOfScope: boolean;
 }) {
   const [menu, setMenu] = useState<"context" | "persona" | "alerts" | null>(null);
@@ -292,8 +299,11 @@ export function TopBar({
       }));
   }, [query, rows]);
 
-  const held = rows.filter((r) => r.readiness === "held");
-  const alerts = held.length + (outOfScope ? 1 : 0);
+  // The bell counts issues, not held spaces: the issue board already covers
+  // "held with crews booked" and adds the kinds a held-space count is blind to
+  // — broken plans, compound holds, strandings. One currency for "what needs a
+  // decision", shared with the Conflicts & Risk badge.
+  const alerts = issues.length + (outOfScope ? 1 : 0);
 
   return (
     <header
@@ -501,32 +511,50 @@ export function TopBar({
                 The hull in focus is not assigned to you — the API refuses its data.
               </div>
             )}
-            {held.length === 0 && !outOfScope && (
+            {issues.length === 0 && !outOfScope && (
               <p style={{ fontSize: 11.5, color: DIM, padding: "9px 12px", margin: 0 }}>
-                Nothing held. That is a positive statement from the engine, not an
-                absence of information.
+                No issues at this instant. That is a positive statement from the
+                engine and the register, not an absence of information.
               </p>
             )}
-            {held.map((r) => (
+            {issues.slice(0, 7).map((issue, idx) => {
+              const k = KIND[issue.kind];
+              const space = fixSpace(issue);
+              return (
+                <button
+                  key={`${issue.kind}-${idx}`}
+                  onClick={() => {
+                    // A spatial issue lands on the space with options open; a
+                    // schedule finding lands on the board itself.
+                    if (space) onJump(space);
+                    else onOpenIssues();
+                    setMenu(null);
+                  }}
+                  style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 12px", background: "transparent", border: "none", borderBottom: `1px solid ${LINE}`, borderLeft: `3px solid ${k.fg}`, cursor: "pointer", font: "inherit", color: C.text }}
+                >
+                  <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                    <span style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, padding: "1px 5px", borderRadius: 3, color: k.fg, background: k.bg, border: `1px solid ${k.border}` }}>
+                      {k.label}
+                    </span>
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: "#f87171", fontVariantNumeric: "tabular-nums" }}>
+                      {mh(issue.hours_at_risk)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#ccd1da", marginTop: 3 }}>{claim(issue)}</div>
+                </button>
+              );
+            })}
+            {issues.length > 0 && (
               <button
-                key={r.compartment.compartment_no}
                 onClick={() => {
-                  onJump(r.compartment.compartment_no);
+                  onOpenIssues();
                   setMenu(null);
                 }}
-                style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 12px", background: "transparent", border: "none", borderBottom: `1px solid ${LINE}`, borderLeft: `3px solid ${READINESS_STYLE.held.fg}`, cursor: "pointer", font: "inherit", color: C.text }}
+                style={{ display: "block", width: "100%", textAlign: "center", padding: "8px 12px", background: "transparent", border: "none", cursor: "pointer", font: "inherit", fontSize: 11.5, color: C.accent }}
               >
-                <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-                  <span style={{ fontFamily: "monospace", fontSize: 12 }}>{r.compartment.compartment_no}</span>
-                  <span style={{ marginLeft: "auto", fontSize: 11, color: READINESS_STYLE.held.fg }}>
-                    {mh(r.remaining_hours)} held
-                  </span>
-                </div>
-                <div style={{ fontSize: 11, color: DIM }}>
-                  {r.state} · cleared by {r.clearing_authority || "unnamed authority"}
-                </div>
+                All {issues.length} issues on the board →
               </button>
-            ))}
+            )}
           </div>
         )}
       </div>
@@ -613,11 +641,15 @@ export function ModuleRail({
   activeLabel,
   collapsed,
   onPick,
+  issueCount = 0,
 }: {
   modules: ModuleDef[];
   activeLabel: string;
   collapsed: boolean;
   onPick: (m: ModuleDef) => void;
+  /** Issues on the board — badged on Conflicts & Risk, the same currency as
+   * the alert bell. */
+  issueCount?: number;
 }) {
   return (
     <nav
@@ -677,6 +709,11 @@ export function ModuleRail({
                         navigation rail is worse than two tidy lines: a reader has
                         to hover to find out where they would be going. */}
                     <span style={{ flex: 1, lineHeight: 1.25 }}>{m.label}</span>
+                    {m.id === "leverage" && issueCount > 0 && (
+                      <span style={{ minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, background: "#dc2626", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff", fontVariantNumeric: "tabular-nums" }}>
+                        {issueCount}
+                      </span>
+                    )}
                     {/* A module with no view says so here rather than looking
                         identical to a built one and then disappointing. */}
                     {!m.built && (

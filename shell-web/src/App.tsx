@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   deckStates,
+  listIssues,
   listVessels,
   timeframe,
   type AsOf,
   type DeckStateRow,
+  type Issue,
   type Timeframe,
   type VesselSummary,
 } from "./api";
@@ -49,6 +51,7 @@ const DECK_EXPLORER = MODULES[1] as ModuleDef;
 export default function App() {
   const [vessels, setVessels] = useState<VesselSummary[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
+  const [issues, setIssues] = useState<Issue[]>([]);
   const [selected, setSelected] = useState<string>(PICKABLE_HULLS[0]?.id ?? "");
   const [module, setModule] = useState<ModuleDef>(DECK_EXPLORER);
   const [persona, setPersona] = useState<Persona>(PERSONAS[0] as Persona);
@@ -80,6 +83,12 @@ export default function App() {
     deckStates(DEMO_IDENTITY, selected, asOf)
       .then(setRows)
       .catch(() => setRows([]));
+    // The issue board, held here because two pieces of chrome spend it: the
+    // alert bell's count and the Conflicts & Risk rail badge. One fetch, one
+    // number — a bell and a badge that disagreed would be worse than neither.
+    listIssues(DEMO_IDENTITY, selected, asOf)
+      .then((r) => setIssues(r.issues))
+      .catch(() => setIssues([]));
   }, [selected, asOf]);
 
   // The hull's time frame. Re-read on hull change and never cached across hulls:
@@ -182,7 +191,12 @@ export default function App() {
           setModule(DECK_EXPLORER);
         }}
         rows={rows}
+        issues={issues}
         onJump={jump}
+        onOpenIssues={() => {
+          const leverage = MODULES.find((m) => m.id === "leverage");
+          if (leverage) setModule(leverage);
+        }}
         outOfScope={outOfScope}
       />
 
@@ -257,6 +271,7 @@ export default function App() {
           activeLabel={module.label}
           collapsed={collapsed}
           onPick={setModule}
+          issueCount={issues.length}
         />
 
         <main

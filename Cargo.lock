@@ -2210,6 +2210,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wadl-issues"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "uuid",
+ "wadl-domain",
+ "wadl-engine",
+]
+
+[[package]]
 name = "wadl-mitigate"
 version = "0.1.0"
 dependencies = [

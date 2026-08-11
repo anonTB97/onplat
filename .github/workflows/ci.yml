@@ -81,6 +81,10 @@ jobs:
       # door with no network on the ship.
       - name: build mitigation options for wasm
         run: cargo build -p wadl-mitigate --target wasm32-unknown-unknown
+      # Issues are joins of the register against the engine; the same offline
+      # reasoning applies to "can this execute as planned" as to "what opens it".
+      - name: build issue derivation for wasm
+        run: cargo build -p wadl-issues --target wasm32-unknown-unknown
 
   migrations:
     name: migrations + RLS on PostgreSQL

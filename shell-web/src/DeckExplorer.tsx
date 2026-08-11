@@ -270,15 +270,19 @@ export default function DeckExplorer({
   // Expected of anything that takes over the viewport, and the only way out if
   // the toggle scrolls off.
   useEffect(() => {
-    if (!fullScreen) return undefined;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (selected) setSelected(null);
-      else setFullScreen(false);
+      else if (fullScreen) setFullScreen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [fullScreen, selected]);
+
+  // Click-to-toggle: selecting the selected space again deselects it. Every
+  // canvas routes through this, so "how do I put it down" has one answer
+  // (this, or Esc) instead of none.
+  const toggleSelect = (no: string) => setSelected((prev) => (prev === no ? null : no));
 
   /**
    * Selects a space and moves the plan to its deck.
@@ -587,7 +591,7 @@ export default function DeckExplorer({
                 decks={decks}
                 selected={selected}
                 toneOf={toneOf}
-                onSelect={setSelected}
+                onSelect={toggleSelect}
                 cascade={cascadePath}
               />
             ) : (
@@ -698,6 +702,10 @@ export default function DeckExplorer({
                   zonesOn={zonesOn}
                   zones={zoneGeometry}
                   onPick={(deckCode, compartment) => {
+                    if (compartment === selected) {
+                      setSelected(null);
+                      return;
+                    }
                     setSelectedDeck(deckCode);
                     setSelected(compartment);
                     setRevealNonce((n) => n + 1);
@@ -709,7 +717,7 @@ export default function DeckExplorer({
                   rows={visible}
                   centreOrdinal={deckOrdinal}
                   selected={selected}
-                  onSelect={setSelected}
+                  onSelect={toggleSelect}
                   onDeck={setSelectedDeck}
                   toneOf={toneOf}
                   cascadeEdges={cascadeEdges}
@@ -719,7 +727,7 @@ export default function DeckExplorer({
                   sheet={sheet}
                   rows={onDeck}
                   selected={selected}
-                  onSelect={setSelected}
+                  onSelect={toggleSelect}
                   deckJumps={deckJumps}
                   onDeckJump={setSelectedDeck}
                   toneOf={toneOf}
@@ -744,7 +752,7 @@ export default function DeckExplorer({
                 <PlanView
                   rows={onDeck}
                   selected={selected}
-                  onSelect={setSelected}
+                  onSelect={toggleSelect}
                   toneOf={toneOf}
                   zoom={zoom || 1}
                   setZoom={setZoom}

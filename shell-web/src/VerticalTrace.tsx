@@ -237,7 +237,7 @@ export function VerticalTrace({
           <span style={{ color: STATE_STYLE.SUSPEND.fg, fontWeight: 400 }}>
             · violation focus — {involved.size === 1
               ? "the hold is in this space itself"
-              : `${involved.size} spaces on the hazard's route`}; everything else dimmed
+              : `${involved.size} spaces on the hazard's route`}; everything else dims
           </span>
         )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
@@ -395,29 +395,33 @@ export function VerticalTrace({
                   const inViolation = involved.has(no);
                   const dimmed = violationFocus && !inViolation;
                   const x = xOf(frame);
-                  const y = lane.top + 34 + (levels.get(no) ?? 0) * 20;
+                  // Marker chrome is divided by zoom so a chip keeps its
+                  // SCREEN size while the plate grows under it — zooming is
+                  // for reading the drawing, not for inflating the labels.
+                  const s = 1 / zoom;
+                  const y = lane.top + 34 * s + (levels.get(no) ?? 0) * 20 * s;
                   return (
                     <g
                       key={no}
                       onClick={() => onSelect(no)}
                       style={{ cursor: "pointer" }}
-                      opacity={dimmed ? 0.18 : 1}
+                      opacity={dimmed ? 0.45 : 1}
                     >
-                      <line x1={x} y1={y} x2={x} y2={lane.top + LANE_H} stroke={tone.fg} strokeWidth={0.7} opacity={0.4} />
+                      <line x1={x} y1={y} x2={x} y2={lane.top + LANE_H} stroke={tone.fg} strokeWidth={0.7 * s} opacity={0.4} />
                       {/* The violation's own spaces get a halo, so the route
                           reads even where lit and dimmed markers sit close. */}
                       {violationFocus && inViolation && (
                         <rect
-                          x={x - 44} y={y - 12} width={88} height={24} rx={5}
+                          x={x - 44 * s} y={y - 12 * s} width={88 * s} height={24 * s} rx={5 * s}
                           fill="none" stroke={isSel ? C.accent : STATE_STYLE.SUSPEND.fg}
-                          strokeWidth={1.2} opacity={0.75}
+                          strokeWidth={1.2 * s} opacity={0.75}
                         />
                       )}
                       <rect
-                        x={x - 40} y={y - 8} width={80} height={16} rx={3}
-                        fill="#0b0c0eE6" stroke={isSel ? C.accent : tone.border} strokeWidth={isSel ? 2 : 1}
+                        x={x - 40 * s} y={y - 8 * s} width={80 * s} height={16 * s} rx={3 * s}
+                        fill="#0b0c0eE6" stroke={isSel ? C.accent : tone.border} strokeWidth={(isSel ? 2 : 1) * s}
                       />
-                      <text x={x} y={y + 4} fill={tone.fg} fontSize={9} textAnchor="middle" fontFamily="monospace">
+                      <text x={x} y={y + 4 * s} fill={tone.fg} fontSize={9 * s} textAnchor="middle" fontFamily="monospace">
                         {no}
                       </text>
                     </g>

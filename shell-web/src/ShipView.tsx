@@ -348,7 +348,7 @@ export function ShipView({
                     <rect x={bandX} y={0} width={bandW} height={lanesH} fill={colour} opacity={0.06} />
                     <line x1={bandX} y1={0} x2={bandX} y2={lanesH} stroke={colour} strokeWidth={1} strokeDasharray="7 5" opacity={0.5} />
                     <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={lanesH} stroke={colour} strokeWidth={1} strokeDasharray="7 5" opacity={0.5} />
-                    <text x={bandX + 5} y={9} fill={colour} fontSize={9} fontWeight={700} letterSpacing={0.8}>
+                    <text x={bandX + 5} y={9} fill={colour} fontSize={9 / zoom} fontWeight={700} letterSpacing={0.8}>
                       {band.zone}
                     </text>
                   </g>
@@ -365,7 +365,7 @@ export function ShipView({
                 return (
                   <g key={`${o.a}-${o.b}`} pointerEvents="none">
                     <rect x={ox} y={0} width={ow} height={lanesH} fill="none" stroke="#f59e0b" strokeWidth={0.8} strokeDasharray="3 3" opacity={0.7} />
-                    <text x={ox + ow / 2} y={lanesH - 5} fill="#f59e0b" fontSize={8} fontWeight={700} textAnchor="middle">
+                    <text x={ox + ow / 2} y={lanesH - 5} fill="#f59e0b" fontSize={8 / zoom} fontWeight={700} textAnchor="middle">
                       {o.a} ∩ {o.b}
                     </text>
                   </g>
@@ -381,24 +381,28 @@ export function ShipView({
               const no = r.compartment.compartment_no;
               const tone = STATE_STYLE[r.state];
               const isSel = no === selected;
-              const y = c.y - BOX_H / 2;
+              // Divided by zoom: the footprint's WIDTH is hull geometry and
+              // grows with the drawing, but the strip height, text and strokes
+              // are labels and keep their screen size.
+              const sc = 1 / zoom;
+              const y = c.y - (BOX_H * sc) / 2;
               return (
                 <g key={no} onClick={() => onPick(r.compartment.deck_code, no)} style={{ cursor: "pointer" }}>
                   <title>
                     {`${no} — ${r.compartment.name}\n${r.state}${r.permits_work ? "" : " — refuses work"} · ${r.compartment.zone}${r.clearing_authority ? `\ncleared by ${r.clearing_authority}` : ""}`}
                   </title>
                   <rect
-                    x={c.x - boxHalfW} y={y} width={boxHalfW * 2} height={BOX_H} rx={2}
+                    x={c.x - boxHalfW} y={y} width={boxHalfW * 2} height={BOX_H * sc} rx={2 * sc}
                     fill={tone.fg} opacity={r.permits_work ? 0.1 : 0.26}
                   />
                   <rect
-                    x={c.x - boxHalfW} y={y} width={boxHalfW * 2} height={BOX_H} rx={2}
+                    x={c.x - boxHalfW} y={y} width={boxHalfW * 2} height={BOX_H * sc} rx={2 * sc}
                     fill="none"
                     stroke={isSel ? C.accent : tone.fg}
-                    strokeWidth={isSel ? 1.8 : r.permits_work ? 0.7 : 1.4}
+                    strokeWidth={(isSel ? 1.8 : r.permits_work ? 0.7 : 1.4) * sc}
                     opacity={r.permits_work && !isSel ? 0.55 : 1}
                   />
-                  <text x={c.x} y={y + BOX_H - 4} fill={tone.fg} fontSize={5.6} textAnchor="middle" fontFamily="monospace">
+                  <text x={c.x} y={y + BOX_H * sc - 4 * sc} fill={tone.fg} fontSize={5.6 * sc} textAnchor="middle" fontFamily="monospace">
                     {no}
                   </text>
                 </g>
@@ -414,24 +418,25 @@ export function ShipView({
                 const doomed = a.executability.verdict === "not_executable";
                 const isSel = p.compartment === selected;
                 const fg = doomed ? "#fca5a5" : STATUS_FG[a.status];
+                const sc = 1 / zoom;
                 const x = xOf(p.frame);
-                const y = top + 10 + p.level * 12;
+                const y = top + (10 + p.level * 12) * sc;
                 return (
                   <g key={a.activity_id} onClick={() => onPick(p.deckCode, p.compartment)} style={{ cursor: "pointer" }}>
                     <title>
                       {`${a.code} — ${a.name}\n${a.trade} · ${p.compartment} · ${a.status.replace("_", " ")}${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
                     </title>
                     <line
-                      x1={x} y1={y + 4} x2={x} y2={top + LANE_H - GUTTER - BOX_H}
-                      stroke={fg} strokeWidth={0.5} opacity={0.35}
+                      x1={x} y1={y + 4 * sc} x2={x} y2={top + LANE_H - GUTTER - BOX_H * sc}
+                      stroke={fg} strokeWidth={0.5 * sc} opacity={0.35}
                     />
                     <rect
-                      x={x - 28} y={y - 5} width={56} height={11} rx={2.5}
+                      x={x - 28 * sc} y={y - 5 * sc} width={56 * sc} height={11 * sc} rx={2.5 * sc}
                       fill={doomed ? "rgba(239,68,68,0.16)" : "#0b0c0eE6"}
                       stroke={isSel ? C.accent : doomed ? "#ef4444" : fg}
-                      strokeWidth={isSel ? 1.6 : doomed ? 1.2 : 0.8}
+                      strokeWidth={(isSel ? 1.6 : doomed ? 1.2 : 0.8) * sc}
                     />
-                    <text x={x} y={y + 3} fill={fg} fontSize={7} textAnchor="middle" fontFamily="monospace">
+                    <text x={x} y={y + 3 * sc} fill={fg} fontSize={7 * sc} textAnchor="middle" fontFamily="monospace">
                       {a.code}
                     </text>
                   </g>
@@ -443,8 +448,9 @@ export function ShipView({
             {ordered.map((deck) =>
               (perDeck.get(deck.code)?.more ?? []).map((m) => {
                 const top = laneTop.get(deck.code) ?? 0;
+                const sc = 1 / zoom;
                 const x = xOf(m.frame);
-                const y = top + 10 + MAX_CHIP_LEVELS * 12;
+                const y = top + (10 + MAX_CHIP_LEVELS * 12) * sc;
                 return (
                   <g
                     key={`${deck.code}-more-${m.frame}`}
@@ -452,8 +458,8 @@ export function ShipView({
                     style={{ cursor: "pointer" }}
                   >
                     <title>{`${m.codes.length} more here — zoom in to spread them out\n${m.codes.join(", ")}`}</title>
-                    <rect x={x - 13} y={y - 5} width={26} height={10} rx={2.5} fill="#0b0c0eE6" stroke="#6e7480" strokeWidth={0.8} />
-                    <text x={x} y={y + 3} fill="#94a3b8" fontSize={6.5} textAnchor="middle" fontFamily="monospace">
+                    <rect x={x - 13 * sc} y={y - 5 * sc} width={26 * sc} height={10 * sc} rx={2.5 * sc} fill="#0b0c0eE6" stroke="#6e7480" strokeWidth={0.8 * sc} />
+                    <text x={x} y={y + 3 * sc} fill="#94a3b8" fontSize={6.5 * sc} textAnchor="middle" fontFamily="monospace">
                       +{m.codes.length}
                     </text>
                   </g>

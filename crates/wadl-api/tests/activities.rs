@@ -148,14 +148,37 @@ async fn the_issue_board_is_ranked_and_typed() {
         assert!(hours <= previous, "not ranked worst-first");
         previous = hours;
     }
-    // The demo's two standing stories must both surface: crews held by the
-    // bus, and activities the coating/bus hazards make non-executable.
+    // The demo's standing stories must all surface: crews held by the bus,
+    // activities the coating/bus hazards make non-executable, and the
+    // deliberate overlap-into-a-cure the generated schedule edges carry.
     let kinds: Vec<&str> = issues
         .iter()
         .map(|i| i["kind"].as_str().unwrap_or_default())
         .collect();
     assert!(kinds.contains(&"held_with_crews_booked"), "{kinds:?}");
     assert!(kinds.contains(&"not_executable_as_planned"), "{kinds:?}");
+    assert!(kinds.contains(&"negative_lag"), "{kinds:?}");
+    // And the finding's codes must resolve in the register the same response
+    // family serves — a finding naming an unknown activity is noise.
+    let lag = issues
+        .iter()
+        .find(|i| i["kind"] == "negative_lag")
+        .expect("asserted present");
+    let (activities_status, activities) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{}/activities", world.cvn73.as_uuid()),
+    )
+    .await;
+    assert_eq!(activities_status, StatusCode::OK);
+    let codes: Vec<&str> = activities["activities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["code"].as_str().unwrap_or_default())
+        .collect();
+    assert!(codes.contains(&lag["pred"].as_str().unwrap()), "{lag}");
+    assert!(codes.contains(&lag["succ"].as_str().unwrap()), "{lag}");
     assert_eq!(
         body["hours_at_risk"].as_i64().unwrap(),
         issues

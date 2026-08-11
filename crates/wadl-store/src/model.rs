@@ -285,6 +285,23 @@ impl ActivitySummary {
     }
 }
 
+/// One dependency edge from the schedule of record, at the activity grain.
+///
+/// The raw material of schedule-quality findings: a negative lag lets the
+/// successor start before its predecessor finishes — legitimate as an overlap,
+/// and exactly where cure-window inversions hide.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ScheduleEdgeSummary {
+    /// Predecessor activity code.
+    pub pred_code: String,
+    /// Successor activity code.
+    pub succ_code: String,
+    /// Relationship kind as the scheduler writes it, e.g. `PR_FS`.
+    pub kind: String,
+    /// Lag in hours; negative means the successor starts early.
+    pub lag_hours: i64,
+}
+
 /// An append-only ledger record, as a surface reads it.
 ///
 /// Hashes are hex rather than bytes because the only consumers are a JSON API and

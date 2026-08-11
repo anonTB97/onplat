@@ -6,8 +6,8 @@ use wadl_plan::Package;
 
 use crate::error::StoreError;
 use crate::model::{
-    ActivitySummary, AuditRecord, CompartmentSummary, DeckSummary, PackageSummary, StrandedReport,
-    VesselSummary, WorkOrderSummary,
+    ActivitySummary, AuditRecord, CompartmentSummary, DeckSummary, PackageSummary,
+    ScheduleEdgeSummary, StrandedReport, VesselSummary, WorkOrderSummary,
 };
 use crate::scope::TenantScope;
 
@@ -67,6 +67,16 @@ pub trait Repositories: Send + Sync {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<Vec<ActivitySummary>, StoreError>;
+
+    /// The schedule of record's dependency edges between activities.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn list_schedule_edges(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<ScheduleEdgeSummary>, StoreError>;
 
     /// The stranded man-hours on a hull.
     ///

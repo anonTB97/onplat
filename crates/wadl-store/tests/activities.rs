@@ -149,3 +149,45 @@ async fn the_register_is_tenant_scoped() {
     let err = s.list_activities(&w.yard_scope(), w.navy_hull).await;
     assert!(err.is_err(), "a foreign hull's register must be not-found");
 }
+
+/// The generated schedule edges: deterministic, every code resolving in the
+/// register, the FS spine unremarkable, and exactly one deliberate negative
+/// lag — the overlap-into-a-cure inversion the demo board surfaces.
+#[tokio::test]
+async fn the_schedule_edges_resolve_and_carry_one_deliberate_inversion() {
+    let (store, world) = InMemoryStore::demo_at(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
+    let scope = world.yard_scope();
+    let a = store
+        .list_schedule_edges(&scope, world.cvn73)
+        .await
+        .unwrap();
+    let b = store
+        .list_schedule_edges(&scope, world.cvn73)
+        .await
+        .unwrap();
+    assert_eq!(a, b, "same seed, same edges");
+    assert!(!a.is_empty());
+
+    let register = store.list_activities(&scope, world.cvn73).await.unwrap();
+    let codes: std::collections::BTreeSet<&str> =
+        register.iter().map(|r| r.code.as_str()).collect();
+    for e in &a {
+        assert!(codes.contains(e.pred_code.as_str()), "{e:?}");
+        assert!(codes.contains(e.succ_code.as_str()), "{e:?}");
+        assert_ne!(e.pred_code, e.succ_code, "{e:?}");
+    }
+    let negative: Vec<_> = a.iter().filter(|e| e.lag_hours < 0).collect();
+    assert_eq!(negative.len(), 1, "{negative:?}");
+    let inversion = negative.first().unwrap();
+    let pred = register
+        .iter()
+        .find(|r| r.code == inversion.pred_code)
+        .unwrap();
+    assert_eq!(
+        pred.compartment_no
+            .as_ref()
+            .map(wadl_domain::CompartmentNo::as_str),
+        Some("3-160-2-Q"),
+        "the inversion starts at the coating story's space"
+    );
+}

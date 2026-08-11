@@ -22,7 +22,8 @@ use wadl_plan::{Package, Segment, SpaceWork};
 use crate::error::StoreError;
 use crate::model::{
     ActivityStatus, ActivitySummary, AuditRecord, CompartmentSummary, DeckSummary, PackageSummary,
-    Reliability, StrandedItem, StrandedReport, VesselSummary, WorkOrderSummary,
+    Reliability, ScheduleEdgeSummary, StrandedItem, StrandedReport, VesselSummary,
+    WorkOrderSummary,
 };
 use crate::repo::Repositories;
 use crate::scope::TenantScope;
@@ -1335,6 +1336,69 @@ impl InMemoryStore {
     }
 }
 
+/// The schedule of record's edges, generated from the register the same way
+/// the register is generated from the work orders — so every code resolves.
+///
+/// Two shapes, mirroring what a real P6 export carries:
+///
+/// * Consecutive slices of the same work item follow finish-to-start with no
+///   lag — the unremarkable spine of any schedule, and deliberately not a
+///   finding.
+/// * One **deliberate negative lag**, from the coating space's work into the
+///   next scheduled work in another space: the successor starts eight hours
+///   before its predecessor finishes — the overlap-into-a-cure inversion the
+///   sample XER carries (`A6010 → A4050`) and the schedule-quality issue
+///   exists to surface. Generated deterministically so the demo board always
+///   has one to show.
+fn schedule_edges_from(activities: &[ActivitySummary]) -> Vec<ScheduleEdgeSummary> {
+    let mut edges = Vec::new();
+    let work: Vec<&ActivitySummary> = activities.iter().filter(|a| !a.is_milestone).collect();
+    let mut by_order: BTreeMap<&str, Vec<&ActivitySummary>> = BTreeMap::new();
+    for a in &work {
+        if let Some(order) = a.work_order_code.as_deref() {
+            by_order.entry(order).or_default().push(a);
+        }
+    }
+    for slices in by_order.values() {
+        for pair in slices.windows(2) {
+            if let [pred, succ] = pair {
+                edges.push(ScheduleEdgeSummary {
+                    pred_code: pred.code.clone(),
+                    succ_code: succ.code.clone(),
+                    kind: "PR_FS".to_owned(),
+                    lag_hours: 0,
+                });
+            }
+        }
+    }
+    // The inversion starts at the coating story's *open* work — a finding into
+    // slices already finished would be true but toothless, and the board ranks
+    // by the successor's remaining hours.
+    let mut rest = work.iter();
+    let pred = rest.by_ref().find(|a| {
+        a.status != ActivityStatus::Complete
+            && a.compartment_no
+                .as_ref()
+                .is_some_and(|c| c.as_str() == "3-160-2-Q")
+    });
+    if let Some(pred) = pred {
+        let succ = rest.find(|a| {
+            a.status != ActivityStatus::Complete
+                && a.compartment_no.is_some()
+                && a.compartment_no != pred.compartment_no
+        });
+        if let Some(succ) = succ {
+            edges.push(ScheduleEdgeSummary {
+                pred_code: pred.code.clone(),
+                succ_code: succ.code.clone(),
+                kind: "PR_FS".to_owned(),
+                lag_hours: -8,
+            });
+        }
+    }
+    edges
+}
+
 #[async_trait::async_trait]
 impl Repositories for InMemoryStore {
     async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary> {
@@ -1436,6 +1500,15 @@ impl Repositories for InMemoryStore {
             ka.cmp(&kb).then_with(|| a.code.cmp(&b.code))
         });
         Ok(out)
+    }
+
+    async fn list_schedule_edges(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<ScheduleEdgeSummary>, StoreError> {
+        let activities = self.list_activities(scope, vessel).await?;
+        Ok(schedule_edges_from(&activities))
     }
 
     async fn stranded_hours(

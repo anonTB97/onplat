@@ -822,10 +822,9 @@ pub(crate) async fn leverage(
 ///
 /// Every row is a claim with evidence: a real engine refusal with crews booked,
 /// a compound hold straight from the options planner, an activity shown
-/// non-executable over its own window, or a stranding read off real segment
-/// topology. Schedule-quality findings (negative lags) join the board when an
-/// ingested schedule of record lands in the store — the derivation already
-/// takes the edges; the store does not hold them yet.
+/// non-executable over its own window, a stranding read off real segment
+/// topology, or a schedule-quality finding read off the schedule of record's
+/// own dependency edges.
 pub(crate) async fn issues(
     State(state): State<AppState>,
     Caller(scope): Caller,
@@ -867,7 +866,16 @@ pub(crate) async fn issues(
             downstream_segments: s.downstream_segments.len(),
         })
         .collect();
-    let issues = wadl_issues::derive(&world, &rows, &stranded, &[]);
+    let schedule_edges = state.store.list_schedule_edges(&scope, vessel).await?;
+    let edges: Vec<wadl_issues::ScheduleEdge<'_>> = schedule_edges
+        .iter()
+        .map(|e| wadl_issues::ScheduleEdge {
+            pred: &e.pred_code,
+            succ: &e.succ_code,
+            lag_hours: e.lag_hours,
+        })
+        .collect();
+    let issues = wadl_issues::derive(&world, &rows, &stranded, &edges);
     let hours_at_risk: i64 = issues.iter().map(|i| i.hours_at_risk().get()).sum();
     Ok(Json(json!({
         "as_of": at,

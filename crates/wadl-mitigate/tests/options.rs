@@ -33,7 +33,7 @@ use wadl_domain::time::Timestamp;
 use wadl_domain::units::{HopDepth, ManHours, Minutes};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Applies, DecisionState, Hazard, HazardKind, RuleEntry, RuleSet};
-use wadl_mitigate::{assess, leverage, Action, Confidence, SpaceLoad, World};
+use wadl_mitigate::{assess, leverage, triage, Action, Confidence, SpaceLoad, World};
 
 const T0: i64 = 1_778_649_300_000;
 const HOUR: i64 = 3_600_000;
@@ -694,6 +694,29 @@ proptest! {
             prop_assert!(plan.subject_state.permits_work());
             prop_assert!(plan.actions.len() >= 2, "a plan of one is an option");
         }
+    }
+
+    /// Triage is assess minus the price tags, and must never disagree with it:
+    /// same refusal, same holds, same "does anything single work", same plan
+    /// size. The issue board is built on triage precisely because this holds.
+    #[test]
+    fn triage_never_disagrees_with_assess(
+        hazards in proptest::collection::vec(any_hazard(), 1..5),
+        subject_idx in 0usize..8,
+    ) {
+        let f = Fixture::new(hazards);
+        let world = f.world(T0);
+        let subject = f.spaces[subject_idx].compartment.clone();
+        let a = assess(&world, &subject);
+        let t = triage(&world, &subject);
+        prop_assert_eq!(t.state, a.state);
+        prop_assert_eq!(t.booked, a.booked);
+        prop_assert_eq!(&t.holds, &a.holds);
+        prop_assert_eq!(t.single_action_opens, !a.options.is_empty());
+        prop_assert_eq!(
+            t.plan_actions,
+            a.combined.as_ref().map_or(0, |c| c.actions.len())
+        );
     }
 
     /// Property 4, generalised: the two entry points never disagree.

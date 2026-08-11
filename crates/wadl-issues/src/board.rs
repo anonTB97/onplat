@@ -21,7 +21,7 @@ use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::ManHours;
 use wadl_engine::DecisionState;
-use wadl_mitigate::{assess, World};
+use wadl_mitigate::{triage, World};
 
 use crate::{executability, Executability, Hull, Refusal};
 
@@ -185,17 +185,21 @@ impl Issue {
 /// The issues on one held space: compound when no single action opens it,
 /// otherwise held-with-crews. One issue per space, never both — the compound
 /// claim subsumes the held claim.
+///
+/// Built on [`wadl_mitigate::triage`] rather than `assess`: an issue is the
+/// claim, not the price tag, and a property test over in `wadl-mitigate` pins
+/// that the two can never disagree about the claims.
 fn space_issue(world: &World<'_>, compartment: &CompartmentNo, booked: ManHours) -> Option<Issue> {
-    let a = assess(world, compartment);
+    let a = triage(world, compartment);
     if a.state.permits_work() {
         return None;
     }
-    if a.is_compound() {
+    if !a.single_action_opens && a.holds.len() > 1 {
         return Some(Issue::CompoundHold {
             compartment: compartment.clone(),
             hours_at_risk: booked,
             holds: a.holds.len(),
-            plan_actions: a.combined.map_or(0, |plan| plan.actions.len()),
+            plan_actions: a.plan_actions,
         });
     }
     let blocking: Vec<_> = a.holds.iter().filter(|h| h.blocks()).collect();

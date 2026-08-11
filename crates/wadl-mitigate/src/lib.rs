@@ -566,19 +566,94 @@ fn candidates(world: &World<'_>, subject: &CompartmentNo, decision: &Decision) -
     out
 }
 
+/// Every space within the graph's maximum coupling reach of a seed set.
+///
+/// This is the load-bearing overapproximation behind every bound in this
+/// crate: a trace step exists only for a hazard whose origin reaches the
+/// subject through couplings within their hop limits, and a plain BFS that
+/// ignores propagation legality and per-edge limits can only find MORE spaces
+/// than the engine's traversal, never fewer. So a space outside the reach of
+/// every changed input provably keeps its verdict, and skipping its
+/// re-evaluation changes nothing but the bill.
+fn reach<'a>(
+    graph: &AdjacencyGraph,
+    seeds: impl Iterator<Item = &'a CompartmentNo>,
+) -> BTreeSet<CompartmentNo> {
+    let max_hops = graph.edges().map(|e| e.max_reach.get()).max().unwrap_or(0);
+    let mut adjacent: BTreeMap<&CompartmentNo, Vec<&CompartmentNo>> = BTreeMap::new();
+    for e in graph.edges() {
+        adjacent.entry(&e.from).or_default().push(&e.to);
+    }
+    let mut seen: BTreeSet<CompartmentNo> = seeds.cloned().collect();
+    let mut frontier: Vec<CompartmentNo> = seen.iter().cloned().collect();
+    for _ in 0..max_hops {
+        let mut next = Vec::new();
+        for space in &frontier {
+            for &neighbour in adjacent.get(space).into_iter().flatten() {
+                if seen.insert(neighbour.clone()) {
+                    next.push(neighbour.clone());
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    seen
+}
+
+/// The spaces whose verdicts a set of actions could possibly change.
+///
+/// Per action, the changed input is local: a discharge changes one hazard (its
+/// origin's reach), an interruption changes one coupling (its endpoints'
+/// reach), and a wait changes only what time changes — hazard-derived holds,
+/// so the reach of every hazard origin. Everything outside the union keeps its
+/// baseline verdict, by the argument on [`reach`].
+fn affected_by(world: &World<'_>, actions: &[Action]) -> BTreeSet<CompartmentNo> {
+    let mut seeds: Vec<&CompartmentNo> = Vec::new();
+    for action in actions {
+        match action {
+            Action::Discharge { origin, .. } => seeds.push(origin),
+            Action::Interrupt { from, to, .. } => {
+                seeds.push(from);
+                seeds.push(to);
+            }
+            Action::Wait { .. } => seeds.extend(world.hazards.iter().map(|h| &h.origin)),
+        }
+    }
+    reach(world.graph, seeds.into_iter())
+}
+
 /// Which spaces permit work in the world as it is.
 ///
-/// Computed once and reused: it is the same answer for every action, and
-/// recomputing it per action made the hull-wide board do twice the evaluations it
-/// needed for no gain.
-fn baseline(world: &World<'_>) -> BTreeMap<CompartmentNo, bool> {
-    (world.loads)(world.at)
+/// Computed once and shared — it is the same answer for every action and every
+/// subject — and bounded to the hazard shadow: a space no hazard can reach is
+/// open by construction and never evaluated. Exposed so `wadl-issues` can
+/// derive a whole board against one baseline instead of one per held space.
+pub struct Baseline {
+    open: BTreeMap<CompartmentNo, bool>,
+}
+
+impl Baseline {
+    fn is_open(&self, compartment: &CompartmentNo) -> bool {
+        self.open.get(compartment).copied().unwrap_or(true)
+    }
+}
+
+/// Computes the [`Baseline`] for a world. See the type for why it is shared.
+#[must_use]
+pub fn baseline(world: &World<'_>) -> Baseline {
+    let shadow = reach(world.graph, world.hazards.iter().map(|h| &h.origin));
+    let open = (world.loads)(world.at)
         .into_iter()
         .map(|load| {
-            let open = decide(world, &load.compartment).permits_work();
+            let open = !shadow.contains(&load.compartment)
+                || decide(world, &load.compartment).permits_work();
             (load.compartment, open)
         })
-        .collect()
+        .collect();
+    Baseline { open }
 }
 
 /// The consequence of a set of actions across every space in the register.
@@ -587,15 +662,18 @@ fn baseline(world: &World<'_>) -> BTreeMap<CompartmentNo, bool> {
 /// That is the whole reason [`World::loads`] is a function: booked work is
 /// window-filtered, so pricing a twelve-hour cure with today's bookings misstates
 /// the one number the ranking is built on.
-fn effect_of(
-    world: &World<'_>,
-    base: &BTreeMap<CompartmentNo, bool>,
-    actions: &[Action],
-) -> Effect {
+///
+/// Only the spaces in [`affected_by`]'s union are re-evaluated; the rest keep
+/// their baseline verdict and so can never enter `frees` or `closes`.
+fn effect_of(world: &World<'_>, base: &Baseline, actions: &[Action]) -> Effect {
+    let affected = affected_by(world, actions);
     let variant = variant_for(world, actions);
     let mut effect = Effect::default();
     for load in (world.loads)(variant.at) {
-        let before = base.get(&load.compartment).copied().unwrap_or(true);
+        if !affected.contains(&load.compartment) {
+            continue;
+        }
+        let before = base.is_open(&load.compartment);
         let after = variant
             .decide(world.rules, &load.compartment)
             .permits_work();
@@ -632,6 +710,17 @@ fn rank(options: &mut [Mitigation]) {
 /// planner would send someone.
 #[must_use]
 pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
+    assess_with(world, subject, &baseline(world))
+}
+
+/// [`assess`] against a caller-supplied [`Baseline`].
+///
+/// The baseline is the same answer for every subject on the hull, so a caller
+/// assessing many spaces — the issue board, a batch re-check — computes it once
+/// and passes it in; [`assess`] is the single-subject convenience that pays
+/// for its own.
+#[must_use]
+pub fn assess_with(world: &World<'_>, subject: &CompartmentNo, base: &Baseline) -> Assessment {
     let decision = decide(world, subject);
     let booked = (world.loads)(world.at)
         .into_iter()
@@ -652,7 +741,6 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
         return assessment;
     }
 
-    let base = baseline(world);
     for action in candidates(world, subject, &decision) {
         let after = variant_for(world, std::slice::from_ref(&action)).decide(world.rules, subject);
         if !after.permits_work() {
@@ -660,7 +748,7 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
         }
         assessment.options.push(Mitigation {
             confidence: action.confidence(),
-            effect: effect_of(world, &base, std::slice::from_ref(&action)),
+            effect: effect_of(world, base, std::slice::from_ref(&action)),
             subject_state: after.state,
             action,
         });
@@ -670,9 +758,63 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
     // would be noise: a planner with one thing to do does not need the plan that
     // does everything.
     if assessment.options.is_empty() {
-        assessment.combined = combined_for(world, &base, subject, &assessment.holds);
+        assessment.combined = combined_for(world, base, subject, &assessment.holds);
     }
     assessment
+}
+
+/// What an issue derivation needs to know about a space, and nothing more.
+///
+/// The verdicts of [`assess`] — is it refused, what holds it, would any single
+/// action open it, how many actions does the working plan need — without
+/// pricing a single effect across the hull. Pricing is what a planner reads on
+/// the options panel; an issue is the *claim*, and pricing every claim is what
+/// made deriving a board quadratic in the hull.
+#[derive(Debug, Clone)]
+pub struct Triage {
+    /// The space's current state.
+    pub state: DecisionState,
+    /// Man-hours booked in it at the instant.
+    pub booked: ManHours,
+    /// Every independent hold on it.
+    pub holds: Vec<Hold>,
+    /// Whether at least one single action demonstrably opens it.
+    pub single_action_opens: bool,
+    /// Actions in the cheapest working plan when nothing single does; 0 when
+    /// no plan was found (or none was needed).
+    pub plan_actions: usize,
+}
+
+/// Computes a [`Triage`] for one space. Agrees with [`assess`] by
+/// construction: same candidates, same verification, same plan search — only
+/// the pricing is skipped.
+#[must_use]
+pub fn triage(world: &World<'_>, subject: &CompartmentNo) -> Triage {
+    let decision = decide(world, subject);
+    let booked = (world.loads)(world.at)
+        .into_iter()
+        .find(|s| &s.compartment == subject)
+        .map_or(ManHours::ZERO, |s| s.booked);
+    let holds = holds_of(&decision);
+    let mut out = Triage {
+        state: decision.state,
+        booked,
+        holds,
+        single_action_opens: false,
+        plan_actions: 0,
+    };
+    if decision.permits_work() {
+        return out;
+    }
+    out.single_action_opens = candidates(world, subject, &decision).iter().any(|action| {
+        variant_for(world, std::slice::from_ref(action))
+            .decide(world.rules, subject)
+            .permits_work()
+    });
+    if !out.single_action_opens {
+        out.plan_actions = combined_plan(world, subject, &out.holds).map_or(0, |plan| plan.len());
+    }
+    out
 }
 
 /// The cheapest set of actions that together open a space no single action opens.
@@ -696,10 +838,33 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
 /// live and put spaces in `closes` for no reason.
 fn combined_for(
     world: &World<'_>,
-    base: &BTreeMap<CompartmentNo, bool>,
+    base: &Baseline,
     subject: &CompartmentNo,
     holds: &[Hold],
 ) -> Option<Combined> {
+    let actions = combined_plan(world, subject, holds)?;
+    let after = variant_for(world, &actions).decide(world.rules, subject);
+    let confidence = actions
+        .iter()
+        .map(Action::confidence)
+        .max_by_key(|c| c.rank())
+        .unwrap_or(Confidence::Computed);
+    Some(Combined {
+        effect: effect_of(world, base, &actions),
+        subject_state: after.state,
+        confidence,
+        actions,
+    })
+}
+
+/// The plan search behind [`combined_for`], returning the actions alone so the
+/// issue board can ask "does a plan exist, and how big is it" without paying
+/// for the pricing. Every returned plan has been shown to open the subject.
+fn combined_plan(
+    world: &World<'_>,
+    subject: &CompartmentNo,
+    holds: &[Hold],
+) -> Option<Vec<Action>> {
     let blocking: Vec<&Hold> = holds.iter().filter(|h| h.blocks()).collect();
     if blocking.len() < 2 {
         return None;
@@ -746,17 +911,7 @@ fn combined_for(
             if actions.len() < 2 {
                 return None;
             }
-            let confidence = actions
-                .iter()
-                .map(Action::confidence)
-                .max_by_key(|c| c.rank())
-                .unwrap_or(Confidence::Computed);
-            return Some(Combined {
-                effect: effect_of(world, base, &actions),
-                subject_state: after.state,
-                confidence,
-                actions,
-            });
+            return Some(actions);
         }
         // Still refused: the waited instant raised holds the original trace could
         // not show. Fold them in and try again.

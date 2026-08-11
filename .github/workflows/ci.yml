@@ -127,3 +127,27 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  web:
+    name: shell typecheck · unit tests · build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: shell-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: shell-web/package-lock.json
+      - run: npm ci
+      - name: typecheck
+        run: npx tsc --noEmit
+      # The camera invariants (cursor-fixed wheel zoom, both views) used to be
+      # guarded by one-off browser scripts; a browser script proves the build it
+      # ran against, these prove every build after it too.
+      - name: unit tests
+        run: npx vitest run
+      - name: build
+        run: npx vite build

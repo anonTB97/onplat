@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { clampZoom, planZoomAt, sheetZoomAt, wheelFactor } from "./camera";
 import {
   compartmentState,
   deckStates,
@@ -1064,29 +1065,11 @@ function SheetView({
       const cam = camRef.current;
       if (!cam) return;
       e.preventDefault();
-      // Trackpad pinch arrives as ctrl+wheel with fine deltas; give it more gain.
-      // deltaMode 1 is lines (Firefox wheel), scaled to roughly match pixels.
-      const dy = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaY;
-      const factor = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0022));
-      const zNew = Math.min(MAX_SHEET_ZOOM, Math.max(1, cam.z * factor));
+      // The cursor-fixed solve lives in camera.ts, where it is unit-tested.
+      const zNew = clampZoom(cam.z * wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey), MAX_SHEET_ZOOM);
       if (zNew === cam.z) return;
       const box = el.getBoundingClientRect();
-      const px = e.clientX - box.left;
-      const py = e.clientY - box.top;
-      // The sheet point under the cursor now…
-      const sheetX0 = cam.centre.x - cam.vw / 2 + px * cam.u;
-      const sheetY0 = cam.centre.y - cam.vh / 2 + py * cam.u;
-      // …stays under the cursor after the zoom. Solve for the new centre, then
-      // store it as a pan offset from the current one, so the existing clamp
-      // still governs where the camera may actually go.
-      const scaleN = cam.fit * zNew;
-      const boxHN = Math.min(cam.maxH, Math.max(150, cam.naturalH * zNew));
-      const cxN = sheetX0 + cam.boxW / scaleN / 2 - px / scaleN;
-      const cyN = sheetY0 + boxHN / scaleN / 2 - py / scaleN;
-      setPanRef.current({
-        x: cam.pan.x + (cxN - cam.centre.x),
-        y: cam.pan.y + (cyN - cam.centre.y),
-      });
+      setPanRef.current(sheetZoomAt(cam, e.clientX - box.left, e.clientY - box.top, zNew));
       setZoomRef.current(zNew);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -1509,18 +1492,14 @@ function PlanView({
       if (!svg) return;
       e.preventDefault();
       const cam = camRef.current;
-      const dy = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaY;
-      const factor = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0022));
-      const zNew = Math.min(4, Math.max(1, cam.zoom * factor));
+      // The cursor-fixed solve lives in camera.ts, where it is unit-tested.
+      const zNew = clampZoom(cam.zoom * wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey), 4);
       if (zNew === cam.zoom) return;
       const box = svg.getBoundingClientRect();
       // viewBox units per CSS pixel — uniform, because the aspect is preserved.
       const perPx = W / box.width;
-      const cx = (e.clientX - box.left) * perPx;
-      const cy = (e.clientY - box.top) * perPx;
-      const px0 = (cx - cam.pan.x) / cam.zoom;
-      const py0 = (cy - cam.pan.y) / cam.zoom;
-      setPanRef.current({ x: cx - px0 * zNew, y: cy - py0 * zNew });
+      const cursor = { x: (e.clientX - box.left) * perPx, y: (e.clientY - box.top) * perPx };
+      setPanRef.current(planZoomAt(cam, cursor, zNew));
       setZoomRef.current(zNew);
     };
     el.addEventListener("wheel", onWheel, { passive: false });

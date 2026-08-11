@@ -15,7 +15,7 @@
 // scheduled work the platform cannot place is exactly what a planner needs on
 // a list.
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   importSchedule,
   previewSchedule,
@@ -33,6 +33,18 @@ import { C, mh } from "./theme";
 
 type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
 
+/** The columns the reader may sort by. Absent = the server's schedule order. */
+type SortKey =
+  | "code" | "name" | "order" | "space" | "trade"
+  | "planned" | "exec" | "budget" | "earned" | "status";
+
+/** Worst first when ascending: the refusals are what sorting this column is for. */
+const EXEC_RANK: Record<string, number> = {
+  not_executable: 0,
+  unassessable: 1,
+  executable: 2,
+};
+
 const STATUS_LABEL: Record<Exclude<StatusFilter, "all">, { label: string; fg: string }> = {
   not_started: { label: "NOT STARTED", fg: "#94a3b8" },
   in_progress: { label: "IN PROGRESS", fg: "#3D6BFF" },
@@ -49,6 +61,22 @@ const fmtWindow = (w: { start: number; end: number } | null): string => {
 /** An instant, to the minute — refusals are priced to the minute, not the day. */
 const fmtInstant = (ms: number): string =>
   new Date(ms).toISOString().slice(5, 16).replace("-", "/").replace("T", " ");
+
+/** The as-of stamp an export's filename carries — a file found on a desktop
+ *  next month must say which instant it spoke for. */
+const stamp = (ms: number | null): string =>
+  ms === null ? "" : `-asof-${new Date(ms).toISOString().slice(0, 16).replace(/[:T]/g, "")}`;
+
+/** Client-side CSV download; the blob URL is revoked once clicked. */
+function downloadCsv(lines: string[], filename: string): void {
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
 /** The refusal, in one sentence a planner can act on. */
 const refusalTitle = (a: Activity): string => {
@@ -95,6 +123,8 @@ export default function SequenceBoard({
   const [status, setStatus] = useState<StatusFilter>("all");
   const [inWindowOnly, setInWindowOnly] = useState(false);
   const [notExecOnly, setNotExecOnly] = useState(false);
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 } | null>(null);
+  const [openEvidence, setOpenEvidence] = useState<string | null>(null);
 
   useEffect(() => {
     setError(null);
@@ -121,7 +151,7 @@ export default function SequenceBoard({
   // reader's own questions. The instant never does; it marks.
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return (activities ?? []).filter((a) => {
+    const filtered = (activities ?? []).filter((a) => {
       if (trade && a.trade !== trade) return false;
       if (status !== "all" && a.status !== status) return false;
       if (inWindowOnly && !a.in_window) return false;
@@ -132,7 +162,36 @@ export default function SequenceBoard({
         .toLowerCase()
         .includes(q);
     });
-  }, [activities, search, trade, status, inWindowOnly, notExecOnly]);
+    // Sorting is the reader's, and stable: no sort = the server's schedule
+    // order (planned start, then code). Missing values always sink so "no
+    // dates" never floats above the plan.
+    if (!sort) return filtered;
+    const value = (a: Activity): string | number | null => {
+      switch (sort.key) {
+        case "code": return a.code;
+        case "name": return a.name;
+        case "order": return a.work_order_code;
+        case "space": return a.compartment_no;
+        case "trade": return a.trade === "—" ? null : a.trade;
+        case "planned": return a.planned?.start ?? null;
+        case "exec": return EXEC_RANK[a.executability.verdict];
+        case "budget": return a.is_milestone ? null : a.budget_hours;
+        case "earned": return a.is_milestone ? null : a.earned_hours;
+        case "status": return a.is_milestone ? null : a.status;
+      }
+    };
+    return [...filtered].sort((a, b) => {
+      const va = value(a);
+      const vb = value(b);
+      if (va === null && vb === null) return 0;
+      if (va === null) return 1;
+      if (vb === null) return -1;
+      const cmp = typeof va === "number" && typeof vb === "number"
+        ? va - vb
+        : String(va).localeCompare(String(vb));
+      return cmp * sort.dir;
+    });
+  }, [activities, search, trade, status, inWindowOnly, notExecOnly, sort]);
 
   if (error) return <p style={{ color: C.danger }}>Register unavailable ({error}).</p>;
   if (!activities) return null;
@@ -284,16 +343,23 @@ export default function SequenceBoard({
                   ].join(","),
                 ),
               ];
-              const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-              const url = URL.createObjectURL(blob);
-              const link = document.createElement("a");
-              link.href = url;
-              link.download = `register-${source ?? "generated"}.csv`;
-              link.click();
-              URL.revokeObjectURL(url);
+              downloadCsv(lines, `register-${source ?? "generated"}${stamp(asOfMs)}.csv`);
             }}
           >
             ⭳ Export CSV
+          </button>
+          <button
+            style={chip(false)}
+            title="Download the schedule's dependency logic — pred, succ, kind, lag. Negative lags are the rows worth reading."
+            onClick={() => {
+              const lines = [
+                "pred_code,succ_code,kind,lag_hours",
+                ...edges.map((e) => [e.pred_code, e.succ_code, e.kind, String(e.lag_hours)].join(",")),
+              ];
+              downloadCsv(lines, `edges-${source ?? "generated"}${stamp(asOfMs)}.csv`);
+            }}
+          >
+            ⭳ Edges CSV
           </button>
           {source !== null && (
             <button
@@ -384,22 +450,50 @@ export default function SequenceBoard({
         <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 980 }}>
           <thead>
             <tr>
-              <th style={th}>Activity</th>
-              <th style={th}>Name</th>
-              <th style={th}>Work order</th>
-              <th style={th}>Space</th>
-              <th style={th}>Trade</th>
-              <th style={th}>Planned</th>
-              <th style={th}>Executable?</th>
-              <th style={{ ...th, textAlign: "right" }}>Budget</th>
-              <th style={{ ...th, textAlign: "right" }}>Earned</th>
-              <th style={th}>Status</th>
+              {(
+                [
+                  ["Activity", "code", false],
+                  ["Name", "name", false],
+                  ["Work order", "order", false],
+                  ["Space", "space", false],
+                  ["Trade", "trade", false],
+                  ["Planned", "planned", false],
+                  ["Executable?", "exec", false],
+                  ["Budget", "budget", true],
+                  ["Earned", "earned", true],
+                  ["Status", "status", false],
+                ] as [string, SortKey, boolean][]
+              ).map(([label, key, right]) => {
+                const active = sort?.key === key;
+                return (
+                  <th
+                    key={key}
+                    onClick={() =>
+                      // Cycle: schedule order → ascending → descending → back.
+                      setSort(
+                        !active ? { key, dir: 1 } : sort?.dir === 1 ? { key, dir: -1 } : null,
+                      )
+                    }
+                    title="Click to sort · third click restores schedule order"
+                    style={{
+                      ...th,
+                      textAlign: right ? "right" : "left",
+                      cursor: "pointer",
+                      color: active ? C.text : C.dim,
+                      userSelect: "none",
+                    }}
+                  >
+                    {label}
+                    {active && (sort?.dir === 1 ? " ↑" : " ↓")}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
             {rows.map((a) => (
+              <Fragment key={a.activity_id}>
               <tr
-                key={a.activity_id}
                 style={{
                   // Marked, not filtered: out-of-window rows dim, milestones read
                   // as events rather than work.
@@ -455,6 +549,7 @@ export default function SequenceBoard({
                 </td>
                 <td style={{ ...td, fontSize: 10, whiteSpace: "nowrap" }}>
                   {a.executability.verdict === "not_executable" ? (
+                    <>
                     <button
                       // The activity's own space when located, else the hold's
                       // origin — either way the click lands with options open.
@@ -474,6 +569,20 @@ export default function SequenceBoard({
                     >
                       NOT EXECUTABLE
                     </button>
+                    <button
+                      onClick={() =>
+                        setOpenEvidence(openEvidence === a.activity_id ? null : a.activity_id)
+                      }
+                      title="The evidence, in the open — the same facts the tooltip carries"
+                      style={{
+                        font: "inherit", fontSize: 9.5, cursor: "pointer", marginLeft: 4,
+                        padding: "2px 6px", borderRadius: 4, color: C.dim,
+                        background: "transparent", border: `1px solid ${C.line}`,
+                      }}
+                    >
+                      {openEvidence === a.activity_id ? "▾" : "▸"} why
+                    </button>
+                    </>
                   ) : a.executability.verdict === "unassessable" ? (
                     <span
                       style={{ color: C.dim }}
@@ -508,6 +617,48 @@ export default function SequenceBoard({
                   )}
                 </td>
               </tr>
+              {openEvidence === a.activity_id && a.executability.verdict === "not_executable" && (
+                <tr style={{ background: "rgba(239,68,68,0.04)" }}>
+                  <td colSpan={10} style={{ ...td, padding: "6px 12px 10px" }}>
+                    {/* The tooltip's facts, in the open: what refuses, where,
+                        from when, and how it clears — beside the door to the fix. */}
+                    <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center", fontSize: 11 }}>
+                      <span style={{ color: C.dim }}>
+                        refused from{" "}
+                        <b style={{ color: "#fca5a5", fontFamily: "monospace" }}>{fmtInstant(a.executability.at)}</b>{" "}
+                        inside {fmtWindow(a.planned)}
+                      </span>
+                      <span style={{ color: C.dim }}>
+                        rule <b style={{ color: "#ccd1da", fontFamily: "monospace" }}>{a.executability.rule_code}</b>
+                      </span>
+                      <span style={{ color: C.dim }}>
+                        {a.executability.hazard} @{" "}
+                        <button
+                          onClick={() => {
+                            const e = a.executability;
+                            if (e.verdict === "not_executable") onOpenSpace(e.origin);
+                          }}
+                          title="Open the hold's origin space"
+                          style={{
+                            font: "inherit", fontSize: 10.5, fontFamily: "monospace", cursor: "pointer",
+                            padding: "1px 5px", borderRadius: 4, color: "#ccd1da",
+                            background: "rgba(148,163,184,0.08)", border: `1px solid ${C.line}`,
+                          }}
+                        >
+                          {a.executability.origin}
+                        </button>
+                      </span>
+                      <span style={{ color: a.executability.earliest_clear ? "#f59e0b" : "#c4b5fd" }}>
+                        {a.executability.earliest_clear
+                          ? `clears ${fmtInstant(a.executability.earliest_clear)} on its own`
+                          : `clears on verification by ${a.executability.clearing_authority} — never on a clock`}
+                      </span>
+                      <span style={{ color: C.dim }}>{mh(a.remaining_hours)} at stake</span>
+                    </div>
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             ))}
           </tbody>
         </table>

@@ -161,7 +161,12 @@ pub enum Action {
     /// "wait" there would be the single most misleading thing this crate could
     /// say.
     Wait {
-        /// The instant the last hold expires.
+        /// The earliest instant at which waiting demonstrably opens the space.
+        ///
+        /// Settled by re-evaluation rather than read off the current trace: a
+        /// hazard whose start lies between now and the last expiry raises holds
+        /// the current trace cannot show, so the wait is pushed past *their*
+        /// expiries too — or withdrawn, if one of them never expires.
         until: Timestamp,
     },
     /// Interrupt the path the hazard travels — blank a duct, close a penetration,
@@ -466,6 +471,51 @@ fn holds_of(decision: &Decision) -> Vec<Hold> {
     out
 }
 
+/// How many times a wait may be pushed out — or a plan grown — by holds that only
+/// come live at the waited instant, before the search gives up.
+///
+/// Progress is guaranteed at every pass (a new discharge, or a strictly later
+/// expiry from a finite set of hazards), so this is a backstop against a modelling
+/// error, not a tuning knob.
+const SETTLE_CAP: usize = 32;
+
+/// The timed expiries of every step in a trace that stops work — `Some(latest)`
+/// only when *all* of them are on a clock. One verification-gated hold among them
+/// and no amount of time helps.
+fn blocking_expiry(decision: &Decision) -> Option<Timestamp> {
+    decision
+        .trace
+        .iter()
+        .filter(|s| !s.state.permits_work())
+        .map(|s| s.earliest_clear)
+        .collect::<Option<Vec<_>>>()
+        .and_then(|expiries| expiries.into_iter().max())
+}
+
+/// The earliest instant at which waiting alone opens the subject, or `None`.
+///
+/// Starts from the latest expiry among the holds visible now, then re-evaluates
+/// *at that instant*. A hazard whose start lies between now and that expiry raises
+/// holds the current trace cannot show, and a wait priced off the current trace
+/// alone would be offered on the strength of holds it dodged, not holds it
+/// outlived. Each pass either opens the space, pushes the wait to a later timed
+/// expiry, or meets a verification-gated hold — which no wait clears.
+fn settled_wait(world: &World<'_>, subject: &CompartmentNo, first: Timestamp) -> Option<Timestamp> {
+    let mut until = first;
+    for _ in 0..SETTLE_CAP {
+        let after = variant_for(world, &[Action::Wait { until }]).decide(world.rules, subject);
+        if after.permits_work() {
+            return Some(until);
+        }
+        let next = blocking_expiry(&after)?;
+        if next <= until {
+            return None;
+        }
+        until = next;
+    }
+    None
+}
+
 /// Candidate actions for a refused space, drawn from its own trace.
 ///
 /// Generated from the trace rather than from the whole world, which is what keeps
@@ -474,26 +524,18 @@ fn holds_of(decision: &Decision) -> Vec<Hold> {
 /// hull. Enumerating subsets of hazards and couplings would explode, and would be
 /// answering a different question anyway — a planner executes one action, not a
 /// combination found by search.
-fn candidates(decision: &Decision) -> Vec<Action> {
+fn candidates(world: &World<'_>, subject: &CompartmentNo, decision: &Decision) -> Vec<Action> {
     let mut out: Vec<Action> = Vec::new();
     let mut seen = BTreeSet::new();
 
-    // Waiting can only help where every hold that *stops work* is on a clock. One
-    // verification-gated hold among them and no amount of time helps.
-    //
     // Restricted to blocking steps deliberately. Spanning the whole trace let a
     // single advisory WARN with no clock — a condition flagged, not a hold —
-    // permanently suppress a wait that would have opened the space. Whether the
-    // wait actually works is still settled by re-evaluation rather than by this
-    // reasoning, so being generous here costs nothing.
-    let timed_expiry = decision
-        .trace
-        .iter()
-        .filter(|s| !s.state.permits_work())
-        .map(|s| s.earliest_clear)
-        .collect::<Option<Vec<_>>>()
-        .and_then(|expiries| expiries.into_iter().max());
-    if let Some(until) = timed_expiry {
+    // permanently suppress a wait that would have opened the space. The instant
+    // is then settled by re-evaluation, so a wait is only ever offered at an
+    // instant where it has been shown to work.
+    if let Some(until) =
+        blocking_expiry(decision).and_then(|first| settled_wait(world, subject, first))
+    {
         out.push(Action::Wait { until });
     }
 
@@ -611,7 +653,7 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
     }
 
     let base = baseline(world);
-    for action in candidates(&decision) {
+    for action in candidates(world, subject, &decision) {
         let after = variant_for(world, std::slice::from_ref(&action)).decide(world.rules, subject);
         if !after.permits_work() {
             continue;
@@ -641,7 +683,12 @@ pub fn assess(world: &World<'_>, subject: &CompartmentNo) -> Assessment {
 /// discharges would overstate the cost by a whole attendance.
 ///
 /// So: one `Wait` covering every timed hold, plus one `Discharge` per hazard whose
-/// hold has no clock.
+/// hold has no clock — then re-evaluated, and grown until it demonstrably works.
+/// The growing matters: a hazard whose start lies between now and the waited
+/// instant holds the space *then* without appearing in the trace *now*, so each
+/// pass folds in whatever the re-evaluation surfaces — a discharge for a
+/// verification-gated hold, a later instant for a timed one — until the space
+/// opens or nothing new can be done.
 ///
 /// Only the holds that actually stop work are considered. An advisory WARN alongside
 /// them needs nothing done: including it added a step to the plan that was not
@@ -657,41 +704,87 @@ fn combined_for(
     if blocking.len() < 2 {
         return None;
     }
-    let mut actions = Vec::new();
-    if let Some(until) = blocking.iter().filter_map(|h| h.earliest_clear).max() {
-        actions.push(Action::Wait { until });
-    }
+    let mut wait_until = blocking.iter().filter_map(|h| h.earliest_clear).max();
+    let mut discharges: Vec<Action> = Vec::new();
     let mut seen = BTreeSet::new();
+    let discharge = |seen: &mut BTreeSet<(CompartmentNo, String)>,
+                     discharges: &mut Vec<Action>,
+                     origin: &CompartmentNo,
+                     hazard: &str,
+                     actor: &str| {
+        if seen.insert((origin.clone(), hazard.to_owned())) {
+            discharges.push(Action::Discharge {
+                origin: origin.clone(),
+                hazard: hazard.to_owned(),
+                actor: actor.to_owned(),
+            });
+            true
+        } else {
+            false
+        }
+    };
     for hold in blocking.iter().filter(|h| h.earliest_clear.is_none()) {
-        if seen.insert((hold.origin.clone(), hold.hazard.clone())) {
-            actions.push(Action::Discharge {
-                origin: hold.origin.clone(),
-                hazard: hold.hazard.clone(),
-                actor: hold.clearing_authority.clone(),
+        discharge(
+            &mut seen,
+            &mut discharges,
+            &hold.origin,
+            &hold.hazard,
+            &hold.clearing_authority,
+        );
+    }
+    for _ in 0..SETTLE_CAP {
+        let actions: Vec<Action> = wait_until
+            .map(|until| Action::Wait { until })
+            .into_iter()
+            .chain(discharges.iter().cloned())
+            .collect();
+        let after = variant_for(world, &actions).decide(world.rules, subject);
+        if after.permits_work() {
+            // A plan of one is an option, and the single-action pass has already
+            // tried and rejected every one of these; reaching here with one
+            // action would only rediscover that rejection.
+            if actions.len() < 2 {
+                return None;
+            }
+            let confidence = actions
+                .iter()
+                .map(Action::confidence)
+                .max_by_key(|c| c.rank())
+                .unwrap_or(Confidence::Computed);
+            return Some(Combined {
+                effect: effect_of(world, base, &actions),
+                subject_state: after.state,
+                confidence,
+                actions,
             });
         }
+        // Still refused: the waited instant raised holds the original trace could
+        // not show. Fold them in and try again.
+        let mut progressed = false;
+        for step in after.trace.iter().filter(|s| !s.state.permits_work()) {
+            match step.earliest_clear {
+                None => {
+                    progressed |= discharge(
+                        &mut seen,
+                        &mut discharges,
+                        &step.source,
+                        &step.hazard,
+                        &step.clearing_authority,
+                    );
+                }
+                Some(expiry) => {
+                    if wait_until.is_none_or(|u| expiry > u) {
+                        wait_until = Some(expiry);
+                        progressed = true;
+                    }
+                }
+            }
+        }
+        if !progressed {
+            return None;
+        }
     }
-    if actions.len() < 2 {
-        return None;
-    }
-    let after = variant_for(world, &actions).decide(world.rules, subject);
-    // Reported only if it demonstrably works, on the same terms as every single
-    // option. It should always work — every hold has been addressed — but "should"
-    // is not the standard this crate holds itself to.
-    if !after.permits_work() {
-        return None;
-    }
-    let confidence = actions
-        .iter()
-        .map(Action::confidence)
-        .max_by_key(|c| c.rank())
-        .unwrap_or(Confidence::Computed);
-    Some(Combined {
-        effect: effect_of(world, base, &actions),
-        subject_state: after.state,
-        confidence,
-        actions,
-    })
+    None
 }
 
 /// The hull's highest-leverage actions, regardless of which space you started from.
@@ -712,7 +805,7 @@ pub fn leverage(world: &World<'_>) -> Vec<Mitigation> {
         if decision.permits_work() {
             continue;
         }
-        for action in candidates(&decision) {
+        for action in candidates(world, &load.compartment, &decision) {
             by_action.entry(action.key()).or_insert(action);
         }
     }

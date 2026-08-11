@@ -97,7 +97,10 @@ fn a_missing_compartment_udf_is_low_grade_none_not_a_guess() {
         .find(|a| a.code == "A4020")
         .unwrap();
     assert_eq!(
-        a4020.compartment_no.as_ref().map(|c| c.as_str()),
+        a4020
+            .compartment_no
+            .as_ref()
+            .map(wadl_domain::CompartmentNo::as_str),
         Some("3-160-2-Q")
     );
     assert_eq!(a4020.compartment_reliability, Reliability::High);

@@ -14,7 +14,7 @@
 // Nothing here applies anything. Accepting an option records that a named person
 // was shown these choices and took this one; the yard then does the work.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   mitigations,
   recordDecision,
@@ -100,6 +100,7 @@ export default function Mitigations({
   asOf,
   spaces,
   onOpenSpace,
+  reveal,
 }: {
   identity: Identity;
   vesselId: string;
@@ -113,12 +114,27 @@ export default function Mitigations({
    */
   spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
+  /** Bumped when the chrome routed someone here; brings the options into view. */
+  reveal?: number;
 }) {
   const [data, setData] = useState<Assessment | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reasonFor, setReasonFor] = useState<number | null>(null);
   const [reason, setReason] = useState("");
+
+  // Arriving from a detection path — an alert, a worst-space row, a leverage
+  // link, a work-order chip — lands with the options in view rather than below
+  // the fold of the trace. Ordinary marker clicks do not scroll: `reveal` only
+  // changes when the chrome routed someone here, and each routing scrolls once.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const seenReveal = useRef(0);
+  useEffect(() => {
+    if (!reveal || reveal === seenReveal.current || !data) return;
+    seenReveal.current = reveal;
+    if (data.state === "ALLOW" || data.state === "WARN") return;
+    rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [reveal, data]);
 
   useEffect(() => {
     setError(null);
@@ -206,7 +222,7 @@ export default function Mitigations({
   }
 
   return (
-    <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+    <div ref={rootRef} style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
       <div
         style={{
           fontSize: 10,

@@ -15,6 +15,7 @@ import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./Rea
 import { SelectorRail } from "./DeckRail";
 import { VerticalTrace } from "./VerticalTrace";
 import Mitigations from "./Mitigations";
+import { MARKING_H } from "./Chrome";
 import type { Altitude as ChromeAltitude } from "./Chrome";
 import { frameToX, layoutPlan, packLanes, xToFrame } from "./deckGeometry";
 import {
@@ -146,6 +147,19 @@ export default function DeckExplorer({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [hoverFrame, setHoverFrame] = useState<number | null>(null);
   const dragging = useRef<{ x: number; y: number } | null>(null);
+  // The window height, tracked so the full-screen plate budgets against the real
+  // viewport rather than a guess made at authoring time.
+  const [winH, setWinH] = useState(() => window.innerHeight);
+  useEffect(() => {
+    const onResize = () => setWinH(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  // Bumped when the chrome routes someone to a space — an alert, a worst-space
+  // row, a leverage link — so the options panel can bring the fix into view.
+  // Plain marker clicks do not bump it; a reader browsing the plan has not asked
+  // to be scrolled anywhere.
+  const [revealNonce, setRevealNonce] = useState(0);
 
   // The hull's register, and the selection reset that belongs to changing hulls.
   // Deliberately NOT keyed on `asOf`: the deck list is time-invariant, and folding
@@ -210,19 +224,23 @@ export default function DeckExplorer({
     setSelected(focusCompartment);
     setZoneFilter(null);
     onAltitude("compartment");
+    setRevealNonce((n) => n + 1);
     onFocused();
   }, [focusCompartment, rows, onAltitude, onFocused]);
 
-  // Esc leaves full screen. Expected of anything that takes over the viewport,
-  // and the only way out if the toggle scrolls off.
+  // Esc backs out one layer at a time: the drawer first, then full screen.
+  // Expected of anything that takes over the viewport, and the only way out if
+  // the toggle scrolls off.
   useEffect(() => {
     if (!fullScreen) return undefined;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setFullScreen(false);
+      if (e.key !== "Escape") return;
+      if (selected) setSelected(null);
+      else setFullScreen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fullScreen]);
+  }, [fullScreen, selected]);
 
   /**
    * Selects a space and moves the plan to its deck.
@@ -309,17 +327,24 @@ export default function DeckExplorer({
     [visible, selectedDeck],
   );
 
+  // The plate's height budget: a panel in the page normally; in full screen the
+  // real window, minus the markings and the canvas chrome around the plate.
+  const sheetMaxH = fullScreen ? Math.max(320, winH - 2 * MARKING_H - 200) : SHEET_BOX_H;
+
   const deckOrdinal = decks.find((d) => d.code === selectedDeck)?.ordinal ?? 0;
   const deckLabel = decks.find((d) => d.code === selectedDeck)?.label ?? "—";
   const selectedRow = rows.find((r) => r.compartment.compartment_no === selected);
   const sheet = sheetForDeck(selectedDeck);
 
   // Reset the framing on any change that moves the camera. Zero means "not
-  // framed" and the sheet view resolves it to a readable default.
+  // framed" and the sheet view resolves it to a readable default. Full screen is
+  // deliberately NOT in this list: it used to be, and entering it threw away the
+  // exact framing the reader had just asked to see bigger. The camera clamp
+  // re-fits the kept framing to the new viewport instead.
   useEffect(() => {
     setZoom(0);
     setPan({ x: 0, y: 0 });
-  }, [selectedDeck, view, mode, fullScreen]);
+  }, [selectedDeck, view, mode]);
 
   // The drawing needs a plate; fall back to the schematic rather than showing an
   // empty frame for a deck whose plate has no frame axis.
@@ -493,7 +518,26 @@ export default function DeckExplorer({
           />
         )}
 
-        <div style={{ flex: "1 1 640px", minWidth: 380 }}>
+        <div
+          style={
+            fullScreen
+              ? {
+                  // A real takeover, not a taller box. The handling markings stay
+                  // — they are fixed at z 50 and this sits under them — and
+                  // everything else yields.
+                  position: "fixed",
+                  top: MARKING_H,
+                  left: 0,
+                  right: 0,
+                  bottom: MARKING_H,
+                  zIndex: 45,
+                  background: C.bg,
+                  padding: "12px 16px",
+                  overflow: "auto",
+                }
+              : { flex: "1 1 640px", minWidth: 380 }
+          }
+        >
           {altitude !== "compartment" ? (
             rollup ? (
               <ReadinessAltitude
@@ -618,7 +662,7 @@ export default function DeckExplorer({
                   setHoverFrame={setHoverFrame}
                   cascadeEdges={cascadeEdges}
                   overlay={overlay}
-                  tall={fullScreen}
+                  maxH={sheetMaxH}
                 />
               ) : (
                 <PlanView
@@ -685,45 +729,131 @@ export default function DeckExplorer({
               background: "#121316",
             }}
           >
+            <TracePanel
+              row={selectedRow ?? null}
+              decision={decision}
+              asOf={asOf}
+              identity={identity}
+              vesselId={vesselId}
+              rows={rows}
+              onOpenSpace={openSpace}
+              reveal={revealNonce}
+            />
+          </aside>
+        )}
+
+        {/* In full screen the trace and its options ride along as a drawer.
+            Losing them was the old behaviour, and it meant the one presentation a
+            supervisor actually stands in front of had no explanation of a held
+            space and no route to a fix. Same component as the aside — a second
+            implementation is how the two would start disagreeing. */}
+        {fullScreen && altitude === "compartment" && selectedRow && (
+          <div
+            style={{
+              position: "fixed",
+              top: MARKING_H,
+              right: 0,
+              bottom: MARKING_H,
+              width: 400,
+              maxWidth: "92vw",
+              zIndex: 46,
+              background: "#121316",
+              borderLeft: `1px solid ${LINE}`,
+              boxShadow: "-14px 0 34px rgba(0,0,0,0.55)",
+              overflowY: "auto",
+              padding: 14,
+            }}
+          >
+            <button
+              onClick={() => setSelected(null)}
+              title="Close (Esc)"
+              style={{
+                float: "right", font: "inherit", fontSize: 12, cursor: "pointer",
+                background: "transparent", color: DIM, border: `1px solid ${LINE}`,
+                borderRadius: 5, padding: "2px 8px",
+              }}
+            >
+              ✕
+            </button>
+            <TracePanel
+              row={selectedRow}
+              decision={decision}
+              asOf={asOf}
+              identity={identity}
+              vesselId={vesselId}
+              rows={rows}
+              onOpenSpace={openSpace}
+              reveal={revealNonce}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+/**
+ * The decision trace and its options — why the space is in its state, and what
+ * would change it.
+ *
+ * One component because it renders in two homes: the aside beside the plan, and
+ * the slide-in drawer over the full-screen canvas. Two implementations is how
+ * the drawer's answer and the panel's answer would start to differ.
+ */
+function TracePanel({
+  row, decision, asOf, identity, vesselId, rows, onOpenSpace, reveal,
+}: {
+  row: DeckStateRow | null;
+  decision: Decision | null;
+  asOf: AsOf;
+  identity: Identity;
+  vesselId: string;
+  rows: DeckStateRow[];
+  onOpenSpace: (compartment: string) => void;
+  reveal: number;
+}) {
+  return (
+    <>
             <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: DIM }}>
               Decision trace
             </div>
-            {!selectedRow && (
+            {!row && (
               <p style={{ color: DIM, fontSize: 12.5, marginTop: 8 }}>
                 Select a compartment to see why it is in{" "}
                 {asOf === null ? "its current state" : "that state at this instant"} — every rule
                 that fired, the path the hazard took, and who may clear it.
               </p>
             )}
-            {selectedRow && (
+            {row && (
               <>
                 <div style={{ marginTop: 6, display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontFamily: "monospace" }}>{selectedRow.compartment.compartment_no}</span>
-                  <span style={{ color: STATE_STYLE[selectedRow.state].fg, fontWeight: 700, fontSize: 12 }}>
-                    {selectedRow.state}
+                  <span style={{ fontFamily: "monospace" }}>{row.compartment.compartment_no}</span>
+                  <span style={{ color: STATE_STYLE[row.state].fg, fontWeight: 700, fontSize: 12 }}>
+                    {row.state}
                   </span>
                   <span
-                    style={{ fontSize: 10, fontWeight: 700, color: OVERLAY_STYLE[overlayBucket(selectedRow)].fg }}
-                    title={OVERLAY_STYLE[overlayBucket(selectedRow)].gloss}
+                    style={{ fontSize: 10, fontWeight: 700, color: OVERLAY_STYLE[overlayBucket(row)].fg }}
+                    title={OVERLAY_STYLE[overlayBucket(row)].gloss}
                   >
-                    {OVERLAY_STYLE[overlayBucket(selectedRow)].label}
+                    {OVERLAY_STYLE[overlayBucket(row)].label}
                   </span>
                 </div>
-                <div style={{ fontSize: 12.5, color: DIM }}>{selectedRow.compartment.name}</div>
+                <div style={{ fontSize: 12.5, color: DIM }}>{row.compartment.name}</div>
                 <div style={{ fontSize: 11, color: DIM, marginTop: 2 }}>
-                  {selectedRow.compartment.zone} · {selectedRow.compartment.category}
-                  {selectedRow.compartment.frame !== null && ` · Fr ${selectedRow.compartment.frame}`}
-                  {` · ${selectedRow.compartment.side}`}
+                  {row.compartment.zone} · {row.compartment.category}
+                  {row.compartment.frame !== null && ` · Fr ${row.compartment.frame}`}
+                  {` · ${row.compartment.side}`}
                 </div>
 
-                {selectedRow.work_order_codes.length > 0 && (
+                {row.work_order_codes.length > 0 && (
                   <div style={{ marginTop: 9, paddingTop: 9, borderTop: `1px solid ${LINE}` }}>
                     <div style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>
                       Work in this space
                     </div>
-                    <div style={{ fontSize: 12, marginTop: 3 }}>{selectedRow.work_order_codes.join(", ")}</div>
+                    <div style={{ fontSize: 12, marginTop: 3 }}>{row.work_order_codes.join(", ")}</div>
                     <div style={{ fontSize: 11, color: DIM }}>
-                      {selectedRow.trades.join(" · ")} — {selectedRow.remaining_hours.toLocaleString()} MH remaining
+                      {row.trades.join(" · ")} — {row.remaining_hours.toLocaleString()} MH remaining
                     </div>
                   </div>
                 )}
@@ -769,17 +899,15 @@ export default function DeckExplorer({
                 <Mitigations
                   identity={identity}
                   vesselId={vesselId}
-                  compartment={selectedRow.compartment.compartment_no}
+                  compartment={row.compartment.compartment_no}
                   asOf={asOf}
                   spaces={rows}
-                  onOpenSpace={openSpace}
+                  onOpenSpace={onOpenSpace}
+                  reveal={reveal}
                 />
               </>
             )}
-          </aside>
-        )}
-      </div>
-    </div>
+    </>
   );
 }
 
@@ -873,7 +1001,7 @@ function ReadinessAltitude({
  */
 function SheetView({
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
-  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, tall,
+  dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH,
 }: {
   sheet: DeckSheet;
   rows: DeckStateRow[];
@@ -892,7 +1020,9 @@ function SheetView({
   setHoverFrame: (f: number | null) => void;
   cascadeEdges: [string, string][];
   overlay: boolean;
-  tall: boolean;
+  /** Height budget in px. The caller owns this because only it knows whether the
+   *  view is a panel in a page or a real full-screen fill of the viewport. */
+  maxH: number;
 }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<string | null>(null);
@@ -912,9 +1042,59 @@ function SheetView({
     return () => ro.disconnect();
   }, []);
 
+  // Wheel and pinch zoom, centred on the cursor — the gesture every reader tries
+  // first, and until now the one thing the canvas did not do.
+  //
+  // A native non-passive listener rather than React's onWheel, because the page
+  // must not scroll out from under the gesture and a passive listener cannot
+  // prevent that. The camera state is read through a ref so the listener binds
+  // once instead of re-attaching every render.
+  const camRef = useRef<{
+    z: number; centre: { x: number; y: number }; vw: number; vh: number; u: number;
+    fit: number; naturalH: number; boxW: number; maxH: number; pan: { x: number; y: number };
+  } | null>(null);
+  const setZoomRef = useRef(setZoom);
+  const setPanRef = useRef(setPan);
+  setZoomRef.current = setZoom;
+  setPanRef.current = setPan;
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return undefined;
+    const onWheel = (e: WheelEvent) => {
+      const cam = camRef.current;
+      if (!cam) return;
+      e.preventDefault();
+      // Trackpad pinch arrives as ctrl+wheel with fine deltas; give it more gain.
+      // deltaMode 1 is lines (Firefox wheel), scaled to roughly match pixels.
+      const dy = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaY;
+      const factor = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0022));
+      const zNew = Math.min(MAX_SHEET_ZOOM, Math.max(1, cam.z * factor));
+      if (zNew === cam.z) return;
+      const box = el.getBoundingClientRect();
+      const px = e.clientX - box.left;
+      const py = e.clientY - box.top;
+      // The sheet point under the cursor now…
+      const sheetX0 = cam.centre.x - cam.vw / 2 + px * cam.u;
+      const sheetY0 = cam.centre.y - cam.vh / 2 + py * cam.u;
+      // …stays under the cursor after the zoom. Solve for the new centre, then
+      // store it as a pan offset from the current one, so the existing clamp
+      // still governs where the camera may actually go.
+      const scaleN = cam.fit * zNew;
+      const boxHN = Math.min(cam.maxH, Math.max(150, cam.naturalH * zNew));
+      const cxN = sheetX0 + cam.boxW / scaleN / 2 - px / scaleN;
+      const cyN = sheetY0 + boxHN / scaleN / 2 - py / scaleN;
+      setPanRef.current({
+        x: cam.pan.x + (cxN - cam.centre.x),
+        y: cam.pan.y + (cyN - cam.centre.y),
+      });
+      setZoomRef.current(zNew);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   const cal = sheet.calibration;
   const { width: W, height: H } = sheet;
-  const maxH = tall ? 820 : SHEET_BOX_H;
   const naturalH = Math.max(1, boxW * (H / W));
   const fit = boxW / W;
 
@@ -985,6 +1165,10 @@ function SheetView({
   if (!cal) return null;
 
   const showLabels = scale >= READABLE_SCALE;
+
+  // The camera as of this render, readable from the wheel listener without
+  // re-binding it every frame.
+  camRef.current = { z, centre, vw, vh, u, fit, naturalH, boxW, maxH, pan };
 
   // Pins sit at their true frame and side; their LABELS get fanned. Same lane
   // packing as the schematic, but measured in the only unit that decides a label
@@ -1134,6 +1318,21 @@ function SheetView({
                   <g stroke={OVERLAY_STYLE.stop.fg} strokeWidth={2.6 * u} strokeLinecap="round">
                     <line x1={at.x - 8 * u} y1={at.y - 8 * u} x2={at.x + 8 * u} y2={at.y + 8 * u} />
                     <line x1={at.x + 8 * u} y1={at.y - 8 * u} x2={at.x - 8 * u} y2={at.y + 8 * u} />
+                  </g>
+                )}
+                {/* A held space has a computed route out, and the plan itself
+                    says so — a wrench beside the pin, not a fact buried in a
+                    panel the reader has not opened yet. */}
+                {r.readiness === "held" && (
+                  <g>
+                    <title>Held — mitigation options exist. Click for the fix.</title>
+                    <circle
+                      cx={at.x + 12 * u} cy={at.y - 12 * u} r={7.5 * u}
+                      fill="#0b0c0e" fillOpacity={0.95} stroke={tone.fg} strokeWidth={1.3 * u}
+                    />
+                    <text x={at.x + 12 * u} y={at.y - 9 * u} fill={tone.fg} fontSize={9 * u} textAnchor="middle">
+                      ⚒
+                    </text>
                   </g>
                 )}
                 {label && (() => {
@@ -1291,6 +1490,43 @@ function PlanView({
   );
   const H = layout.height;
 
+  // Wheel zoom under the cursor. Same non-passive-listener pattern as SheetView,
+  // for the same reason: a passive listener cannot stop the page scrolling out
+  // from under the gesture. Camera here is translate(pan)·scale(zoom) in viewBox
+  // units, so keeping the cursor's point fixed is the standard solve.
+  const wheelRef = useRef<HTMLDivElement>(null);
+  const camRef = useRef({ zoom, pan });
+  camRef.current = { zoom, pan };
+  const setZoomRef = useRef(setZoom);
+  const setPanRef = useRef(setPan);
+  setZoomRef.current = setZoom;
+  setPanRef.current = setPan;
+  useEffect(() => {
+    const el = wheelRef.current;
+    if (!el) return undefined;
+    const onWheel = (e: WheelEvent) => {
+      const svg = el.querySelector("svg");
+      if (!svg) return;
+      e.preventDefault();
+      const cam = camRef.current;
+      const dy = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaY;
+      const factor = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0022));
+      const zNew = Math.min(4, Math.max(1, cam.zoom * factor));
+      if (zNew === cam.zoom) return;
+      const box = svg.getBoundingClientRect();
+      // viewBox units per CSS pixel — uniform, because the aspect is preserved.
+      const perPx = W / box.width;
+      const cx = (e.clientX - box.left) * perPx;
+      const cy = (e.clientY - box.top) * perPx;
+      const px0 = (cx - cam.pan.x) / cam.zoom;
+      const py0 = (cy - cam.pan.y) / cam.zoom;
+      setPanRef.current({ x: cx - px0 * zNew, y: cy - py0 * zNew });
+      setZoomRef.current(zNew);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, flexWrap: "wrap" }}>
@@ -1319,6 +1555,7 @@ function PlanView({
         </span>
       </div>
 
+      <div ref={wheelRef}>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         style={{ width: "100%", display: "block", cursor: dragging.current ? "grabbing" : "grab", touchAction: "none" }}
@@ -1410,11 +1647,22 @@ function PlanView({
                 {r.rules_fired.length > 0 && (
                   <circle cx={x + MARKER_W / 2 - 6} cy={y - MARKER_H / 2 + 3} r={5} fill={tone.fg} />
                 )}
+                {/* Same advertisement as the plate view: held means a computed
+                    route out exists, and the marker itself says so. */}
+                {r.readiness === "held" && (
+                  <g>
+                    <title>Held — mitigation options exist. Click for the fix.</title>
+                    <text x={x - MARKER_W / 2 + 8} y={y - MARKER_H / 2 - 2} fill={tone.fg} fontSize={9} textAnchor="middle">
+                      ⚒
+                    </text>
+                  </g>
+                )}
               </g>
             );
           })}
         </g>
       </svg>
+      </div>
       {rows.length === 0 && (
         <p style={{ color: DIM, fontSize: 12.5, padding: "10px 12px", margin: 0 }}>
           No compartments on this deck match the current filters.

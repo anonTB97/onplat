@@ -723,3 +723,33 @@ export async function listActivities(
   if (!res.ok) throw new Error(`activities → ${res.status}`);
   return (await res.json()) as ActivityRegister;
 }
+
+/* -------------------------------------------------------------------- ledger */
+
+/** One audit ledger entry, as served — hashes hex, detail as recorded. */
+export interface AuditEntry {
+  seq: number;
+  /** What was recorded, e.g. `MITIGATION_ACCEPTED`, `ISSUE_ACKNOWLEDGED`. */
+  action: string;
+  /** The full record. Hashed, so this is the trusted content. */
+  detail: string;
+  /** Denormalised lookup key — a placard or an issue key. Index, not record. */
+  subject_ref: string | null;
+  occurred_at_ms: number;
+  entry_hash: string;
+  prev_hash: string | null;
+}
+
+/** The ledger with its chain re-verified server-side on this very read. */
+export interface LedgerReport {
+  verified: boolean;
+  break: { seq: number; reason: string } | null;
+  /** Newest first. */
+  entries: AuditEntry[];
+}
+
+export async function listLedger(id: Identity, vesselId: string): Promise<LedgerReport> {
+  const res = await fetch(`/api/vessels/${vesselId}/ledger`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`ledger → ${res.status}`);
+  return (await res.json()) as LedgerReport;
+}

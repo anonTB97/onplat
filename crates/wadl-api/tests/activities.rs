@@ -383,3 +383,53 @@ async fn an_acknowledgement_joins_the_ledger_to_the_board() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+/// The ledger read: every recorded entry, newest first, with the chain
+/// re-verified server-side on the same read — showing records without
+/// checking the chain would repeat the ledger's claim on faith.
+#[tokio::test]
+async fn the_ledger_serves_verified_entries() {
+    let (app, world) = app_at_anchor();
+    let issues_path = format!("/api/vessels/{}/issues", world.cvn73.as_uuid());
+    let ledger_path = format!("/api/vessels/{}/ledger", world.cvn73.as_uuid());
+
+    // Record two acknowledgements so the chain has links to verify.
+    let (_, board) = get(&app, &world, &issues_path).await;
+    let keys: Vec<String> = board["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(2)
+        .map(|i| i["key"].as_str().unwrap().to_owned())
+        .collect();
+    for key in &keys {
+        let (status, _) = post(
+            &app,
+            &world,
+            &format!("{issues_path}/acknowledge"),
+            serde_json::json!({ "key": key, "note": "ledger test" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, body) = get(&app, &world, &ledger_path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["verified"], true, "{body}");
+    assert!(body["break"].is_null());
+    let entries = body["entries"].as_array().unwrap();
+    assert!(entries.len() >= 2);
+    // Newest first, and the acks are on top with their subjects.
+    assert_eq!(entries[0]["action"], "ISSUE_ACKNOWLEDGED");
+    let subjects: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e["subject_ref"].as_str())
+        .collect();
+    for key in &keys {
+        assert!(subjects.contains(&key.as_str()), "{subjects:?}");
+    }
+    // Every entry is chained: a hash of its own, linked to the previous.
+    for e in entries {
+        assert!(e["entry_hash"].is_string());
+    }
+}

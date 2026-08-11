@@ -97,6 +97,42 @@ pub fn verify_chain(entries: &[LedgerEntry]) -> Result<(), LedgerBreak> {
     Ok(())
 }
 
+/// Verifies a hull's audit records as a surface reads them — hex hashes and
+/// all. `records` must be ordered oldest first (the chain's direction).
+///
+/// Hex that does not decode is reported as a [`LedgerBreakKind::HashMismatch`]
+/// at that entry: a hash that cannot be read is a hash that cannot be trusted,
+/// and inventing a third break kind for it would make every consumer handle a
+/// case that means the same thing.
+///
+/// # Errors
+/// Returns the first [`LedgerBreak`] encountered, or `Ok(())` if the whole
+/// chain is intact.
+pub fn verify_records(records: &[crate::model::AuditRecord]) -> Result<(), LedgerBreak> {
+    let mut chain = Vec::with_capacity(records.len());
+    for (index, r) in records.iter().enumerate() {
+        let bad = |_| LedgerBreak {
+            index,
+            seq: r.seq,
+            reason: LedgerBreakKind::HashMismatch,
+        };
+        chain.push(LedgerEntry {
+            seq: r.seq,
+            action: r.action.clone(),
+            detail: r.detail.clone(),
+            occurred_at_ms: r.occurred_at_ms,
+            prev_hash: r
+                .prev_hash
+                .as_deref()
+                .map(hex::decode)
+                .transpose()
+                .map_err(bad)?,
+            entry_hash: hex::decode(&r.entry_hash).map_err(bad)?,
+        });
+    }
+    verify_chain(&chain)
+}
+
 /// Builds a well-formed chain from `(action, detail, occurred_at_ms)` triples —
 /// used by seeding and tests to produce a valid ledger.
 #[must_use]

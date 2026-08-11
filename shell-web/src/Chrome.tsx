@@ -156,6 +156,8 @@ export const ICONS: Record<string, React.ReactNode> = {
   portfolio: ic("M4 18l8-3 8 3|M12 4v11|M7 9h10"),
   distPackages: ic("M6 6h4v4H6z|M14 14h4v4h-4z|M10 8h4v6"),
   cascade: ic("M12 3v5|M12 8l-6 5|M12 8l6 5|M6 13v5|M18 13v5"),
+  // A chained record: the page, and the links down its spine.
+  ledger: ic("M6 3h12v18H6z|M10 8h5|M10 12h5|M10 16h3|M8 6v0.01|M8 10v0.01|M8 14v0.01|M8 18v0.01"),
 };
 
 /* ------------------------------------------------------------------- topbar */

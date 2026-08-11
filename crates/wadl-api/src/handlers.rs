@@ -1034,6 +1034,39 @@ pub(crate) async fn issues(
     })))
 }
 
+/// The hull's audit ledger — every recorded decision and acknowledgement,
+/// newest first, with the hash chain re-verified on every read.
+///
+/// The verification is not decoration: the ledger's whole claim is that a
+/// silently altered or removed record is detectable, and a screen that shows
+/// the records without checking the chain would be repeating that claim on
+/// faith. `verified` is the server re-hashing the chain end to end right now;
+/// a break names the sequence number where trust stops.
+pub(crate) async fn ledger(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let records = state.store.list_audit(&scope, vessel, None).await?;
+    // Served newest first (the reading order); hashed oldest first (the
+    // chain's direction).
+    let oldest_first: Vec<wadl_store::model::AuditRecord> = records.iter().rev().cloned().collect();
+    let verdict = wadl_store::ledger::verify_records(&oldest_first);
+    Ok(Json(json!({
+        "verified": verdict.is_ok(),
+        "break": verdict.err().map(|b| json!({
+            "seq": b.seq,
+            "reason": match b.reason {
+                wadl_store::ledger::LedgerBreakKind::HashMismatch => "hash_mismatch",
+                wadl_store::ledger::LedgerBreakKind::ChainBroken => "chain_broken",
+            },
+        })),
+        "entries": records,
+    })))
+}
+
 /// An acknowledgement, as posted: which finding, and what the acknowledger has
 /// to say for it.
 #[derive(Debug, serde::Deserialize)]

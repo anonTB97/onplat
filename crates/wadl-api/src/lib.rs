@@ -93,6 +93,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/vessels/:id/issues/acknowledge",
             post(handlers::acknowledge_issue),
         )
+        .route("/api/vessels/:id/ledger", get(handlers::ledger))
         .route(
             "/api/vessels/:id/schedule-of-record",
             post(handlers::import_schedule),

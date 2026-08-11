@@ -20,6 +20,7 @@ import {
   type ModuleDef,
   type Persona,
 } from "./Chrome";
+import DailyOps from "./DailyOps";
 import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
 import DistributedPackages from "./DistributedPackages";
@@ -33,7 +34,7 @@ import { C } from "./theme";
 // honest rather than aspirational: a module with no view is labelled in the rail
 // so nobody clicks expecting a screen and reads the emptiness as broken data.
 const MODULES: ModuleDef[] = [
-  { group: "Operate", label: "Daily Ops", id: "placeholder", icon: "dailyOps", built: false },
+  { group: "Operate", label: "Daily Ops", id: "dailyOps", icon: "dailyOps", built: true },
   { group: "", label: "Deck Explorer", id: "deckExplorer", icon: "deckExplorer", built: true },
   { group: "Plan", label: "Sequence Board", id: "sequenceBoard", icon: "sequenceBoard", built: true },
   { group: "", label: "Work Orders", id: "workOrders", icon: "workOrders", built: true },
@@ -301,6 +302,17 @@ export default function App() {
               spaces={rows}
               onOpenSpace={jump}
               asOf={asOf}
+            />
+          )}
+
+          {!error && selected && module.id === "dailyOps" && (
+            <DailyOps
+              identity={DEMO_IDENTITY}
+              vesselId={selected}
+              hullLabel={hullLabel}
+              asOf={asOf}
+              spaces={rows}
+              onOpenSpace={jump}
             />
           )}
 

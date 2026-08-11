@@ -1295,6 +1295,16 @@ function SheetView({
   const ready = loaded === sheet.file;
   const hoverRow = rows.find((r) => r.compartment.compartment_no === hovered);
 
+  // Violation focus — one grammar across every canvas: click a refused space
+  // and the plate becomes an answer about THAT violation. The selected space
+  // and the hazard's route stay lit, everything else dims. A space that
+  // permits work focuses nothing.
+  const selRow = rows.find((r) => r.compartment.compartment_no === selected);
+  const violationFocus = selRow !== undefined && !selRow.permits_work;
+  const involved = new Set<string>(
+    violationFocus && selected !== null ? [selected, ...cascadeEdges.flat()] : [],
+  );
+
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, flexWrap: "wrap" }}>
@@ -1304,6 +1314,11 @@ function SheetView({
         {offScreen > 0 && (
           <span style={{ fontSize: 10.5, color: C.danger }} title="Pan, or use Fit width">
             · {offScreen} marker{offScreen === 1 ? "" : "s"} off-screen
+          </span>
+        )}
+        {violationFocus && (
+          <span style={{ fontSize: 10.5, color: STATE_STYLE.SUSPEND.fg }}>
+            · violation focus — everything off the hazard's route dims
           </span>
         )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 5, alignItems: "center" }}>
@@ -1452,6 +1467,8 @@ function SheetView({
             const isHot = no === hovered;
             const label = isSel || isHot || showLabels;
             const jump = deckJumps.get(no);
+            const inViolation = involved.has(no);
+            const dimmed = violationFocus && !inViolation;
             // A cross drawn over the pin for a space that is shut outright. The
             // prototype uses it for off-limits, and it survives being colour-blind
             // or looking at a printout in the sun, which a red dot does not.
@@ -1462,7 +1479,17 @@ function SheetView({
                 onClick={() => onSelect(no)}
                 onPointerEnter={() => setHovered(no)}
                 style={{ cursor: "pointer" }}
+                opacity={dimmed ? 0.45 : 1}
               >
+                {/* The violation's own spaces get a halo, so the route reads
+                    even where lit and dimmed pins sit close. */}
+                {violationFocus && inViolation && (
+                  <circle
+                    cx={at.x} cy={at.y} r={14 * u}
+                    fill="none" stroke={isSel ? C.accent : STATE_STYLE.SUSPEND.fg}
+                    strokeWidth={1.6 * u} opacity={0.75}
+                  />
+                )}
                 {/* A tick down to the keel line: on a busy plate the pin alone
                     does not make its frame station obvious. */}
                 <line x1={at.x} y1={at.y} x2={at.x} y2={cal.centrelineY} stroke={tone.fg} strokeWidth={1.5 * u} opacity={0.6} />
@@ -1680,10 +1707,23 @@ function PlanView({
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
+  // Violation focus — one grammar across every canvas: click a refused space
+  // and this schematic isolates that violation like the plate and the trace do.
+  const selRow = rows.find((r) => r.compartment.compartment_no === selected);
+  const violationFocus = selRow !== undefined && !selRow.permits_work;
+  const involved = new Set<string>(
+    violationFocus && selected !== null ? [selected, ...cascadeEdges.flat()] : [],
+  );
+
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, fontWeight: 600 }}>{deckLabel} — plan</span>
+        {violationFocus && (
+          <span style={{ fontSize: 10.5, color: STATE_STYLE.SUSPEND.fg }}>
+            · violation focus — everything off the hazard's route dims
+          </span>
+        )}
         {/* Frame 1 is at the stem and numbering increases aft, and frameToX puts
             frame 0 at x≈0.95 — so this sheet reads bow-right, like the drawings
             the constants were tuned against. Labelled explicitly because getting
@@ -1772,15 +1812,27 @@ function PlanView({
           {rows.map((r) => {
             const at = layout.positions.get(r.compartment.compartment_no);
             if (!at) return null;
+            const no = r.compartment.compartment_no;
             const tone = toneOf(r);
-            const isSel = r.compartment.compartment_no === selected;
+            const isSel = no === selected;
+            const inViolation = involved.has(no);
+            const dimmed = violationFocus && !inViolation;
             const { x, y } = at;
             return (
               <g
-                key={r.compartment.compartment_no}
-                onClick={() => onSelect(r.compartment.compartment_no)}
+                key={no}
+                onClick={() => onSelect(no)}
                 style={{ cursor: "pointer" }}
+                opacity={dimmed ? 0.45 : 1}
               >
+                {violationFocus && inViolation && (
+                  <rect
+                    x={x - MARKER_W / 2 - 4} y={y - MARKER_H / 2 - 4}
+                    width={MARKER_W + 8} height={MARKER_H + 8} rx={6}
+                    fill="none" stroke={isSel ? C.accent : STATE_STYLE.SUSPEND.fg}
+                    strokeWidth={1.6} opacity={0.75}
+                  />
+                )}
                 {/* A leader back to the keel line: once a marker is fanned two
                     lanes out, the frame it actually sits at stops being obvious. */}
                 <line

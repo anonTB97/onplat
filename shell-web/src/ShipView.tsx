@@ -218,6 +218,18 @@ export function ShipView({
     return { x: xOf(frame), y: top + LANE_H - GUTTER - BOX_H / 2 };
   };
 
+  // Violation focus — the same grammar as the vertical trace, on the same
+  // trigger: click a refused space and the whole hull becomes an answer about
+  // THAT violation. The selected space and every space on the hazard's route
+  // stay lit (ground boxes and work chips alike), everything else dims. A
+  // space that permits work focuses nothing — there is no violation to
+  // isolate.
+  const selectedRow = selected !== null ? spaceOf.get(selected) : undefined;
+  const violationFocus = selectedRow !== undefined && !selectedRow.permits_work;
+  const involved = new Set<string>(
+    violationFocus && selected !== null ? [selected, ...cascadeEdges.flat()] : [],
+  );
+
   const refused = placeable.filter((p) => p.activity.executability.verdict === "not_executable").length;
   // The composed fact this view exists for: spaces the engine refuses that
   // have work planned into them.
@@ -250,6 +262,16 @@ export function ShipView({
           {refused > 0 && (
             <>
               {" "}· <b style={{ color: "#fbbf24" }}>{refused} not executable as planned</b>
+            </>
+          )}
+          {violationFocus && (
+            <>
+              {" "}·{" "}
+              <b style={{ color: STATE_STYLE.SUSPEND.fg }}>
+                violation focus — {involved.size === 1
+                  ? "the hold is in this space itself"
+                  : `${involved.size} spaces on the hazard's route`}; everything else dims
+              </b>
             </>
           )}
         </span>
@@ -381,16 +403,33 @@ export function ShipView({
               const no = r.compartment.compartment_no;
               const tone = STATE_STYLE[r.state];
               const isSel = no === selected;
+              const inViolation = involved.has(no);
+              const dimmed = violationFocus && !inViolation;
               // Divided by zoom: the footprint's WIDTH is hull geometry and
               // grows with the drawing, but the strip height, text and strokes
               // are labels and keep their screen size.
               const sc = 1 / zoom;
               const y = c.y - (BOX_H * sc) / 2;
               return (
-                <g key={no} onClick={() => onPick(r.compartment.deck_code, no)} style={{ cursor: "pointer" }}>
+                <g
+                  key={no}
+                  onClick={() => onPick(r.compartment.deck_code, no)}
+                  style={{ cursor: "pointer" }}
+                  opacity={dimmed ? 0.45 : 1}
+                >
                   <title>
                     {`${no} — ${r.compartment.name}\n${r.state}${r.permits_work ? "" : " — refuses work"} · ${r.compartment.zone}${r.clearing_authority ? `\ncleared by ${r.clearing_authority}` : ""}`}
                   </title>
+                  {/* The violation's own spaces get a halo, so the route reads
+                      even where lit and dimmed boxes sit close. */}
+                  {violationFocus && inViolation && (
+                    <rect
+                      x={c.x - boxHalfW - 3 * sc} y={y - 3 * sc}
+                      width={boxHalfW * 2 + 6 * sc} height={BOX_H * sc + 6 * sc} rx={4 * sc}
+                      fill="none" stroke={isSel ? C.accent : STATE_STYLE.SUSPEND.fg}
+                      strokeWidth={1.2 * sc} opacity={0.75}
+                    />
+                  )}
                   <rect
                     x={c.x - boxHalfW} y={y} width={boxHalfW * 2} height={BOX_H * sc} rx={2 * sc}
                     fill={tone.fg} opacity={r.permits_work ? 0.1 : 0.26}
@@ -422,7 +461,12 @@ export function ShipView({
                 const x = xOf(p.frame);
                 const y = top + (10 + p.level * 12) * sc;
                 return (
-                  <g key={a.activity_id} onClick={() => onPick(p.deckCode, p.compartment)} style={{ cursor: "pointer" }}>
+                  <g
+                    key={a.activity_id}
+                    onClick={() => onPick(p.deckCode, p.compartment)}
+                    style={{ cursor: "pointer" }}
+                    opacity={violationFocus && !involved.has(p.compartment) ? 0.45 : 1}
+                  >
                     <title>
                       {`${a.code} — ${a.name}\n${a.trade} · ${p.compartment} · ${a.status.replace("_", " ")}${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
                     </title>
@@ -456,6 +500,7 @@ export function ShipView({
                     key={`${deck.code}-more-${m.frame}`}
                     onClick={() => onPick(m.deckCode, m.compartment)}
                     style={{ cursor: "pointer" }}
+                    opacity={violationFocus && !involved.has(m.compartment) ? 0.45 : 1}
                   >
                     <title>{`${m.codes.length} more here — zoom in to spread them out\n${m.codes.join(", ")}`}</title>
                     <rect x={x - 13 * sc} y={y - 5 * sc} width={26 * sc} height={10 * sc} rx={2.5 * sc} fill="#0b0c0eE6" stroke="#6e7480" strokeWidth={0.8 * sc} />

@@ -398,6 +398,25 @@ export function ZoneLanes({
         <span><span style={{ color: C.accent }}>◆</span> key event</span>
         <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           <span title="Wheel zooms the time axis around the cursor · drag pans">wheel zooms · drag pans</span>
+          {([["−", 1 / 1.4, "Zoom out (or scroll on the board)"], ["+", 1.4, "Zoom in (or scroll on the board)"]] as const).map(
+            ([glyph, factor, hint]) => (
+              <button
+                key={glyph}
+                onClick={() => {
+                  const mid = (win.v0 + win.v1) / 2;
+                  const next = windowZoomAt(win, full, mid, factor, MIN_SPAN);
+                  setView(next.v0 <= full.v0 && next.v1 >= full.v1 ? null : next);
+                }}
+                title={hint}
+                style={{
+                  font: "inherit", fontSize: 10, width: 22, padding: "2px 0", borderRadius: 5, cursor: "pointer",
+                  background: "transparent", color: C.dim, border: `1px solid ${C.line}`,
+                }}
+              >
+                {glyph}
+              </button>
+            ),
+          )}
           {(["all", "inversions", "off"] as LogicMode[]).map((m) => (
             <button
               key={m}

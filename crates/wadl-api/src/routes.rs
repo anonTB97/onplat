@@ -56,6 +56,7 @@ pub fn inventory() -> Vec<RouteSpec> {
             None,
         ),
         ("GET", "/api/vessels/:id/leverage", true, None),
+        ("GET", "/api/vessels/:id/issues", true, None),
         (
             "POST",
             "/api/vessels/:id/compartments/:no/decision",

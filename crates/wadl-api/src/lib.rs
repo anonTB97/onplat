@@ -87,6 +87,7 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::mitigations),
         )
         .route("/api/vessels/:id/leverage", get(handlers::leverage))
+        .route("/api/vessels/:id/issues", get(handlers::issues))
         .route(
             "/api/vessels/:id/compartments/:no/decision",
             post(handlers::record_decision),

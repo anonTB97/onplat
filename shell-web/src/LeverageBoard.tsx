@@ -15,12 +15,14 @@
 import { useEffect, useState } from "react";
 import {
   leverage,
+  listIssues,
   type AsOf,
   type Confidence,
   type Identity,
   type Mitigation,
   type MitigationAction,
 } from "./api";
+import IssuesBoard from "./IssuesBoard";
 import { actionTitle } from "./Mitigations";
 import { C, fmtClear, mh } from "./theme";
 
@@ -69,6 +71,12 @@ export default function LeverageBoard({
 }) {
   const [actions, setActions] = useState<Mitigation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Issues first: nobody arrives knowing an action; they arrive knowing a
+  // problem. The count in the tab label is fetched here so it shows before the
+  // tab is opened.
+  const [tab, setTab] = useState<"issues" | "actions">("issues");
+  const [issueCount, setIssueCount] = useState<number | null>(null);
+  const [issueHours, setIssueHours] = useState<number>(0);
 
   useEffect(() => {
     setError(null);
@@ -78,6 +86,12 @@ export default function LeverageBoard({
         setActions(null);
         setError(String(e));
       });
+    listIssues(identity, vesselId, asOf)
+      .then((r) => {
+        setIssueCount(r.issues.length);
+        setIssueHours(r.hours_at_risk);
+      })
+      .catch(() => setIssueCount(null));
   }, [identity, vesselId, asOf]);
 
   if (error) {
@@ -112,16 +126,70 @@ export default function LeverageBoard({
       <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
         Conflicts &amp; Risk · {hullLabel}
       </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>What is worth doing first?</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 780 }}>
-        Ranked by man-hours recovered, per <b>action</b> rather than per space — one
-        action can free spaces held by several different authorities, and the space
-        holding the most work is rarely the one holding the most spaces. Every row was
-        computed by rebuilding the hull with that action taken and re-evaluating it;
-        nothing here is a remedy looked up in a table.
+      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>
+        {tab === "issues" ? "What is wrong?" : "What is worth doing first?"}
+      </h1>
+      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
+        {tab === "issues" ? (
+          <>
+            Every way the platform can show planned work is in trouble, ranked by
+            man-hours at risk. One hazard can appear at several grains — a held space,
+            a broken plan, a crew&apos;s morning — deliberately: each grain routes to a
+            different fix.
+          </>
+        ) : (
+          <>
+            Ranked by man-hours recovered, per <b>action</b> rather than per space — one
+            action can free spaces held by several different authorities, and the space
+            holding the most work is rarely the one holding the most spaces. Every row was
+            computed by rebuilding the hull with that action taken and re-evaluating it;
+            nothing here is a remedy looked up in a table.
+          </>
+        )}
       </p>
 
-      {actions.length === 0 ? (
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {(
+          [
+            ["issues", `Issues${issueCount !== null ? ` · ${issueCount}` : ""}`],
+            ["actions", `Actions · ${actions.length}`],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setTab(id)}
+            style={{
+              font: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer",
+              padding: "5px 14px", borderRadius: 6,
+              background: tab === id ? "#20222b" : "transparent",
+              color: tab === id ? C.text : C.dim,
+              border: `1px solid ${tab === id ? C.accent : C.line}`,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+        {tab === "issues" && issueHours > 0 && (
+          <span style={{ alignSelf: "center", fontSize: 11.5, color: C.dim }}>
+            <b style={{ color: "#f87171" }}>{mh(issueHours)}</b> at risk across the board
+          </span>
+        )}
+      </div>
+
+      {tab === "issues" ? (
+        <>
+          <IssuesBoard
+            identity={identity}
+            vesselId={vesselId}
+            asOf={asOf}
+            onOpenSpace={onOpenSpace}
+          />
+          <p style={{ color: C.dim, fontSize: 11.5, marginTop: 10, maxWidth: 780 }}>
+            Every row is a door: the route lands on the space with its decision trace
+            and options open, where a choice is recorded to the audit ledger.
+          </p>
+        </>
+      ) : actions.length === 0 ? (
         <p style={{ color: C.dim, fontSize: 12.5 }}>
           Nothing on this hull is held at this instant, so there is nothing to unlock.
         </p>

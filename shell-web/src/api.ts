@@ -540,6 +540,66 @@ export interface Refusal {
   earliest_clear: number | null;
 }
 
+/* -------------------------------------------------------------------- issues */
+
+/**
+ * One issue: a typed claim that planned work is in trouble, with its evidence.
+ * The same fact can appear at several grains (a space, a plan, a crew's
+ * morning) — that is deliberate; each grain routes to a different fix.
+ */
+export type Issue =
+  | {
+      kind: "not_executable_as_planned";
+      activity: string;
+      name: string;
+      trade: string;
+      compartment: string;
+      hours_at_risk: number;
+      refusal: Refusal;
+    }
+  | {
+      kind: "held_with_crews_booked";
+      compartment: string;
+      hours_at_risk: number;
+      state: DecisionState;
+      clearing_authority: string;
+      earliest_clear: number | null;
+    }
+  | {
+      kind: "compound_hold";
+      compartment: string;
+      hours_at_risk: number;
+      holds: number;
+      /** Actions in the cheapest working plan; 0 = even the planner found nothing. */
+      plan_actions: number;
+    }
+  | {
+      kind: "stranding_concentration";
+      compartment: string;
+      own_remaining: number;
+      hours_at_risk: number;
+      downstream_segments: number;
+    }
+  | {
+      kind: "negative_lag";
+      pred: string;
+      succ: string;
+      lag_hours: number;
+      hours_at_risk: number;
+    };
+
+export async function listIssues(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<{ as_of: number; hours_at_risk: number; issues: Issue[] }> {
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/issues`, asOf), {
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`issues → ${res.status}`);
+  return (await res.json()) as { as_of: number; hours_at_risk: number; issues: Issue[] };
+}
+
 export async function listActivities(
   id: Identity,
   vesselId: string,

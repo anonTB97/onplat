@@ -120,6 +120,51 @@ async fn every_activity_carries_an_executability_verdict() {
     );
 }
 
+/// The issue board endpoint: ranked worst-first, every row a typed claim.
+#[tokio::test]
+async fn the_issue_board_is_ranked_and_typed() {
+    let (app, world) = app_at_anchor();
+    let (status, body) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{}/issues", world.cvn73.as_uuid()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let issues = body["issues"].as_array().expect("issues array");
+    assert!(!issues.is_empty(), "the demo hull carries live hazards");
+    let known = [
+        "not_executable_as_planned",
+        "held_with_crews_booked",
+        "compound_hold",
+        "stranding_concentration",
+        "negative_lag",
+    ];
+    let mut previous = i64::MAX;
+    for issue in issues {
+        let kind = issue["kind"].as_str().expect("typed");
+        assert!(known.contains(&kind), "unknown kind {kind}");
+        let hours = issue["hours_at_risk"].as_i64().expect("ranked by hours");
+        assert!(hours <= previous, "not ranked worst-first");
+        previous = hours;
+    }
+    // The demo's two standing stories must both surface: crews held by the
+    // bus, and activities the coating/bus hazards make non-executable.
+    let kinds: Vec<&str> = issues
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap_or_default())
+        .collect();
+    assert!(kinds.contains(&"held_with_crews_booked"), "{kinds:?}");
+    assert!(kinds.contains(&"not_executable_as_planned"), "{kinds:?}");
+    assert_eq!(
+        body["hours_at_risk"].as_i64().unwrap(),
+        issues
+            .iter()
+            .map(|i| i["hours_at_risk"].as_i64().unwrap())
+            .sum::<i64>()
+    );
+}
+
 /// Executability does not move with `as_of`: "as planned" is a property of the
 /// plan against the hazards on file, not of where the reader scrubbed the clock.
 #[tokio::test]

@@ -15,6 +15,10 @@ publish.workspace = true
 [dependencies]
 wadl-domain.workspace = true
 wadl-engine.workspace = true
+# For the compound-hold issue: whether one action opens a space is
+# wadl-mitigate's counterfactual question, and re-deriving it here would be a
+# second implementation destined to disagree with the options panel.
+wadl-mitigate.workspace = true
 serde.workspace = true
 
 [dev-dependencies]

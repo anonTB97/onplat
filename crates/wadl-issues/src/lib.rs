@@ -35,6 +35,10 @@ use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::time::{Timestamp, Window};
 use wadl_engine::{evaluate, AdjacencyGraph, DecisionState, EvaluationRequest, Hazard, RuleSet};
 
+mod board;
+
+pub use board::{derive, Issue, RegisterRow, ScheduleEdge, Stranding};
+
 /// The engine's inputs for one hull, borrowed together.
 ///
 /// The same triple every counterfactual is computed against; carried as one

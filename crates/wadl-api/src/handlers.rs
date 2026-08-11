@@ -817,6 +817,65 @@ pub(crate) async fn leverage(
     })))
 }
 
+/// The issue board: every way the platform can show planned work is in
+/// trouble, ranked by man-hours at risk.
+///
+/// Every row is a claim with evidence: a real engine refusal with crews booked,
+/// a compound hold straight from the options planner, an activity shown
+/// non-executable over its own window, or a stranding read off real segment
+/// topology. Schedule-quality findings (negative lags) join the board when an
+/// ingested schedule of record lands in the store — the derivation already
+/// takes the edges; the store does not hold them yet.
+pub(crate) async fn issues(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let loads = |instant: Timestamp| inputs.loads(instant);
+    let world = wadl_mitigate::World {
+        graph: &inputs.graph,
+        rules: &inputs.rules,
+        hazards: &inputs.hazards,
+        at,
+        loads: &loads,
+    };
+    let rows: Vec<wadl_issues::RegisterRow<'_>> = activities
+        .iter()
+        .filter(|a| !a.is_milestone)
+        .map(|a| wadl_issues::RegisterRow {
+            code: &a.code,
+            name: &a.name,
+            trade: &a.trade,
+            compartment: a.compartment_no.as_ref(),
+            planned: a.planned,
+            remaining: a.remaining_hours(),
+        })
+        .collect();
+    let stranded: Vec<wadl_issues::Stranding<'_>> = inputs
+        .stranded
+        .items
+        .iter()
+        .map(|s| wadl_issues::Stranding {
+            compartment: &s.compartment_no,
+            own_remaining: s.own_remaining,
+            stranded_downstream: s.stranded_downstream,
+            downstream_segments: s.downstream_segments.len(),
+        })
+        .collect();
+    let issues = wadl_issues::derive(&world, &rows, &stranded, &[]);
+    let hours_at_risk: i64 = issues.iter().map(|i| i.hours_at_risk().get()).sum();
+    Ok(Json(json!({
+        "as_of": at,
+        "hours_at_risk": hours_at_risk,
+        "issues": issues,
+    })))
+}
+
 /// The distributed packages on a hull.
 pub(crate) async fn list_packages(
     State(state): State<AppState>,

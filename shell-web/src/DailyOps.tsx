@@ -37,6 +37,38 @@ const fmtSlot = (w: { start: number; end: number } | null): string => {
     : `${fmtDay(w.start)} → ${fmtDay(w.end)}`;
 };
 
+const DAY = 86_400_000;
+const HOUR = 3_600_000;
+
+/**
+ * The board's slice. "instant" is the register's own in-window mark — what is
+ * planned at the moment on the time control. The three shifts are the yard's
+ * working day around that same instant, so a superintendent can read tonight's
+ * board this afternoon. All times are Z, like every clock in this shell.
+ */
+type Shift = "instant" | "days" | "swing" | "night";
+
+const SHIFTS: { id: Shift; label: string; gloss: string }[] = [
+  { id: "instant", label: "This instant", gloss: "planned at the moment on the time control" },
+  { id: "days", label: "Days 0700–1530", gloss: "first shift of the as-of day" },
+  { id: "swing", label: "Swing 1530–2400", gloss: "second shift of the as-of day" },
+  { id: "night", label: "Night 0000–0700", gloss: "third shift of the as-of day" },
+];
+
+/** The shift's window on the as-of day, or null for the instant mode. */
+function shiftWindow(asOfMs: number, shift: Shift): { start: number; end: number } | null {
+  if (shift === "instant") return null;
+  const midnight = Math.floor(asOfMs / DAY) * DAY;
+  switch (shift) {
+    case "days":
+      return { start: midnight + 7 * HOUR, end: midnight + 15.5 * HOUR };
+    case "swing":
+      return { start: midnight + 15.5 * HOUR, end: midnight + 24 * HOUR };
+    case "night":
+      return { start: midnight, end: midnight + 7 * HOUR };
+  }
+}
+
 export default function DailyOps({
   identity,
   vesselId,
@@ -55,6 +87,7 @@ export default function DailyOps({
 }) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
+  const [shift, setShift] = useState<Shift>("instant");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -76,13 +109,24 @@ export default function DailyOps({
     return held;
   }, [spaces]);
 
+  // The slice: the in-window mark at the instant, or the chosen shift's window
+  // on the as-of day. Undated work is in every slice — counted into each shift
+  // rather than hidden from all of them.
+  const win = asOfMs !== null ? shiftWindow(asOfMs, shift) : null;
+  const inSlice = useMemo(() => {
+    return (a: Activity): boolean => {
+      if (win === null) return a.in_window;
+      if (a.planned === null) return true;
+      return a.planned.start < win.end && a.planned.end > win.start;
+    };
+  }, [win]);
   const onShift = useMemo(
-    () => (activities ?? []).filter((a) => a.in_window && !a.is_milestone && a.status !== "complete"),
-    [activities],
+    () => (activities ?? []).filter((a) => inSlice(a) && !a.is_milestone && a.status !== "complete"),
+    [activities, inSlice],
   );
   const events = useMemo(
-    () => (activities ?? []).filter((a) => a.in_window && a.is_milestone),
-    [activities],
+    () => (activities ?? []).filter((a) => inSlice(a) && a.is_milestone),
+    [activities, inSlice],
   );
 
   // Per trade, heaviest remaining first — the order a superintendent walks the
@@ -114,6 +158,81 @@ export default function DailyOps({
     font: "inherit", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4, cursor: "pointer",
     padding: "2px 7px", borderRadius: 4, color: fg, background: bg, border: `1px solid ${border}`,
   });
+  const chip = (active: boolean): React.CSSProperties => ({
+    padding: "3px 9px", borderRadius: 5, cursor: "pointer", font: "inherit", fontSize: 11,
+    background: active ? "#20222b" : "transparent",
+    color: active ? C.text : C.dim,
+    border: `1px solid ${active ? C.accent : C.line}`,
+  });
+
+  const sliceLabel =
+    win === null
+      ? `at ${asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}Z` : "now"}`
+      : `${SHIFTS.find((s) => s.id === shift)?.label ?? ""} · ${fmtDay(win.start)} (Z)`;
+
+  // The one-pager. Generated as its own monochrome document rather than
+  // printing the app: a shift board goes up on a clipboard wall, where dark
+  // panels and accent colours are ink and noise. Everything on it is text —
+  // the warnings survive a photocopier, which a red pixel does not.
+  const printBoard = () => {
+    const esc = (s: string) =>
+      s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    const rows = byTrade
+      .map(
+        (g) => `
+      <h2>${esc(g.trade)} <small>${g.list.length} activities · ${g.remaining.toLocaleString()} MH remaining</small></h2>
+      <table>
+        <tr><th>Activity</th><th>Name</th><th>Slot</th><th>Space</th><th style="text-align:right">MH left</th><th>Warnings</th></tr>
+        ${g.list
+          .map((a) => {
+            const heldNow = a.compartment_no !== null && refused.has(a.compartment_no);
+            const doomed = a.executability.verdict === "not_executable";
+            const warns = [
+              heldNow ? "HELD NOW" : "",
+              doomed ? "NOT EXECUTABLE AS PLANNED" : "",
+              a.planned === null ? "UNDATED" : "",
+            ].filter(Boolean).join(" · ");
+            return `<tr${warns ? ' class="warn"' : ""}>
+              <td class="mono">${esc(a.code)}</td><td>${esc(a.name)}</td>
+              <td class="mono">${esc(fmtSlot(a.planned))}</td>
+              <td class="mono">${esc(a.compartment_no ?? "not located")}</td>
+              <td style="text-align:right">${a.remaining_hours.toLocaleString()}</td>
+              <td class="mono">${warns || "—"}</td>
+            </tr>`;
+          })
+          .join("")}
+      </table>`,
+      )
+      .join("");
+    const eventRows = events.length
+      ? `<p><b>Key events:</b> ${events.map((a) => `${esc(a.code)} ${esc(a.name)} (${esc(fmtSlot(a.planned))})`).join(" · ")}</p>`
+      : "";
+    const doc = `<!doctype html><html><head><meta charset="utf-8"><title>Shift board — ${esc(hullLabel)}</title>
+      <style>
+        body { font: 12px/1.45 system-ui, sans-serif; color: #111; margin: 28px; }
+        h1 { font-size: 17px; margin: 0 0 2px; } h2 { font-size: 13px; margin: 16px 0 4px; }
+        small { font-weight: 400; color: #555; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #999; padding: 3px 7px; text-align: left; font-size: 11px; }
+        th { background: #eee; }
+        .mono { font-family: ui-monospace, monospace; font-size: 10.5px; }
+        .warn td { font-weight: 600; }
+        footer { margin-top: 18px; font-size: 10px; color: #555; }
+      </style></head><body>
+      <h1>Shift board — ${esc(hullLabel)}</h1>
+      <p>${esc(sliceLabel)} · ${onShift.length} activities · ${remaining.toLocaleString()} MH remaining
+      ${heldCount > 0 ? ` · ${heldCount} in a space the engine refuses now` : ""}
+      ${doomedCount > 0 ? ` · ${doomedCount} not executable as planned` : ""}</p>
+      ${eventRows}${rows}
+      <footer>Generated ${new Date().toISOString().slice(0, 16).replace("T", " ")}Z · decision support only — flags risk; the planner decides. Does not modify the schedule.</footer>
+      </body></html>`;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) return;
+    w.document.write(doc);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
 
   return (
     <div>
@@ -122,11 +241,9 @@ export default function DailyOps({
       </div>
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>The shift board</h1>
       <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 780 }}>
-        Every activity planned for{" "}
-        <b style={{ color: "#ccd1da" }}>
-          {asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}` : "now"}
-        </b>{" "}
-        on the time control, by trade —{" "}
+        Every activity {win === null ? "planned" : "touching"}{" "}
+        <b style={{ color: "#ccd1da" }}>{sliceLabel}</b>
+        {win === null && " on the time control"}, by trade —{" "}
         <b style={{ color: "#ccd1da" }}>{onShift.length}</b> activities,{" "}
         <b style={{ color: "#ccd1da" }}>{mh(remaining)}</b> remaining in them
         {heldCount > 0 && (
@@ -143,6 +260,23 @@ export default function DailyOps({
         . Scrub the clock and the shift moves with it; the full register is on the
         Sequence Board.
       </p>
+
+      {/* The slice: this instant, or one of the yard's three shifts on the
+          as-of day — so tonight's board is readable this afternoon. */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        {SHIFTS.map((s) => (
+          <button key={s.id} style={chip(shift === s.id)} onClick={() => setShift(s.id)} title={s.gloss}>
+            {s.label}
+          </button>
+        ))}
+        <button
+          style={{ ...chip(false), marginLeft: "auto" }}
+          onClick={printBoard}
+          title="A monochrome one-pager for the clipboard wall — the warnings survive a photocopier."
+        >
+          ⎙ Print board
+        </button>
+      </div>
 
       {onShift.length === 0 && events.length === 0 && (
         <p style={{ color: C.dim, fontSize: 12.5 }}>

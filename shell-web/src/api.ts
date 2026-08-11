@@ -515,6 +515,29 @@ export interface Activity {
   source_ref: string;
   /** Whether the activity is planned for the instant this register was read at. */
   in_window: boolean;
+  /** Whether it can execute as planned — the register's issue signal. */
+  executability: Executability;
+}
+
+/**
+ * The A4 derivation: the activity's compartment evaluated over its planned
+ * window. Exact, not sampled — see wadl-issues. Indifferent to as_of: "as
+ * planned" is a property of the plan, not of where the clock was scrubbed.
+ */
+export type Executability =
+  | { verdict: "executable" }
+  | ({ verdict: "not_executable" } & Refusal)
+  | { verdict: "unassessable"; reason: "unlocated" | "undated" };
+
+/** The first refused instant in the window, and the hold that governs there. */
+export interface Refusal {
+  at: number;
+  state: DecisionState;
+  rule_code: string;
+  origin: string;
+  hazard: string;
+  clearing_authority: string;
+  earliest_clear: number | null;
 }
 
 export async function listActivities(

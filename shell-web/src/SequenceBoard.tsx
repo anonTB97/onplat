@@ -34,6 +34,24 @@ const fmtWindow = (w: { start: number; end: number } | null): string => {
   return `${d(w.start)} → ${d(w.end)}`;
 };
 
+/** An instant, to the minute — refusals are priced to the minute, not the day. */
+const fmtInstant = (ms: number): string =>
+  new Date(ms).toISOString().slice(5, 16).replace("-", "/").replace("T", " ");
+
+/** The refusal, in one sentence a planner can act on. */
+const refusalTitle = (a: Activity): string => {
+  const e = a.executability;
+  if (e.verdict !== "not_executable") return "";
+  const clears = e.earliest_clear
+    ? `clears ${fmtInstant(e.earliest_clear)}`
+    : `clears on verification by ${e.clearing_authority}`;
+  return (
+    `Refused from ${fmtInstant(e.at)} inside the planned window — ` +
+    `${e.rule_code} · ${e.hazard} @ ${e.origin} · ${clears}. ` +
+    `Click to open the space with its options.`
+  );
+};
+
 export default function SequenceBoard({
   identity,
   vesselId,
@@ -53,6 +71,7 @@ export default function SequenceBoard({
   const [trade, setTrade] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusFilter>("all");
   const [inWindowOnly, setInWindowOnly] = useState(false);
+  const [notExecOnly, setNotExecOnly] = useState(false);
 
   useEffect(() => {
     setError(null);
@@ -77,13 +96,14 @@ export default function SequenceBoard({
       if (trade && a.trade !== trade) return false;
       if (status !== "all" && a.status !== status) return false;
       if (inWindowOnly && !a.in_window) return false;
+      if (notExecOnly && a.executability.verdict !== "not_executable") return false;
       if (!q) return true;
       return [a.code, a.name, a.compartment_no ?? "", a.work_order_code ?? ""]
         .join(" ")
         .toLowerCase()
         .includes(q);
     });
-  }, [activities, search, trade, status, inWindowOnly]);
+  }, [activities, search, trade, status, inWindowOnly, notExecOnly]);
 
   if (error) return <p style={{ color: C.danger }}>Register unavailable ({error}).</p>;
   if (!activities) return null;
@@ -91,6 +111,7 @@ export default function SequenceBoard({
   const remaining = rows.reduce((s, a) => s + a.remaining_hours, 0);
   const inWindow = activities.filter((a) => a.in_window && !a.is_milestone).length;
   const unlocated = activities.filter((a) => a.compartment_no === null && !a.is_milestone).length;
+  const refused = activities.filter((a) => a.executability.verdict === "not_executable").length;
 
   const th: React.CSSProperties = {
     textAlign: "left", padding: "6px 10px", fontSize: 10, letterSpacing: 0.6,
@@ -127,6 +148,14 @@ export default function SequenceBoard({
             </span>
           </>
         )}
+        {refused > 0 && (
+          <>
+            {" "}· <b style={{ color: C.danger }}>{refused}</b>{" "}
+            <span title="The activity's space, evaluated over its planned window, refuses work during it — a fact neither the schedule nor the engine holds alone.">
+              not executable as planned
+            </span>
+          </>
+        )}
         . Generated from the seeded work orders and packages so every hour reconciles
         with the boards; real P6 ingest replaces this register without changing the
         screen.
@@ -158,6 +187,10 @@ export default function SequenceBoard({
           <input type="checkbox" checked={inWindowOnly} onChange={(e) => setInWindowOnly(e.target.checked)} />
           In window now
         </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: notExecOnly ? C.danger : C.dim, cursor: "pointer" }}>
+          <input type="checkbox" checked={notExecOnly} onChange={(e) => setNotExecOnly(e.target.checked)} />
+          Not executable
+        </label>
         <span style={{ marginLeft: "auto", fontSize: 11.5, color: C.dim }}>
           {rows.length} shown · {mh(remaining)} remaining in them
         </span>
@@ -173,6 +206,7 @@ export default function SequenceBoard({
               <th style={th}>Space</th>
               <th style={th}>Trade</th>
               <th style={th}>Planned</th>
+              <th style={th}>Executable?</th>
               <th style={{ ...th, textAlign: "right" }}>Budget</th>
               <th style={{ ...th, textAlign: "right" }}>Earned</th>
               <th style={th}>Status</th>
@@ -233,6 +267,47 @@ export default function SequenceBoard({
                   {fmtWindow(a.planned)}
                   {a.in_window && !a.is_milestone && (
                     <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#22c55e" }}>●</span>
+                  )}
+                </td>
+                <td style={{ ...td, fontSize: 10, whiteSpace: "nowrap" }}>
+                  {a.executability.verdict === "not_executable" ? (
+                    <button
+                      // The activity's own space when located, else the hold's
+                      // origin — either way the click lands with options open.
+                      onClick={() => {
+                        const e = a.executability;
+                        onOpenSpace(
+                          a.compartment_no ?? (e.verdict === "not_executable" ? e.origin : ""),
+                        );
+                      }}
+                      title={refusalTitle(a)}
+                      style={{
+                        font: "inherit", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4,
+                        cursor: "pointer", padding: "2px 7px", borderRadius: 4,
+                        color: "#fca5a5", background: "rgba(239,68,68,0.12)",
+                        border: "1px solid rgba(239,68,68,0.45)",
+                      }}
+                    >
+                      NOT EXECUTABLE
+                    </button>
+                  ) : a.executability.verdict === "unassessable" ? (
+                    <span
+                      style={{ color: C.dim }}
+                      title={
+                        a.executability.reason === "unlocated"
+                          ? "No compartment is mapped, so there is no space to evaluate — unknown, never presented as fine."
+                          : "No planned dates, so there is no “as planned” to test against."
+                      }
+                    >
+                      unknown
+                    </span>
+                  ) : (
+                    <span
+                      style={{ color: "rgba(34,197,94,0.65)" }}
+                      title="The space permits work at every instant of the planned window, against the hazards on file."
+                    >
+                      ✓
+                    </span>
                   )}
                 </td>
                 <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>

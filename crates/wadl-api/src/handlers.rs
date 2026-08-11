@@ -136,11 +136,18 @@ pub(crate) async fn list_work_orders(
 }
 
 /// The full activity register — every scheduled activity at the doing grain,
-/// marked with whether it is planned for `as_of`.
+/// marked with whether it is planned for `as_of` and whether it can execute as
+/// planned.
 ///
 /// Marked, never filtered, on the same reasoning as the work-order list: a
 /// planner reading next week still needs to see the activity that finished last
 /// week, and an omission is indistinguishable from missing data.
+///
+/// Executability is the A4 derivation from `wadl-issues`: the activity's
+/// compartment evaluated over its planned window, exactly (see that crate's
+/// piecewise-constancy argument). It deliberately does **not** move with
+/// `as_of` — "as planned" is a property of the plan against the hazards on
+/// file, not of where the reader has scrubbed the clock.
 pub(crate) async fn list_activities(
     State(state): State<AppState>,
     Caller(scope): Caller,
@@ -150,13 +157,23 @@ pub(crate) async fn list_activities(
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let activities = state.store.list_activities(&scope, vessel).await?;
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    let hull = wadl_issues::Hull {
+        graph: &graph,
+        rules: &rules,
+        hazards: &hazards,
+    };
     let rows: Vec<Value> = activities
         .into_iter()
         .map(|a| {
+            let exec = wadl_issues::executability(&hull, a.compartment_no.as_ref(), a.planned);
             let mut row = json!(a);
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("in_window".to_owned(), json!(a.booked_at(at)));
                 obj.insert("remaining_hours".to_owned(), json!(a.remaining_hours()));
+                obj.insert("executability".to_owned(), json!(exec));
             }
             row
         })

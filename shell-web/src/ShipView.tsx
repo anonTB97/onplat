@@ -104,6 +104,10 @@ export function ShipView({
 }) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  // The time dimension, as a focus rather than a filter: chips whose planned
+  // window does not contain the instant dim, so "what runs NOW" reads at a
+  // glance while the rest of the plan stays counted and visible.
+  const [windowFocus, setWindowFocus] = useState(false);
   const wheelRef = useRef<HTMLDivElement>(null);
   const camRef = useRef({ zoom, pan });
   camRef.current = { zoom, pan };
@@ -276,6 +280,13 @@ export function ShipView({
           )}
         </span>
         <span style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10.5, color: windowFocus ? C.text : DIM, fontWeight: 400, cursor: "pointer", marginRight: 6 }}
+            title="Dim work not planned for the instant on the time control — marked, never hidden."
+          >
+            <input type="checkbox" checked={windowFocus} onChange={(e) => setWindowFocus(e.target.checked)} />
+            in-window focus
+          </label>
           <button onClick={() => zoomTo(zoom / 1.4)} style={navBtn} title="Zoom out (or scroll on the canvas)">−</button>
           <span style={{ fontSize: 9.5, color: DIM, fontWeight: 400, minWidth: 30, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
             {zoom.toFixed(1)}×
@@ -460,12 +471,17 @@ export function ShipView({
                 const sc = 1 / zoom;
                 const x = xOf(p.frame);
                 const y = top + (10 + p.level * 12) * sc;
+                // The two focuses compose: a chip outside both the violation's
+                // route and the instant's window earns both dims.
+                const dim =
+                  (violationFocus && !involved.has(p.compartment) ? 0.45 : 1) *
+                  (windowFocus && !a.in_window ? 0.35 : 1);
                 return (
                   <g
                     key={a.activity_id}
                     onClick={() => onPick(p.deckCode, p.compartment)}
                     style={{ cursor: "pointer" }}
-                    opacity={violationFocus && !involved.has(p.compartment) ? 0.45 : 1}
+                    opacity={dim}
                   >
                     <title>
                       {`${a.code} — ${a.name}\n${a.trade} · ${p.compartment} · ${a.status.replace("_", " ")}${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}

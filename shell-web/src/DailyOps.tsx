@@ -23,6 +23,7 @@ import {
   type DeckStateRow,
   type Identity,
 } from "./api";
+import { Loading } from "./Loading";
 import { C, mh } from "./theme";
 
 const fmtTime = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
@@ -103,7 +104,7 @@ export default function DailyOps({
   }, [onShift]);
 
   if (error) return <p style={{ color: C.danger }}>Register unavailable ({error}).</p>;
-  if (!activities) return null;
+  if (!activities) return <Loading label="Assembling the morning…" />;
 
   const heldCount = onShift.filter((a) => a.compartment_no && refused.has(a.compartment_no)).length;
   const doomedCount = onShift.filter((a) => a.executability.verdict === "not_executable").length;

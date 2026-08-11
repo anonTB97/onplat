@@ -13,6 +13,7 @@
 
 import React, { useEffect, useState } from "react";
 import { listLedger, type AuditEntry, type Identity, type LedgerReport } from "./api";
+import { Loading } from "./Loading";
 import { C } from "./theme";
 
 /** How each recorded action reads at a glance. */
@@ -101,7 +102,7 @@ export default function LedgerBoard({
   }, [identity, vesselId]);
 
   if (error) return <p style={{ color: C.danger }}>Ledger unavailable ({error}).</p>;
-  if (!report) return null;
+  if (!report) return <Loading label="Reading the ledger and re-hashing the chain…" />;
 
   const td: React.CSSProperties = {
     padding: "7px 10px",

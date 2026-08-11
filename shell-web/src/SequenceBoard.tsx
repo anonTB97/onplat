@@ -28,6 +28,7 @@ import {
   type ReconciliationMismatch,
   type ScheduleEdge,
 } from "./api";
+import { Loading } from "./Loading";
 import { ZoneLanes } from "./ZoneLanes";
 import { C, mh } from "./theme";
 
@@ -194,7 +195,7 @@ export default function SequenceBoard({
   }, [activities, search, trade, status, inWindowOnly, notExecOnly, sort]);
 
   if (error) return <p style={{ color: C.danger }}>Register unavailable ({error}).</p>;
-  if (!activities) return null;
+  if (!activities) return <Loading label="Reading the register…" />;
 
   const remaining = rows.reduce((s, a) => s + a.remaining_hours, 0);
   const inWindow = activities.filter((a) => a.in_window && !a.is_milestone).length;

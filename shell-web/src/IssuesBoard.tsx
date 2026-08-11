@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from "react";
 import { acknowledgeIssue, listIssues, type AsOf, type Identity, type Issue } from "./api";
+import { Loading } from "./Loading";
 import { C, fmtClear, mh } from "./theme";
 
 /**
@@ -162,7 +163,7 @@ export default function IssuesBoard({
   }, [identity, vesselId, asOf, reloadNonce]);
 
   if (error) return <p style={{ color: C.danger }}>Issues unavailable ({error}).</p>;
-  if (!issues) return null;
+  if (!issues) return <Loading label="Deriving the board…" />;
 
   if (issues.length === 0) {
     return (

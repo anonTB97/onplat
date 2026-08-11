@@ -24,6 +24,7 @@ import {
 } from "./api";
 import IssuesBoard from "./IssuesBoard";
 import { actionTitle } from "./Mitigations";
+import { Loading } from "./Loading";
 import { C, fmtClear, mh } from "./theme";
 
 const CONFIDENCE_LABEL: Record<Confidence, string> = {
@@ -97,7 +98,7 @@ export default function LeverageBoard({
   if (error) {
     return <p style={{ color: C.danger }}>Leverage unavailable ({error}).</p>;
   }
-  if (!actions) return null;
+  if (!actions) return <Loading label="Pricing the options…" />;
 
   const recoverable = actions.reduce(
     (a, m) => a + m.effect.freed_hours - m.effect.closed_hours,

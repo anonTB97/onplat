@@ -56,6 +56,12 @@ macro_rules! id_newtype {
 }
 
 id_newtype!(
+    /// One scheduled activity — the grain P6 plans at and a foreman is handed.
+    /// A work order is made of activities; the register lists them all.
+    ActivityId
+);
+
+id_newtype!(
     /// Tenant. Every non-reference row is scoped to one organization.
     OrgId
 );

@@ -6,8 +6,8 @@ use wadl_plan::Package;
 
 use crate::error::StoreError;
 use crate::model::{
-    AuditRecord, CompartmentSummary, DeckSummary, PackageSummary, StrandedReport, VesselSummary,
-    WorkOrderSummary,
+    ActivitySummary, AuditRecord, CompartmentSummary, DeckSummary, PackageSummary, StrandedReport,
+    VesselSummary, WorkOrderSummary,
 };
 use crate::scope::TenantScope;
 
@@ -56,6 +56,17 @@ pub trait Repositories: Send + Sync {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<Vec<WorkOrderSummary>, StoreError>;
+
+    /// The full activity register for a hull — every scheduled activity, mapped
+    /// or not, in schedule order.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn list_activities(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<ActivitySummary>, StoreError>;
 
     /// The stranded man-hours on a hull.
     ///

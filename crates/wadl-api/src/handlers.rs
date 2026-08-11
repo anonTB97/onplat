@@ -135,6 +135,35 @@ pub(crate) async fn list_work_orders(
     Ok(Json(json!(rows)))
 }
 
+/// The full activity register — every scheduled activity at the doing grain,
+/// marked with whether it is planned for `as_of`.
+///
+/// Marked, never filtered, on the same reasoning as the work-order list: a
+/// planner reading next week still needs to see the activity that finished last
+/// week, and an omission is indistinguishable from missing data.
+pub(crate) async fn list_activities(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let rows: Vec<Value> = activities
+        .into_iter()
+        .map(|a| {
+            let mut row = json!(a);
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("in_window".to_owned(), json!(a.booked_at(at)));
+                obj.insert("remaining_hours".to_owned(), json!(a.remaining_hours()));
+            }
+            row
+        })
+        .collect();
+    Ok(Json(json!({ "as_of": at, "activities": rows })))
+}
+
 /// The hull's time frame: the server's clock and the availability it bounds
 /// `as_of` with.
 ///

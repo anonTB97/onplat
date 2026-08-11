@@ -5,7 +5,7 @@
 //! (`source_ref`, `source_verified`) so the shell can say "seeded" when it is.
 
 use wadl_domain::compartment::CompartmentNo;
-use wadl_domain::ids::{VesselId, WorkOrderId};
+use wadl_domain::ids::{ActivityId, VesselId, WorkOrderId};
 use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::ManHours;
 
@@ -183,6 +183,106 @@ pub struct PackageSummary {
     pub budget_hours: ManHours,
     /// Total earned man-hours.
     pub earned_hours: ManHours,
+}
+
+/// How far an activity has actually got, per the schedule of record.
+///
+/// Mirrors P6's `status_code` (`TK_NotStart` / `TK_Active` / `TK_Complete`)
+/// rather than inventing a richer lifecycle: the register reports what the
+/// scheduler said, and anything the platform *derives* — executability, risk —
+/// is kept separate so a derived judgement can never be mistaken for the
+/// schedule's own claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityStatus {
+    /// Not started.
+    NotStarted,
+    /// Started, not finished.
+    InProgress,
+    /// Finished.
+    Complete,
+}
+
+/// How much a mapped field can be trusted, per the P6 crosswalk.
+///
+/// Carried per activity because the compartment mapping is the dominant risk of
+/// any schedule import: a parsed value must never present as an authored one.
+/// (The same grading lives in `wadl-ingest`; unifying the two enums is part of
+/// the XER-ingest work, where the mapping actually happens.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reliability {
+    /// Authored in a controlled field.
+    High,
+    /// Resolved through a convention that has been confirmed.
+    Medium,
+    /// Parsed or guessed — never to be presented as authored.
+    Low,
+}
+
+/// One scheduled activity — the grain P6 plans at, and the row a foreman is
+/// actually handed.
+///
+/// The register exists because an *issue*, properly, is an activity that cannot
+/// execute as planned — and that is only detectable if the activities are in the
+/// platform. Work orders are the accounting grain; activities are the doing
+/// grain.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActivitySummary {
+    /// Primary key.
+    pub activity_id: ActivityId,
+    /// Scheduler's activity id, e.g. `A4020` — what a planner reads aloud.
+    pub code: String,
+    /// Activity name.
+    pub name: String,
+    /// The work order or package this activity belongs to.
+    ///
+    /// `None` is a **visible state, not an error**: scheduled work nobody has
+    /// mapped onto a work item is exactly the gap a planner needs on a list,
+    /// and hiding it would make the register look more reconciled than it is.
+    pub work_order_code: Option<String>,
+    /// The compartment the work happens in, where the mapping knows it.
+    ///
+    /// `None` with a low [`Self::compartment_reliability`] is the honest state
+    /// for "the schedule did not say" — the dominant data risk of every P6
+    /// import, so it is representable rather than papered over.
+    pub compartment_no: Option<CompartmentNo>,
+    /// How much to trust the compartment mapping.
+    pub compartment_reliability: Reliability,
+    /// The trade doing the work.
+    pub trade: String,
+    /// When it is planned. `None` when the schedule of record does not say.
+    pub planned: Option<Window>,
+    /// Budgeted man-hours.
+    pub budget_hours: ManHours,
+    /// Earned man-hours.
+    pub earned_hours: ManHours,
+    /// Where the schedule says it stands.
+    pub status: ActivityStatus,
+    /// A key event rather than work — carries dates and no hours.
+    pub is_milestone: bool,
+    /// Provenance: the document or run this row came from.
+    pub source_ref: String,
+}
+
+impl ActivitySummary {
+    /// Man-hours still to do. Never negative.
+    #[must_use]
+    pub fn remaining_hours(&self) -> ManHours {
+        if self.earned_hours.get() >= self.budget_hours.get() {
+            ManHours::ZERO
+        } else {
+            self.budget_hours - self.earned_hours
+        }
+    }
+
+    /// Whether this activity is planned to be in progress at `at`. Undated
+    /// activities count at every instant, on the same reasoning as
+    /// [`WorkOrderSummary::booked_at`].
+    #[must_use]
+    pub fn booked_at(&self, at: Timestamp) -> bool {
+        self.planned.is_none_or(|w| w.contains(at))
+    }
 }
 
 /// An append-only ledger record, as a surface reads it.

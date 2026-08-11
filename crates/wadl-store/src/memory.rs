@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 use wadl_domain::compartment::CompartmentNo;
-use wadl_domain::ids::{CouplingTypeId, OrgId, SegmentId, VesselId, WorkOrderId};
+use wadl_domain::ids::{ActivityId, CouplingTypeId, OrgId, SegmentId, VesselId, WorkOrderId};
 use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::{HopDepth, ManHours};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
@@ -21,8 +21,8 @@ use wadl_plan::{Package, Segment, SpaceWork};
 
 use crate::error::StoreError;
 use crate::model::{
-    AuditRecord, CompartmentSummary, DeckSummary, PackageSummary, StrandedItem, StrandedReport,
-    VesselSummary, WorkOrderSummary,
+    ActivityStatus, ActivitySummary, AuditRecord, CompartmentSummary, DeckSummary, PackageSummary,
+    Reliability, StrandedItem, StrandedReport, VesselSummary, WorkOrderSummary,
 };
 use crate::repo::Repositories;
 use crate::scope::TenantScope;
@@ -154,6 +154,117 @@ struct PackageSpaceRow {
     from_day: i64,
     to_day: i64,
 }
+
+// ---------------------------------------------------------------- activities
+//
+// The activity register is GENERATED from the seeded work orders and package
+// spaces rather than stored as rows of its own, and that is the point: every
+// activity's hours and window are slices of a parent the boards already show, so
+// the register reconciles with the boards by construction, not by discipline.
+// When real XER ingest lands, ingested activities replace the generated ones and
+// a reconciliation *report* replaces the structural guarantee.
+
+/// Deterministic jitter for the generator: a plain LCG stepped from a fixed
+/// seed, because the register must read identically on every load and this
+/// workspace bans wall clocks and RNGs in seeds.
+fn lcg_next(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state >> 33
+}
+
+/// `n` weights in 3..=7 — enough spread that slices differ, never a zero.
+fn jitter_weights(seed: u64, n: usize) -> Vec<i64> {
+    let mut state = seed;
+    (0..n)
+        .map(|_| 3 + i64::try_from(lcg_next(&mut state) % 5).unwrap_or(0))
+        .collect()
+}
+
+/// Splits `total` across `weights` exactly. Floor shares first, then the
+/// remainder one unit at a time from the front — deterministic, and the sum is
+/// the parent's total to the man-hour, which is what reconciliation means.
+fn allocate(total: i64, weights: &[i64]) -> Vec<i64> {
+    let sum: i64 = weights.iter().sum::<i64>().max(1);
+    let mut shares: Vec<i64> = weights.iter().map(|w| total * w / sum).collect();
+    let mut leftover = total - shares.iter().sum::<i64>();
+    for share in &mut shares {
+        if leftover == 0 {
+            break;
+        }
+        *share += 1;
+        leftover -= 1;
+    }
+    shares
+}
+
+/// Consecutive sub-windows of `window`, one per weight, covering it end to end.
+fn slice_window(window: Window, weights: &[i64]) -> Vec<Window> {
+    let (a, b) = (window.start.epoch_millis(), window.end.epoch_millis());
+    let span = (b - a).max(1);
+    let sum: i64 = weights.iter().sum::<i64>().max(1);
+    let mut out = Vec::with_capacity(weights.len());
+    let mut cursor = a;
+    let mut used = 0_i64;
+    for (i, w) in weights.iter().enumerate() {
+        used += w;
+        let end = if i + 1 == weights.len() {
+            b
+        } else {
+            a + span * used / sum
+        };
+        out.push(Window::new(
+            Timestamp::from_epoch_millis(cursor),
+            Timestamp::from_epoch_millis(end.max(cursor + 1)),
+        ));
+        cursor = end.max(cursor + 1);
+    }
+    out
+}
+
+/// Earned hours filled front to back: the earliest slices complete first, so
+/// status and the window tell one story — finished work in the past, current
+/// work straddling now, unstarted work ahead — instead of contradicting each
+/// other the way independently-jittered figures would.
+fn fill_earned(budgets: &[i64], parent_earned: i64) -> Vec<i64> {
+    let mut left = parent_earned;
+    budgets
+        .iter()
+        .map(|b| {
+            let e = left.min(*b);
+            left -= e;
+            e
+        })
+        .collect()
+}
+
+fn status_of(budget: i64, earned: i64) -> ActivityStatus {
+    if earned == 0 && budget > 0 {
+        ActivityStatus::NotStarted
+    } else if earned >= budget {
+        ActivityStatus::Complete
+    } else {
+        ActivityStatus::InProgress
+    }
+}
+
+/// Phase names for a decomposed work order, in execution order.
+const ORDER_PHASES: [&str; 6] = [
+    "prep & access",
+    "strip / rip-out",
+    "execute",
+    "inspect & rework",
+    "close out",
+    "test support",
+];
+/// Phase names for one compartment of a distributed package.
+const PACKAGE_PHASES: [&str; 4] = [
+    "rip-out & route",
+    "hang / pull",
+    "terminate / seal",
+    "test support",
+];
 
 /// One appended ledger entry, held in memory.
 struct AuditRow {
@@ -302,6 +413,143 @@ impl InMemoryStore {
             self.at_minutes(from_day.saturating_mul(MIN_PER_DAY)),
             self.at_minutes(to_day.saturating_mul(MIN_PER_DAY)),
         )
+    }
+
+    /// Decomposes each work order into phase activities whose hours and windows
+    /// are exact slices of the parent's.
+    fn activities_from_orders(&self, vessel: VesselId, out: &mut Vec<ActivitySummary>) {
+        for (wi, w) in self
+            .work_orders
+            .iter()
+            .filter(|w| w.vessel == vessel)
+            .enumerate()
+        {
+            let n = usize::try_from((w.budget / 80).clamp(2, 6)).unwrap_or(2);
+            let weights = jitter_weights(0xA0 + wi as u64, n);
+            let budgets = allocate(w.budget, &weights);
+            let earneds = fill_earned(&budgets, w.earned);
+            let windows = slice_window(self.day_window(w.from_day, w.to_day), &weights);
+            for (i, ((budget, earned), window)) in
+                budgets.iter().zip(&earneds).zip(&windows).enumerate()
+            {
+                // Every third order's execute phase loses its compartment: the
+                // dominant risk of a real schedule import, kept representable so
+                // every surface downstream has to handle it before ingest lands.
+                let unknown_space = wi % 3 == 2 && i == n / 2;
+                out.push(ActivitySummary {
+                    activity_id: ActivityId::from_uuid(id(0xAC00_0000
+                        + (wi as u128) * 0x100
+                        + i as u128)),
+                    code: format!("{}.{:02}", w.code.replace("WI-", "A"), i + 1),
+                    name: format!(
+                        "{} — {}",
+                        w.title,
+                        ORDER_PHASES.get(i).copied().unwrap_or("execute")
+                    ),
+                    work_order_code: Some(w.code.to_owned()),
+                    compartment_no: (!unknown_space).then(|| CompartmentNo::new(w.compartment)),
+                    compartment_reliability: if unknown_space {
+                        Reliability::Low
+                    } else {
+                        Reliability::High
+                    },
+                    trade: w.trade.to_owned(),
+                    planned: Some(*window),
+                    budget_hours: ManHours::new(*budget),
+                    earned_hours: ManHours::new(*earned),
+                    status: status_of(*budget, *earned),
+                    is_milestone: false,
+                    source_ref: w.source_ref.to_owned(),
+                });
+            }
+        }
+    }
+
+    /// Decomposes each package space the same way, one activity per phase.
+    fn activities_from_packages(&self, vessel: VesselId, out: &mut Vec<ActivitySummary>) {
+        let codes: std::collections::BTreeSet<&str> = self
+            .packages
+            .iter()
+            .filter(|p| p.vessel == vessel)
+            .map(|p| p.code)
+            .collect();
+        for (si, sp) in self
+            .package_spaces
+            .iter()
+            .filter(|sp| codes.contains(sp.package_code))
+            .enumerate()
+        {
+            let n = usize::try_from((sp.budget / 100).clamp(1, 4)).unwrap_or(1);
+            let weights = jitter_weights(0xB0 + si as u64, n);
+            let budgets = allocate(sp.budget, &weights);
+            let earneds = fill_earned(&budgets, sp.earned);
+            let windows = slice_window(self.day_window(sp.from_day, sp.to_day), &weights);
+            for (i, ((budget, earned), window)) in
+                budgets.iter().zip(&earneds).zip(&windows).enumerate()
+            {
+                out.push(ActivitySummary {
+                    activity_id: ActivityId::from_uuid(id(0xAD00_0000
+                        + (si as u128) * 0x100
+                        + i as u128)),
+                    code: format!(
+                        "{}.{:02}{}",
+                        sp.package_code.replace("WI-", "A"),
+                        si + 1,
+                        (b'a' + u8::try_from(i).unwrap_or(0)) as char
+                    ),
+                    name: format!(
+                        "{} — {}",
+                        sp.compartment,
+                        PACKAGE_PHASES.get(i).copied().unwrap_or("execute")
+                    ),
+                    work_order_code: Some(sp.package_code.to_owned()),
+                    compartment_no: Some(CompartmentNo::new(sp.compartment)),
+                    compartment_reliability: Reliability::High,
+                    trade: self
+                        .packages
+                        .iter()
+                        .find(|p| p.code == sp.package_code)
+                        .map_or_else(String::new, |p| p.trade.to_owned()),
+                    planned: Some(*window),
+                    budget_hours: ManHours::new(*budget),
+                    earned_hours: ManHours::new(*earned),
+                    status: status_of(*budget, *earned),
+                    is_milestone: false,
+                    source_ref: format!("{} footprint", sp.package_code),
+                });
+            }
+        }
+    }
+
+    /// The availability's key events. Zero hours and no work order — unmapped is
+    /// a visible state, and these are the honest members of it.
+    fn milestones(&self, out: &mut Vec<ActivitySummary>) {
+        for (i, (code, name, day)) in [
+            ("M0100", "KEY EVENT — Undock", 102_i64),
+            ("M0200", "KEY EVENT — Fast Cruise", 149),
+            ("M0300", "KEY EVENT — Delivery", 165),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            out.push(ActivitySummary {
+                activity_id: ActivityId::from_uuid(id(0xAE00_0000 + i as u128)),
+                code: code.to_owned(),
+                name: name.to_owned(),
+                work_order_code: None,
+                // No compartment, authored as such — unlike a LOW grade, which
+                // means "the schedule did not say".
+                compartment_no: None,
+                compartment_reliability: Reliability::High,
+                trade: "—".to_owned(),
+                planned: Some(self.day_window(day, day + 1)),
+                budget_hours: ManHours::ZERO,
+                earned_hours: ManHours::ZERO,
+                status: ActivityStatus::NotStarted,
+                is_milestone: true,
+                source_ref: "availability key events".to_owned(),
+            });
+        }
     }
 
     /// The two distributed packages from the prototype. They deliberately share
@@ -1166,6 +1414,28 @@ impl Repositories for InMemoryStore {
                 planned: Some(self.day_window(w.from_day, w.to_day)),
             })
             .collect())
+    }
+
+    async fn list_activities(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<ActivitySummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let mut out = Vec::new();
+        self.activities_from_orders(vessel, &mut out);
+        self.activities_from_packages(vessel, &mut out);
+        if vessel == self.vessels.first().map_or(vessel, |v| v.id) {
+            self.milestones(&mut out);
+        }
+        // Schedule order: by planned start, then code — the order a sequence
+        // board reads in.
+        out.sort_by(|a, b| {
+            let ka = a.planned.map_or(i64::MAX, |w| w.start.epoch_millis());
+            let kb = b.planned.map_or(i64::MAX, |w| w.start.epoch_millis());
+            ka.cmp(&kb).then_with(|| a.code.cmp(&b.code))
+        });
+        Ok(out)
     }
 
     async fn stranded_hours(

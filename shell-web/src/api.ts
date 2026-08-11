@@ -485,3 +485,46 @@ export async function recordDecision(
   if (!res.ok) throw new Error(`decision → ${res.status}`);
   return (await res.json()) as AuditRecord;
 }
+
+/* --------------------------------------------------------------- activities */
+
+export type ActivityStatus = "not_started" | "in_progress" | "complete";
+/** How much to trust the compartment mapping — the dominant P6 import risk. */
+export type ActivityReliability = "high" | "medium" | "low";
+
+/**
+ * One scheduled activity — the grain P6 plans at, the row a foreman is handed.
+ * Work orders are the accounting grain; activities are the doing grain.
+ */
+export interface Activity {
+  activity_id: string;
+  code: string;
+  name: string;
+  /** null = scheduled work nobody has mapped — a visible state, not an error. */
+  work_order_code: string | null;
+  /** null with a low reliability = the schedule did not say where. */
+  compartment_no: string | null;
+  compartment_reliability: ActivityReliability;
+  trade: string;
+  planned: Window | null;
+  budget_hours: number;
+  earned_hours: number;
+  remaining_hours: number;
+  status: ActivityStatus;
+  is_milestone: boolean;
+  source_ref: string;
+  /** Whether the activity is planned for the instant this register was read at. */
+  in_window: boolean;
+}
+
+export async function listActivities(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<{ as_of: number; activities: Activity[] }> {
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/activities`, asOf), {
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`activities → ${res.status}`);
+  return (await res.json()) as { as_of: number; activities: Activity[] };
+}

@@ -67,6 +67,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_work_orders),
         )
         .route(
+            "/api/vessels/:id/activities",
+            get(handlers::list_activities),
+        )
+        .route(
             "/api/vessels/:id/stranded-hours",
             get(handlers::stranded_hours),
         )

@@ -28,107 +28,52 @@ pub struct RouteSpec {
     pub sample_body: Option<&'static str>,
 }
 
-/// The full endpoint inventory.
+/// The full endpoint inventory, as the data it is.
+///
+/// A table rather than seventeen struct literals: every row is
+/// `(method, path, tenant_scoped, sample_body)`, and adding an endpoint is
+/// adding a line — which is also what keeps this function inside the
+/// workspace's function-length lint as the API grows.
 #[must_use]
 pub fn inventory() -> Vec<RouteSpec> {
-    vec![
-        RouteSpec {
-            method: "GET",
-            path: "/health",
-            tenant_scoped: false,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/compartments",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/work-orders",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/stranded-hours",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/timeframe",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/compartments/:no/state",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/decks",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/deck-states",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/readiness",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/compartments/:no/mitigations",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/leverage",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "POST",
-            path: "/api/vessels/:id/compartments/:no/decision",
-            tenant_scoped: true,
-            sample_body: Some(r#"{"disposition":"rejected","option":{},"reason":"leak test"}"#),
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/packages",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-        RouteSpec {
-            method: "GET",
-            path: "/api/vessels/:id/packages/:no",
-            tenant_scoped: true,
-            sample_body: None,
-        },
-    ]
+    const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
+        ("GET", "/health", false, None),
+        ("GET", "/api/vessels", true, None),
+        ("GET", "/api/vessels/:id", true, None),
+        ("GET", "/api/vessels/:id/compartments", true, None),
+        ("GET", "/api/vessels/:id/work-orders", true, None),
+        ("GET", "/api/vessels/:id/activities", true, None),
+        ("GET", "/api/vessels/:id/stranded-hours", true, None),
+        ("GET", "/api/vessels/:id/timeframe", true, None),
+        ("GET", "/api/vessels/:id/compartments/:no/state", true, None),
+        ("GET", "/api/vessels/:id/decks", true, None),
+        ("GET", "/api/vessels/:id/deck-states", true, None),
+        ("GET", "/api/vessels/:id/readiness", true, None),
+        (
+            "GET",
+            "/api/vessels/:id/compartments/:no/mitigations",
+            true,
+            None,
+        ),
+        ("GET", "/api/vessels/:id/leverage", true, None),
+        (
+            "POST",
+            "/api/vessels/:id/compartments/:no/decision",
+            true,
+            Some(r#"{"disposition":"rejected","option":{},"reason":"leak test"}"#),
+        ),
+        ("GET", "/api/vessels/:id/packages", true, None),
+        ("GET", "/api/vessels/:id/packages/:no", true, None),
+    ];
+    ROUTES
+        .iter()
+        .map(|&(method, path, tenant_scoped, sample_body)| RouteSpec {
+            method,
+            path,
+            tenant_scoped,
+            sample_body,
+        })
+        .collect()
 }
 
 /// The tenant-scoped endpoints that address a specific hull by id — the ones the

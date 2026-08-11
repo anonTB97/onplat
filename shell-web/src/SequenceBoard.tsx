@@ -16,7 +16,13 @@
 // a list.
 
 import { useEffect, useMemo, useState } from "react";
-import { listActivities, type Activity, type AsOf, type Identity } from "./api";
+import {
+  listActivities,
+  type Activity,
+  type AsOf,
+  type Identity,
+  type ReconciliationMismatch,
+} from "./api";
 import { C, mh } from "./theme";
 
 type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
@@ -66,6 +72,8 @@ export default function SequenceBoard({
   onOpenSpace: (compartment: string) => void;
 }) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
+  const [source, setSource] = useState<string | null>(null);
+  const [mismatches, setMismatches] = useState<ReconciliationMismatch[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [trade, setTrade] = useState<string | null>(null);
@@ -76,7 +84,11 @@ export default function SequenceBoard({
   useEffect(() => {
     setError(null);
     listActivities(identity, vesselId, asOf)
-      .then((r) => setActivities(r.activities))
+      .then((r) => {
+        setActivities(r.activities);
+        setSource(r.schedule_source);
+        setMismatches(r.reconciliation.mismatches);
+      })
       .catch((e: unknown) => {
         setActivities(null);
         setError(String(e));
@@ -156,9 +168,37 @@ export default function SequenceBoard({
             </span>
           </>
         )}
-        . Generated from the seeded work orders and packages so every hour reconciles
-        with the boards; real P6 ingest replaces this register without changing the
-        screen.
+        .{" "}
+        {source ? (
+          <>
+            Schedule of record: <b style={{ color: "#ccd1da" }}>{source}</b> — served
+            as ingested, graded, never smoothed over.
+          </>
+        ) : (
+          <>
+            Generated from the seeded work orders and packages so every hour
+            reconciles with the boards; real P6 ingest replaces this register without
+            changing the screen.
+          </>
+        )}
+        {mismatches.length > 0 && (
+          <>
+            {" "}
+            <b style={{ color: "#f59e0b" }}>⚠ {mismatches.length}</b>{" "}
+            <span
+              title={mismatches
+                .map(
+                  (m) =>
+                    `${m.code}: item ${m.item_budget}/${m.item_earned} MH vs register ${m.register_budget}/${m.register_earned} MH`,
+                )
+                .join(" · ")}
+            >
+              work item{mismatches.length === 1 ? " does" : "s do"} not reconcile with
+              the register
+            </span>
+            .
+          </>
+        )}
       </p>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>

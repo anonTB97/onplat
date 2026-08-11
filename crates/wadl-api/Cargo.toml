@@ -13,6 +13,7 @@ wadl-engine.workspace = true
 wadl-plan.workspace = true
 wadl-mitigate.workspace = true
 wadl-issues.workspace = true
+wadl-ingest.workspace = true
 wadl-store.workspace = true
 axum.workspace = true
 tower.workspace = true

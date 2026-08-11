@@ -188,6 +188,90 @@ async fn the_issue_board_is_ranked_and_typed() {
     );
 }
 
+const SAMPLE_XER: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../reference/p6-sample/CVN73-PIA26.xer"
+));
+
+/// The seam the generator was built to survive, exercised end to end: a real
+/// P6 export becomes the schedule of record, and the same endpoints serve it —
+/// same shapes, same derivations — while reconciliation stops being true by
+/// construction and becomes a report.
+#[tokio::test]
+async fn an_ingested_export_replaces_the_register_without_changing_the_screen() {
+    // The generated register first: no source label, and reconciliation is
+    // empty by construction.
+    let (app, world) = app_at_anchor();
+    let base = format!("/api/vessels/{}/activities", world.cvn73.as_uuid());
+    let (_, body) = get(&app, &world, &base).await;
+    assert!(body["schedule_source"].is_null());
+    assert_eq!(
+        body["reconciliation"]["mismatches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "the generated register reconciles by construction: {}",
+        body["reconciliation"]
+    );
+
+    // Now the sample export as the schedule of record.
+    let (store, world) = InMemoryStore::demo_at(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
+    wadl_api::schedule::load_xer(&store, world.cvn73, "CVN73-PIA26.xer", SAMPLE_XER)
+        .expect("the sample ingests whole");
+    let clock = TestClock::new(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
+    let state = wadl_api::AppState::new(Arc::new(store), Arc::new(clock));
+    let app = wadl_api::build_router(state);
+
+    let (status, body) = get(&app, &world, &base).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schedule_source"], "CVN73-PIA26.xer");
+    let rows = body["activities"].as_array().unwrap();
+    assert_eq!(rows.len(), 17, "the export's rows, not the generator's");
+    for row in rows {
+        assert!(
+            row["executability"]["verdict"].is_string(),
+            "{}: the derivations run unchanged over ingested rows",
+            row["code"]
+        );
+    }
+    // The report says what the export does not cover: the six work orders
+    // reconcile (the sample mirrors their hours), the two distributed packages
+    // are absent from it, and the unmapped activity's hours are counted.
+    let mismatches: Vec<&str> = body["reconciliation"]["mismatches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["code"].as_str().unwrap())
+        .collect();
+    assert!(!mismatches.contains(&"WI-3318"), "{mismatches:?}");
+    assert!(mismatches.contains(&"WI-2201"), "{mismatches:?}");
+    assert!(
+        body["reconciliation"]["unmapped_budget_hours"]
+            .as_i64()
+            .unwrap()
+            > 0,
+        "A6010 is deliberately unmapped"
+    );
+
+    // And the issue board carries the file's own inversion, not the generated one.
+    let (_, issues) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{}/issues", world.cvn73.as_uuid()),
+    )
+    .await;
+    let lag = issues["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "negative_lag")
+        .expect("the sample carries A6010 -> A4050");
+    assert_eq!(lag["pred"], "A6010");
+    assert_eq!(lag["succ"], "A4050");
+    assert_eq!(lag["lag_hours"], -8);
+}
+
 /// Executability does not move with `as_of`: "as planned" is a property of the
 /// plan against the hazards on file, not of where the reader scrubbed the clock.
 #[tokio::test]

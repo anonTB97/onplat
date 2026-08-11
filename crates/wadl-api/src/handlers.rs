@@ -148,6 +148,13 @@ pub(crate) async fn list_work_orders(
 /// piecewise-constancy argument). It deliberately does **not** move with
 /// `as_of` — "as planned" is a property of the plan against the hazards on
 /// file, not of where the reader has scrubbed the clock.
+///
+/// The response also says where the register came from (`schedule_source`:
+/// null for the generated demo register, the export's label once one is
+/// ingested) and carries the reconciliation report: register hours per work
+/// item against the work orders' and packages' own budgets. For the generated
+/// register the report is empty by construction; for an ingested schedule it
+/// is the honest account of what the export does and does not cover.
 pub(crate) async fn list_activities(
     State(state): State<AppState>,
     Caller(scope): Caller,
@@ -165,6 +172,8 @@ pub(crate) async fn list_activities(
         rules: &rules,
         hazards: &hazards,
     };
+    let source = state.store.schedule_source(&scope, vessel).await?;
+    let reconciliation = reconcile(&state, &scope, vessel, &activities).await?;
     let rows: Vec<Value> = activities
         .into_iter()
         .map(|a| {
@@ -178,7 +187,68 @@ pub(crate) async fn list_activities(
             row
         })
         .collect();
-    Ok(Json(json!({ "as_of": at, "activities": rows })))
+    Ok(Json(json!({
+        "as_of": at,
+        "schedule_source": source,
+        "reconciliation": reconciliation,
+        "activities": rows,
+    })))
+}
+
+/// Register hours per work item versus the work items' own budgets.
+///
+/// Only mismatches are reported — a reconciled item is silence, not a row —
+/// plus the budgeted hours the register maps to no work item at all. For the
+/// generated register this is empty by construction (a test pins it); once a
+/// real export is the register, this is where "the schedule does not cover the
+/// package work" stops being a surprise in a meeting.
+async fn reconcile(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    activities: &[wadl_store::model::ActivitySummary],
+) -> Result<Value, ApiError> {
+    let mut by_item: std::collections::BTreeMap<&str, (i64, i64)> =
+        std::collections::BTreeMap::new();
+    let mut unmapped_budget = 0_i64;
+    for a in activities.iter().filter(|a| !a.is_milestone) {
+        match a.work_order_code.as_deref() {
+            Some(code) => {
+                let entry = by_item.entry(code).or_insert((0, 0));
+                entry.0 += a.budget_hours.get();
+                entry.1 += a.earned_hours.get();
+            }
+            None => unmapped_budget += a.budget_hours.get(),
+        }
+    }
+    let orders = state.store.list_work_orders(scope, vessel).await?;
+    let packages = state.store.list_packages(scope, vessel).await?;
+    let targets = orders
+        .iter()
+        .map(|o| (o.code.as_str(), o.budget_hours, o.earned_hours))
+        .chain(
+            packages
+                .iter()
+                .map(|p| (p.code.as_str(), p.budget_hours, p.earned_hours)),
+        );
+    let mismatches: Vec<Value> = targets
+        .filter_map(|(code, budget, earned)| {
+            let (rb, re) = by_item.get(code).copied().unwrap_or((0, 0));
+            (rb != budget.get() || re != earned.get()).then(|| {
+                json!({
+                    "code": code,
+                    "item_budget": budget,
+                    "register_budget": rb,
+                    "item_earned": earned,
+                    "register_earned": re,
+                })
+            })
+        })
+        .collect();
+    Ok(json!({
+        "mismatches": mismatches,
+        "unmapped_budget_hours": unmapped_budget,
+    }))
 }
 
 /// The hull's time frame: the server's clock and the availability it bounds

@@ -12,12 +12,48 @@
 //! "wrong process".
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use wadl_api::demo_app;
+use wadl_domain::Clock;
+use wadl_store::clock::SystemClock;
+use wadl_store::InMemoryStore;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let (app, world) = demo_app();
+    let clock = SystemClock;
+    let (store, world) = InMemoryStore::demo_at(clock.now());
+
+    // `WADL_SCHEDULE_XER=<path>` loads a real P6 export as the in-focus hull's
+    // schedule of record: the register, Daily Ops, executability and the issue
+    // board all serve the export instead of the generated demo rows, and the
+    // reconciliation report starts saying what the export does not cover. This
+    // is the seam the generator was built to survive, demonstrable end to end.
+    if let Ok(path) = std::env::var("WADL_SCHEDULE_XER") {
+        let label = std::path::Path::new(&path)
+            .file_name()
+            .map_or_else(|| path.clone(), |f| f.to_string_lossy().into_owned());
+        let input = std::fs::read_to_string(&path).map_err(|e| {
+            eprintln!("cannot read WADL_SCHEDULE_XER {path}: {e}");
+            e
+        })?;
+        match wadl_api::schedule::load_xer(&store, world.cvn73, &label, &input) {
+            Ok(count) => {
+                println!(
+                    "schedule of record: {label} — {count} activities for {}",
+                    world.cvn73
+                );
+            }
+            Err(reasons) => {
+                // All-or-nothing, and refusing to start beats serving a partial
+                // schedule as though it were the whole one.
+                eprintln!("WADL_SCHEDULE_XER {path} rejected: {reasons}");
+                return Err(std::io::Error::other("schedule of record rejected"));
+            }
+        }
+    }
+
+    let state = wadl_api::AppState::new(Arc::new(store), Arc::new(clock));
+    let app = wadl_api::build_router(state);
 
     // Anything unparseable falls back rather than failing to start: a typo in an
     // env var should not look like a broken binary.

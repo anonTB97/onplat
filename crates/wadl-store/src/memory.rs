@@ -291,14 +291,36 @@ pub struct InMemoryStore {
     packages: Vec<PackageRow>,
     segments: Vec<SegmentRow>,
     package_spaces: Vec<PackageSpaceRow>,
-    /// The audit ledger. The only mutable state in this store, and behind a lock
-    /// rather than `&mut self` because the repository seam is a shared `Arc<dyn>`.
+    /// The audit ledger. Behind a lock rather than `&mut self` because the
+    /// repository seam is a shared `Arc<dyn>`.
     ///
     /// The chain is computed with the real [`crate::ledger::compute_hash`], not a
     /// stub: an in-memory ledger that skipped the chaining would let a chain bug
     /// reach production untested, and `wadl verify-ledger` is supposed to work
     /// against whatever wrote the entries.
     audit: std::sync::Mutex<Vec<AuditRow>>,
+    /// An ingested schedule of record per hull. When present, serving prefers
+    /// it over the generated register — the swap the generator was built to
+    /// survive. Behind a lock for the same reason the ledger is: loading an
+    /// export happens after the store is shared.
+    schedule_of_record: std::sync::RwLock<BTreeMap<VesselId, ScheduleOfRecord>>,
+}
+
+/// An ingested schedule of record, in the store's own read models.
+///
+/// Once one is set for a hull, the register stops being generated-and-
+/// reconciled-by-construction and becomes what the scheduler actually said —
+/// at which point reconciliation is a *report*, computed by the API against
+/// the work orders, rather than a property.
+#[derive(Debug, Clone)]
+pub struct ScheduleOfRecord {
+    /// Where it came from, e.g. `CVN73-PIA26.xer` — surfaced to the reader so
+    /// an ingested register never presents as the generated one.
+    pub label: String,
+    /// The register rows.
+    pub activities: Vec<ActivitySummary>,
+    /// The dependency edges.
+    pub edges: Vec<ScheduleEdgeSummary>,
 }
 
 /// The identifiers of the seeded demo world, handed back so the API and tests
@@ -391,6 +413,7 @@ impl InMemoryStore {
             segments: Self::seed_segments(),
             package_spaces: Self::seed_package_spaces(),
             audit: std::sync::Mutex::new(Vec::new()),
+            schedule_of_record: std::sync::RwLock::new(BTreeMap::new()),
         };
         (store, world)
     }
@@ -1336,6 +1359,26 @@ impl InMemoryStore {
     }
 }
 
+impl InMemoryStore {
+    /// Loads an ingested schedule of record for a hull. Serving prefers it
+    /// over the generated register from the next read on; the screens do not
+    /// change, which is the whole point of the seam.
+    pub fn set_schedule_of_record(&self, vessel: VesselId, sor: ScheduleOfRecord) {
+        self.schedule_of_record
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, sor);
+    }
+
+    fn ingested(&self, vessel: VesselId) -> Option<ScheduleOfRecord> {
+        self.schedule_of_record
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
+}
+
 /// The schedule of record's edges, generated from the register the same way
 /// the register is generated from the work orders — so every code resolves.
 ///
@@ -1486,12 +1529,17 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<Vec<ActivitySummary>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
-        let mut out = Vec::new();
-        self.activities_from_orders(vessel, &mut out);
-        self.activities_from_packages(vessel, &mut out);
-        if vessel == self.vessels.first().map_or(vessel, |v| v.id) {
-            self.milestones(&mut out);
-        }
+        let mut out = if let Some(sor) = self.ingested(vessel) {
+            sor.activities
+        } else {
+            let mut generated = Vec::new();
+            self.activities_from_orders(vessel, &mut generated);
+            self.activities_from_packages(vessel, &mut generated);
+            if vessel == self.vessels.first().map_or(vessel, |v| v.id) {
+                self.milestones(&mut generated);
+            }
+            generated
+        };
         // Schedule order: by planned start, then code — the order a sequence
         // board reads in.
         out.sort_by(|a, b| {
@@ -1507,8 +1555,21 @@ impl Repositories for InMemoryStore {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<Vec<ScheduleEdgeSummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        if let Some(sor) = self.ingested(vessel) {
+            return Ok(sor.edges);
+        }
         let activities = self.list_activities(scope, vessel).await?;
         Ok(schedule_edges_from(&activities))
+    }
+
+    async fn schedule_source(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<String>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.ingested(vessel).map(|sor| sor.label))
     }
 
     async fn stranded_hours(

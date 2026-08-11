@@ -78,6 +78,19 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<Vec<ScheduleEdgeSummary>, StoreError>;
 
+    /// Where the served register comes from: `None` for the generated demo
+    /// register, or the ingested export's label. Surfaced on the register so
+    /// an ingested schedule never presents as the generated one (or the
+    /// reverse — a demo row presenting as a scheduler's claim is worse).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn schedule_source(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<String>, StoreError>;
+
     /// The stranded man-hours on a hull.
     ///
     /// # Errors

@@ -2159,6 +2159,7 @@ dependencies = [
  "uuid",
  "wadl-domain",
  "wadl-engine",
+ "wadl-ingest",
  "wadl-issues",
  "wadl-mitigate",
  "wadl-plan",

@@ -600,14 +600,35 @@ export async function listIssues(
   return (await res.json()) as { as_of: number; hours_at_risk: number; issues: Issue[] };
 }
 
+/** Register hours per work item vs the item's own budget — mismatches only. */
+export interface ReconciliationMismatch {
+  code: string;
+  item_budget: number;
+  register_budget: number;
+  item_earned: number;
+  register_earned: number;
+}
+
+export interface ActivityRegister {
+  as_of: number;
+  /** null = the generated demo register; a label = the ingested export it came from. */
+  schedule_source: string | null;
+  reconciliation: {
+    mismatches: ReconciliationMismatch[];
+    /** Budgeted hours the register maps to no work item at all. */
+    unmapped_budget_hours: number;
+  };
+  activities: Activity[];
+}
+
 export async function listActivities(
   id: Identity,
   vesselId: string,
   asOf: AsOf = null,
-): Promise<{ as_of: number; activities: Activity[] }> {
+): Promise<ActivityRegister> {
   const res = await fetch(withAsOf(`/api/vessels/${vesselId}/activities`, asOf), {
     headers: headers(id),
   });
   if (!res.ok) throw new Error(`activities → ${res.status}`);
-  return (await res.json()) as { as_of: number; activities: Activity[] };
+  return (await res.json()) as ActivityRegister;
 }

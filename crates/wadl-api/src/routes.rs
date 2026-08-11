@@ -65,6 +65,12 @@ pub fn inventory() -> Vec<RouteSpec> {
         ),
         (
             "POST",
+            "/api/vessels/:id/schedule-of-record/revert",
+            true,
+            None,
+        ),
+        (
+            "POST",
             "/api/vessels/:id/compartments/:no/decision",
             true,
             Some(r#"{"disposition":"rejected","option":{},"reason":"leak test"}"#),

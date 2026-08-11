@@ -107,6 +107,17 @@ pub trait Repositories: Send + Sync {
         sor: crate::memory::ScheduleOfRecord,
     ) -> Result<(), StoreError>;
 
+    /// Reverts a hull to its generated register, discarding any ingested
+    /// schedule of record. A no-op when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_schedule_of_record(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
     /// The stranded man-hours on a hull.
     ///
     /// # Errors

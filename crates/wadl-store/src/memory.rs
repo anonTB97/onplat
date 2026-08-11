@@ -1574,6 +1574,19 @@ impl Repositories for InMemoryStore {
         Ok(())
     }
 
+    async fn clear_schedule_of_record(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.schedule_of_record
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
     async fn schedule_source(
         &self,
         scope: &TenantScope,

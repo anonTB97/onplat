@@ -18,6 +18,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   importSchedule,
+  previewSchedule,
+  revertSchedule,
   listActivities,
   type Activity,
   type AsOf,
@@ -81,6 +83,7 @@ export default function SequenceBoard({
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
   const [boardView, setBoardView] = useState<"register" | "lanes">("register");
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [pending, setPending] = useState<{ label: string; xer: string; summary: string } | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [source, setSource] = useState<string | null>(null);
   const [mismatches, setMismatches] = useState<ReconciliationMismatch[]>([]);
@@ -240,10 +243,20 @@ export default function SequenceBoard({
                 e.target.value = "";
                 if (!file) return;
                 void file.text().then((xer) =>
-                  importSchedule(identity, vesselId, file.name, xer)
+                  previewSchedule(identity, vesselId, file.name, xer)
                     .then((r) => {
-                      setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);
-                      setReloadNonce((n) => n + 1);
+                      const codes = r.reconciliation.mismatches.map((m) => m.code).join(", ");
+                      setPending({
+                        label: file.name,
+                        xer,
+                        summary:
+                          `${r.activities} activities, ${r.edges} edges` +
+                          (codes ? ` · does not reconcile: ${codes}` : " · reconciles") +
+                          (r.reconciliation.unmapped_budget_hours > 0
+                            ? ` · ${r.reconciliation.unmapped_budget_hours} MH unmapped`
+                            : ""),
+                      });
+                      setImportMsg(null);
                     })
                     .catch((err: unknown) => setImportMsg(String(err))),
                 );
@@ -279,8 +292,50 @@ export default function SequenceBoard({
           >
             ⭳ Export CSV
           </button>
+          {source !== null && (
+            <button
+              style={chip(false)}
+              title="Discard the ingested schedule and serve the generated register again."
+              onClick={() => {
+                void revertSchedule(identity, vesselId)
+                  .then(() => {
+                    setImportMsg("✓ reverted to the generated register");
+                    setReloadNonce((n) => n + 1);
+                  })
+                  .catch((err: unknown) => setImportMsg(String(err)));
+              }}
+            >
+              ⟲ Revert
+            </button>
+          )}
         </span>
       </div>
+
+      {pending && (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, padding: "8px 12px", border: `1px solid #f59e0b66`, borderRadius: 8, background: "rgba(245,158,11,0.06)", fontSize: 12 }}>
+          <b>{pending.label}</b>
+          <span style={{ color: C.dim }}>{pending.summary}</span>
+          <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button
+              style={chip(true)}
+              onClick={() => {
+                const staged = pending;
+                setPending(null);
+                if (!staged) return;
+                void importSchedule(identity, vesselId, staged.label, staged.xer)
+                  .then((r) => {
+                    setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);
+                    setReloadNonce((n) => n + 1);
+                  })
+                  .catch((err: unknown) => setImportMsg(String(err)));
+              }}
+            >
+              Confirm import
+            </button>
+            <button style={chip(false)} onClick={() => setPending(null)}>Cancel</button>
+          </span>
+        </div>
+      )}
 
       {boardView === "lanes" && (
         <ZoneLanes activities={activities} spaces={spaces} asOf={asOfMs} onOpenSpace={onOpenSpace} />

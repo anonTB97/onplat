@@ -638,6 +638,31 @@ export async function importSchedule(
   return (await res.json()) as { label: string; activities: number; edges: number };
 }
 
+/** Dry-runs an import: everything the import would say, nothing it would do. */
+export async function previewSchedule(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  xer: string,
+): Promise<{ activities: number; edges: number; reconciliation: { mismatches: ReconciliationMismatch[]; unmapped_budget_hours: number } }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record?dry_run=true`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, xer }),
+  });
+  if (!res.ok) throw new Error(`preview → ${res.status}: ${await res.text()}`);
+  return (await res.json()) as never;
+}
+
+/** Reverts to the generated register, discarding the ingested schedule. */
+export async function revertSchedule(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`revert → ${res.status}`);
+}
+
 export async function listActivities(
   id: Identity,
   vesselId: string,

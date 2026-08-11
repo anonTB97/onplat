@@ -966,6 +966,7 @@ pub(crate) async fn import_schedule(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
     Json(body): Json<ImportSchedule>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -974,6 +975,19 @@ pub(crate) async fn import_schedule(
         .map_err(|reasons| ApiError::OutOfRange(format!("XER rejected: {reasons}")))?;
     let activities = sor.activities.len();
     let edges = sor.edges.len();
+    // The dry run: everything the import would say, nothing it would do —
+    // including the reconciliation the reader currently only sees AFTER the
+    // swap. Committing a schedule blind was the sharpest edge on this door.
+    let reconciliation = reconcile(&state, &scope, vessel, &sor.activities).await?;
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "dry_run": true,
+            "label": body.label,
+            "activities": activities,
+            "edges": edges,
+            "reconciliation": reconciliation,
+        })));
+    }
     state
         .store
         .set_schedule_of_record(&scope, vessel, sor)
@@ -982,7 +996,26 @@ pub(crate) async fn import_schedule(
         "label": body.label,
         "activities": activities,
         "edges": edges,
+        "reconciliation": reconciliation,
     })))
+}
+
+/// The `?dry_run=` flag on a schedule import.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+pub(crate) struct DryRun {
+    pub(crate) dry_run: Option<bool>,
+}
+
+/// Reverts the hull to its generated register, discarding the ingested
+/// schedule of record. The undo the import door needs to be safe to try.
+pub(crate) async fn revert_schedule(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_schedule_of_record(&scope, vessel).await?;
+    Ok(Json(json!({ "reverted": true })))
 }
 
 /// The body of a schedule-of-record import.

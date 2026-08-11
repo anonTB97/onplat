@@ -94,6 +94,10 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::import_schedule),
         )
         .route(
+            "/api/vessels/:id/schedule-of-record/revert",
+            post(handlers::revert_schedule),
+        )
+        .route(
             "/api/vessels/:id/compartments/:no/decision",
             post(handlers::record_decision),
         )

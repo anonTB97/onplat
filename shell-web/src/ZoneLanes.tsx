@@ -1,5 +1,11 @@
 // Zone lanes: the register as a Gantt, one swim lane per zone, one shared
 // time axis — the cross-zone view a zone manager actually runs a week from.
+// The same board also renders at compartment grain (`grain="compartment"`):
+// one lane per space, ordered zone-then-space so neighbours stay neighbours,
+// which is the sequence-inside-a-space view a trade supervisor reads. One
+// honesty rule separates the grains: a WBS zone hint places work at zone
+// grain and nothing finer, so at compartment grain those rows sit in the
+// unlocated lane rather than a guessed one.
 //
 // The organising idea: a zone manager's day starts with three questions —
 // what runs in MY zone this week, what of it cannot execute as planned, and
@@ -57,6 +63,8 @@ interface Bar {
 }
 
 interface Lane {
+  /** The lane's key: a zone name at zone grain, a compartment number at
+   *  compartment grain, or the honest nowhere-bucket. */
   zone: string;
   bars: Bar[];
   rows: number;
@@ -80,6 +88,7 @@ export function ZoneLanes({
   spaces,
   edges,
   asOf,
+  grain = "zone",
   onOpenSpace,
 }: {
   activities: Activity[];
@@ -88,6 +97,8 @@ export function ZoneLanes({
   edges: ScheduleEdge[];
   /** The instant the register was read at — the "today" line. */
   asOf: number | null;
+  /** The lane grain: a lane per zone, or a lane per compartment. */
+  grain?: "zone" | "compartment";
   onOpenSpace: (compartment: string) => void;
 }) {
   // The time camera. `null` = the full availability; a window = zoomed in.
@@ -105,18 +116,29 @@ export function ZoneLanes({
   for (const r of spaces) zoneOf.set(r.compartment.compartment_no, r.compartment.zone);
   const hullZones = new Set(zoneOf.values());
 
+  const byCompartment = grain === "compartment";
+  /** The honest nowhere-bucket's name, per grain. */
+  const NOWHERE = byCompartment ? "unlocated" : "unzoned";
+
   const dated = activities.filter((a) => !a.is_milestone && a.planned !== null);
   // An unlocated activity whose WBS bucket names a real zone of this hull
-  // lands in that zone's lane — a hint at exactly this board's grain, so this
-  // is the one place it can honestly place work. The bar says it is a hint.
+  // lands in that zone's lane — a hint at exactly ZONE grain, so the zone
+  // board is the one place it can honestly place work. The bar says it is a
+  // hint. At compartment grain the hint is too coarse to place anything, so
+  // those rows sit in the unlocated lane instead.
   const wbsHint = (a: Activity) =>
+    !byCompartment &&
     a.compartment_no === null && a.wbs_area !== null && hullZones.has(a.wbs_area);
-  const laneOf = (a: Activity) =>
-    (a.compartment_no !== null
-      ? zoneOf.get(a.compartment_no)
-      : wbsHint(a)
-        ? (a.wbs_area ?? undefined)
-        : undefined) ?? "unzoned";
+  const laneOf = (a: Activity) => {
+    if (byCompartment) return a.compartment_no ?? NOWHERE;
+    return (
+      (a.compartment_no !== null
+        ? zoneOf.get(a.compartment_no)
+        : wbsHint(a)
+          ? (a.wbs_area ?? undefined)
+          : undefined) ?? NOWHERE
+    );
+  };
 
   const milestones = activities.filter((a) => a.is_milestone && a.planned !== null);
   const allWindows = [...dated, ...milestones].map((a) => a.planned).filter((w) => w !== null);
@@ -136,14 +158,22 @@ export function ZoneLanes({
   const now = asOf ?? t0;
   const weekEnd = now + 7 * DAY;
 
-  // Build lanes: zones in hull order (name-sorted works for Z2..Z7), then the
-  // honest bucket for work the register cannot place in a zone. Levels are
-  // stacked from the FULL register, not the visible slice, so a bar keeps its
-  // row while the camera moves — a bar that jumps lanes mid-zoom would break
-  // the reader's fix on it.
-  const zoneNames = [...new Set(dated.map(laneOf))].sort((a, b) =>
-    a === "unzoned" ? 1 : b === "unzoned" ? -1 : a.localeCompare(b),
-  );
+  // Build lanes: zones in hull order (name-sorted works for Z2..Z7) — or, at
+  // compartment grain, spaces ordered zone-then-space so a zone's compartments
+  // stay adjacent — then the honest bucket for work the register cannot place.
+  // Levels are stacked from the FULL register, not the visible slice, so a bar
+  // keeps its row while the camera moves — a bar that jumps lanes mid-zoom
+  // would break the reader's fix on it.
+  const zoneNames = [...new Set(dated.map(laneOf))].sort((a, b) => {
+    if (a === NOWHERE) return 1;
+    if (b === NOWHERE) return -1;
+    if (byCompartment) {
+      const za = zoneOf.get(a) ?? "~";
+      const zb = zoneOf.get(b) ?? "~";
+      if (za !== zb) return za.localeCompare(zb);
+    }
+    return a.localeCompare(b);
+  });
   let top = AXIS_H + EVENTS_H;
   const lanes: Lane[] = zoneNames.map((zone) => {
     const mine = dated
@@ -172,7 +202,9 @@ export function ZoneLanes({
       weekHours: inWeek.reduce((s, a) => s + a.remaining_hours, 0),
       refused: mine.filter((a) => a.executability.verdict === "not_executable").length,
       heldSpaces: spaces.filter(
-        (r) => r.compartment.zone === zone && !r.permits_work,
+        (r) =>
+          (byCompartment ? r.compartment.compartment_no === zone : r.compartment.zone === zone) &&
+          !r.permits_work,
       ).length,
     };
     top += lane.h;
@@ -254,17 +286,64 @@ export function ZoneLanes({
         {lanes.map((lane, i) => (
           <g key={lane.zone}>
             <rect x={0} y={lane.top} width={W} height={lane.h} fill={i % 2 === 0 ? "#101118" : C.well} />
-            <rect x={0} y={lane.top} width={5} height={lane.h} fill={lane.zone === "unzoned" ? C.faint : zoneColour(lane.zone)} opacity={0.85} />
-            {/* The zone manager's gutter: this week, in numbers. */}
-            <text x={12} y={lane.top + 14} fill={C.text} fontSize={10.5} fontWeight={700}>
-              {lane.zone === "unzoned" ? "No zone (unlocated)" : lane.zone}
-            </text>
-            <text x={12} y={lane.top + 26} fill="#8b93a2" fontSize={8.5}>
-              {`next 7d: ${lane.weekCount} act · ${mh(lane.weekHours)}`}
-            </text>
-            <text x={12} y={lane.top + 37} fill={lane.refused > 0 || lane.heldSpaces > 0 ? "#f87171" : C.faint} fontSize={8.5}>
-              {`${lane.refused} not executable · ${lane.heldSpaces} spaces held now`}
-            </text>
+            <rect
+              x={0} y={lane.top} width={5} height={lane.h}
+              fill={
+                lane.zone === NOWHERE
+                  ? C.faint
+                  : zoneColour(byCompartment ? (zoneOf.get(lane.zone) ?? "") : lane.zone)
+              }
+              opacity={0.85}
+            />
+            {byCompartment ? (
+              // The trade supervisor's gutter: the space, its zone, this week —
+              // two lines, because a compartment's lane is usually one row tall.
+              <>
+                <text
+                  x={12} y={lane.top + 13}
+                  fill={lane.zone === NOWHERE ? C.warn : C.text}
+                  fontSize={9.5} fontWeight={700} fontFamily="monospace"
+                  onClick={() => {
+                    if (lane.zone !== NOWHERE && !drag.current?.moved) onOpenSpace(lane.zone);
+                  }}
+                  style={lane.zone === NOWHERE ? undefined : { cursor: "pointer" }}
+                >
+                  <title>
+                    {lane.zone === NOWHERE
+                      ? "Scheduled work the register cannot place in a space. A WBS hint places at zone grain only — never finer — so it cannot lend a row here."
+                      : "Open on the deck plan"}
+                  </title>
+                  {lane.zone === NOWHERE ? "No space (unlocated)" : lane.zone}
+                </text>
+                <text
+                  x={12} y={lane.top + 25}
+                  fill={lane.refused > 0 || lane.heldSpaces > 0 ? "#f87171" : "#8b93a2"}
+                  fontSize={8}
+                >
+                  {[
+                    lane.zone === NOWHERE ? null : (zoneOf.get(lane.zone) ?? "no zone"),
+                    `7d: ${lane.weekCount} · ${mh(lane.weekHours)}`,
+                    lane.refused > 0 ? `${lane.refused} refused` : null,
+                    lane.heldSpaces > 0 ? "held now" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </text>
+              </>
+            ) : (
+              // The zone manager's gutter: this week, in numbers.
+              <>
+                <text x={12} y={lane.top + 14} fill={C.text} fontSize={10.5} fontWeight={700}>
+                  {lane.zone === NOWHERE ? "No zone (unlocated)" : lane.zone}
+                </text>
+                <text x={12} y={lane.top + 26} fill="#8b93a2" fontSize={8.5}>
+                  {`next 7d: ${lane.weekCount} act · ${mh(lane.weekHours)}`}
+                </text>
+                <text x={12} y={lane.top + 37} fill={lane.refused > 0 || lane.heldSpaces > 0 ? "#f87171" : C.faint} fontSize={8.5}>
+                  {`${lane.refused} not executable · ${lane.heldSpaces} spaces held now`}
+                </text>
+              </>
+            )}
           </g>
         ))}
         <text x={8} y={AXIS_H + 12} fill={C.accent} fontSize={9} fontWeight={700} letterSpacing={0.8}>
@@ -405,9 +484,11 @@ export function ZoneLanes({
         <span><span style={{ color: STATUS_FILL.not_started }}>■</span> not started</span>
         <span><span style={{ color: STATUS_FILL.complete }}>■</span> complete</span>
         <span><span style={{ color: C.danger }}>▭</span> not executable as planned</span>
-        <span title="Unlocated work whose WBS bucket names this zone — placed at zone grain, nothing finer.">
-          <span style={{ color: C.warn }}>▤</span> placed by WBS hint
-        </span>
+        {!byCompartment && (
+          <span title="Unlocated work whose WBS bucket names this zone — placed at zone grain, nothing finer.">
+            <span style={{ color: C.warn }}>▤</span> placed by WBS hint
+          </span>
+        )}
         <span><span style={{ color: "#5b6272" }}>⟶</span> finish-to-start</span>
         <span title="The successor starts before its predecessor finishes — an overlap written into the schedule's own logic.">
           <span style={{ color: C.danger }}>⟶</span> negative lag{inversions > 0 ? ` (${inversions})` : ""}

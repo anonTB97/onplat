@@ -113,7 +113,7 @@ export default function SequenceBoard({
 }) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
-  const [boardView, setBoardView] = useState<"register" | "lanes">("register");
+  const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes">("register");
   const [importMsg, setImportMsg] = useState<string | null>(null);
   const [pending, setPending] = useState<{ label: string; xer: string; preview: ImportPreview } | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -123,6 +123,7 @@ export default function SequenceBoard({
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [trade, setTrade] = useState<string | null>(null);
+  const [space, setSpace] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusFilter>("all");
   const [inWindowOnly, setInWindowOnly] = useState(false);
   const [notExecOnly, setNotExecOnly] = useState(false);
@@ -150,12 +151,31 @@ export default function SequenceBoard({
     [activities],
   );
 
+  // Every space the register names, plus the honest bucket for the rows it
+  // cannot place — "unlocated" is pickable precisely because those rows are
+  // the ones a planner most needs on a list of their own.
+  const spaceOptions = useMemo(
+    () =>
+      [...new Set(
+        (activities ?? [])
+          .filter((a) => !a.is_milestone)
+          .map((a) => a.compartment_no)
+          .filter((c): c is string => c !== null),
+      )].sort(),
+    [activities],
+  );
+
   // Search and the trade/status filters narrow the register — those are the
   // reader's own questions. The instant never does; it marks.
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = (activities ?? []).filter((a) => {
       if (trade && a.trade !== trade) return false;
+      if (space === "unlocated") {
+        if (a.compartment_no !== null || a.is_milestone) return false;
+      } else if (space && a.compartment_no !== space) {
+        return false;
+      }
       if (status !== "all" && a.status !== status) return false;
       if (inWindowOnly && !a.in_window) return false;
       if (notExecOnly && a.executability.verdict !== "not_executable") return false;
@@ -194,7 +214,7 @@ export default function SequenceBoard({
         : String(va).localeCompare(String(vb));
       return cmp * sort.dir;
     });
-  }, [activities, search, trade, status, inWindowOnly, notExecOnly, sort]);
+  }, [activities, search, trade, space, status, inWindowOnly, notExecOnly, sort]);
 
   if (error) return <p style={{ color: C.danger }}>Register unavailable ({error}).</p>;
   if (!activities) return <Loading label="Reading the register…" />;
@@ -268,6 +288,13 @@ export default function SequenceBoard({
           title="Swim lanes per zone on one calendar — the cross-zone Gantt"
         >
           Zone lanes
+        </button>
+        <button
+          style={chip(boardView === "spaceLanes")}
+          onClick={() => setBoardView("spaceLanes")}
+          title="Swim lanes per compartment on the same calendar — the sequence inside each space. Unlocated work keeps its own lane; a WBS hint places at zone grain only, never here."
+        >
+          Space lanes
         </button>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           {importMsg && <span style={{ fontSize: 11, color: importMsg.startsWith("✓") ? C.ok : C.danger }}>{importMsg}</span>}
@@ -438,8 +465,15 @@ export default function SequenceBoard({
         );
       })()}
 
-      {boardView === "lanes" && (
-        <ZoneLanes activities={activities} spaces={spaces} edges={edges} asOf={asOfMs} onOpenSpace={onOpenSpace} />
+      {(boardView === "lanes" || boardView === "spaceLanes") && (
+        <ZoneLanes
+          activities={activities}
+          spaces={spaces}
+          edges={edges}
+          asOf={asOfMs}
+          grain={boardView === "spaceLanes" ? "compartment" : "zone"}
+          onOpenSpace={onOpenSpace}
+        />
       )}
 
       {boardView === "register" && (<>
@@ -459,6 +493,26 @@ export default function SequenceBoard({
             {t}
           </button>
         ))}
+        <span style={{ width: 1, height: 18, background: C.line }} />
+        <select
+          value={space ?? ""}
+          onChange={(e) => setSpace(e.target.value === "" ? null : e.target.value)}
+          title="Narrow the register to one compartment — or to the rows the schedule could not place at all."
+          style={{
+            font: "inherit", fontSize: 11.5, padding: "4px 7px", borderRadius: 6, cursor: "pointer",
+            background: space ? C.raised : "#0b0c0e",
+            color: space ? C.text : C.dim,
+            border: `1px solid ${space ? C.accent : C.line}`,
+            fontFamily: space && space !== "unlocated" ? "monospace" : undefined,
+            maxWidth: 170,
+          }}
+        >
+          <option value="">All spaces</option>
+          <option value="unlocated">not located</option>
+          {spaceOptions.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
         <span style={{ width: 1, height: 18, background: C.line }} />
         {(["all", "not_started", "in_progress", "complete"] as StatusFilter[]).map((k) => (
           <button key={k} style={chip(status === k)} onClick={() => setStatus(k)}>

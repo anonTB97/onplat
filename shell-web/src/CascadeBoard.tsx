@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  compartmentState,
   leverage,
   type AsOf,
   type Confidence,
@@ -21,7 +22,7 @@ import {
   type Identity,
   type Mitigation,
 } from "./api";
-import { IsoWalk, type WalkStep } from "./IsoWalk";
+import { IsoWalk, type WalkStep, type WalkTone } from "./IsoWalk";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { actionTitle } from "./Mitigations";
@@ -76,6 +77,46 @@ export default function CascadeBoard({
         setError(String(e));
       });
   }, [identity, vesselId, asOf]);
+
+  // The cause layer for the walkthrough: each affected space's decision trace
+  // holds the hop-by-hop path its hold actually took (the same trace the Deck
+  // Explorer draws). Fetched per chosen action; hops are deduped across the
+  // affected set. These are the routes on file NOW — why the freed spaces are
+  // held today — never an interpolation of the counterfactual.
+  const [routes, setRoutes] = useState<[string, string][]>([]);
+  useEffect(() => {
+    const act = actions?.[sel];
+    if (!act) {
+      setRoutes([]);
+      return undefined;
+    }
+    const affected = [...act.effect.frees, ...act.effect.closes];
+    let stale = false;
+    void Promise.all(
+      affected.map((no) => compartmentState(identity, vesselId, no, asOf).catch(() => null)),
+    ).then((results) => {
+      if (stale) return;
+      const seen = new Set<string>();
+      const edges: [string, string][] = [];
+      for (const r of results) {
+        for (const t of r?.decision.trace ?? []) {
+          for (let i = 0; i + 1 < t.path.length; i += 1) {
+            const a = t.path[i];
+            const b = t.path[i + 1];
+            if (a === undefined || b === undefined) continue;
+            const key = `${a}→${b}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            edges.push([a, b]);
+          }
+        }
+      }
+      setRoutes(edges);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, asOf, actions, sel]);
 
   // Deck lanes from the register itself: every deck that places a space,
   // top of the ship first.
@@ -136,6 +177,22 @@ export default function CascadeBoard({
   // The same consequence, as a guided tour: the action first, then every
   // space it frees, then — loudest — every space it shuts, then the net.
   const byName = new Map(spaces.map((r) => [r.compartment.compartment_no, r]));
+  // Every space the tour touches, tinted from the first frame — the whole
+  // affected environment visible before the telling reaches it.
+  const walkCast: { space: string; tone: WalkTone }[] = chosen
+    ? [
+        ...(chosen.action.kind === "discharge"
+          ? [{ space: chosen.action.origin, tone: "accent" as const }]
+          : chosen.action.kind === "interrupt"
+            ? [
+                { space: chosen.action.from, tone: "accent" as const },
+                { space: chosen.action.to, tone: "accent" as const },
+              ]
+            : []),
+        ...chosen.effect.frees.map((s) => ({ space: s, tone: "ok" as const })),
+        ...chosen.effect.closes.map((s) => ({ space: s, tone: "danger" as const })),
+      ]
+    : [];
   const walkSteps: WalkStep[] = [];
   if (chosen) {
     const a = chosen.action;
@@ -232,7 +289,14 @@ export default function CascadeBoard({
               </div>
 
               {view === "walk" ? (
-                <IsoWalk key={sel} spaces={spaces} steps={walkSteps} onOpenSpace={onOpenSpace} />
+                <IsoWalk
+                  key={sel}
+                  spaces={spaces}
+                  steps={walkSteps}
+                  routes={routes}
+                  cast={walkCast}
+                  onOpenSpace={onOpenSpace}
+                />
               ) : (
               <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block", background: "#0b0c0e" }}>
                 {lanes.map((deck, i) => (

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  compartmentState,
   getPackage,
   listPackages,
   type AsOf,
@@ -8,7 +9,7 @@ import {
   type PackageDetail,
   type PackageSummary,
 } from "./api";
-import { IsoWalk, type WalkStep } from "./IsoWalk";
+import { IsoWalk, type WalkStep, type WalkTone } from "./IsoWalk";
 import { C, fmtClear, mh, STATE_STYLE } from "./theme";
 
 export default function DistributedPackages({
@@ -55,6 +56,43 @@ export default function DistributedPackages({
       .catch(() => setDetail(null));
   }, [identity, vesselId, selected, asOf]);
 
+  // The cause layer: the held footprint spaces' decision traces carry the
+  // hop-by-hop path of whatever holds them — drawn so a hold three decks
+  // from its origin stops looking arbitrary.
+  const [routes, setRoutes] = useState<[string, string][]>([]);
+  useEffect(() => {
+    const held = detail?.footprint.filter((f) => f.state !== "ALLOW") ?? [];
+    if (held.length === 0) {
+      setRoutes([]);
+      return undefined;
+    }
+    let stale = false;
+    void Promise.all(
+      held.map((f) => compartmentState(identity, vesselId, f.compartment_no, asOf).catch(() => null)),
+    ).then((results) => {
+      if (stale) return;
+      const seen = new Set<string>();
+      const edges: [string, string][] = [];
+      for (const r of results) {
+        for (const t of r?.decision.trace ?? []) {
+          for (let i = 0; i + 1 < t.path.length; i += 1) {
+            const a = t.path[i];
+            const b = t.path[i + 1];
+            if (a === undefined || b === undefined) continue;
+            const key = `${a}→${b}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            edges.push([a, b]);
+          }
+        }
+      }
+      setRoutes(edges);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, asOf, detail]);
+
   if (error) {
     return <p style={{ color: C.danger }}>This hull is out of scope for you ({error}).</p>;
   }
@@ -78,6 +116,15 @@ export default function DistributedPackages({
 
   // The footprint as a guided tour: upstream to downstream, the order the
   // test authority walks it, with the governing constraint told loudest.
+  const walkCast: { space: string; tone: WalkTone }[] = (detail?.footprint ?? []).map((f) => ({
+    space: f.compartment_no,
+    tone:
+      g !== null && g.compartment === f.compartment_no
+        ? ("danger" as const)
+        : f.state === "ALLOW"
+          ? ("ok" as const)
+          : ("warn" as const),
+  }));
   const walkSteps: WalkStep[] = [];
   if (detail) {
     walkSteps.push({
@@ -221,7 +268,14 @@ export default function DistributedPackages({
             3D walkthrough · the footprint, upstream to downstream
           </div>
           <div style={{ marginBottom: 16 }}>
-            <IsoWalk key={selected ?? ""} spaces={spaces} steps={walkSteps} onOpenSpace={onOpenSpace} />
+            <IsoWalk
+              key={selected ?? ""}
+              spaces={spaces}
+              steps={walkSteps}
+              routes={routes}
+              cast={walkCast}
+              onOpenSpace={onOpenSpace}
+            />
           </div>
 
           <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>

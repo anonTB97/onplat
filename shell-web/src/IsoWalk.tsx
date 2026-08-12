@@ -21,10 +21,31 @@
 // base plinth, so "grouped by zone" is visible in the same picture that
 // shows deck adjacency — the two groupings the same 24 spaces are usually
 // forced to choose between.
+//
+// Three things make it an environment view rather than a diagram:
+//
+// * **Tilt.** Affected compartments are not necessarily adjacent — a bus or a
+//   vent trunk shuts spaces decks apart. The tilt slider morphs the same
+//   scene from a true plan overlay (every deck collapsed onto one plane, so
+//   "which frames and sides are touched, anywhere in the ship" reads at a
+//   glance) up to the exploded stack (so "which deck" reads). One projection,
+//   continuously re-angled; nothing is recomputed but the camera.
+// * **The cause layer.** When the caller passes the engine's decision-trace
+//   routes, the hazard's actual hop-by-hop path is drawn through the scene —
+//   including the pass-through spaces it rides (a trunk, a bus run) that no
+//   effect list names. Non-adjacent consequence stops looking arbitrary: the
+//   wire that carries it is on screen.
+// * **The cast.** Every space any step will visit is tinted from the first
+//   frame, so the full footprint of the consequence is visible before the
+//   telling reaches it; the stepper spotlights, it never reveals.
+//
+// The hull itself is sketched behind the scene — a carrier profile when
+// tilted up, the deck-edge planform when flattened — so the reader is always
+// looking at a ship, not at floating planes.
 
 import { useState } from "react";
 import type { DeckStateRow } from "./api";
-import { C, mh, zoneColour } from "./theme";
+import { C, mh, STATE_STYLE, zoneColour } from "./theme";
 
 const W = 1240;
 const LABEL_W = 86;
@@ -78,13 +99,22 @@ interface BoxGeom {
 export function IsoWalk({
   spaces,
   steps,
+  routes = [],
+  cast = [],
   onOpenSpace,
 }: {
   spaces: DeckStateRow[];
   steps: WalkStep[];
+  /** The engine's hop-by-hop hazard routes (decision-trace paths), drawn as
+   *  the cause layer. Pass the hops on file NOW — never an interpolation. */
+  routes?: [string, string][];
+  /** Every space the tour will touch, tinted from the first frame. */
+  cast?: { space: string; tone: WalkTone }[];
   onOpenSpace: (compartment: string) => void;
 }) {
   const [idx, setIdx] = useState(0);
+  /** The camera's angle: 0 = plan (decks collapsed), 1 = exploded stack. */
+  const [tilt, setTilt] = useState(1);
 
   const placeable = spaces.filter((r) => r.compartment.frame !== null);
   const decks = [...new Map(
@@ -93,8 +123,15 @@ export function IsoWalk({
   const frames = placeable.map((r) => r.compartment.frame ?? 0);
   const fLo = Math.min(...frames) - 6;
   const fHi = Math.max(...frames) + 6;
-  const deckY = new Map(decks.map(([code], i) => [code, TOP + (i + 1) * DECK_GAP]));
+
+  // The tilt is nothing but these three numbers: how far apart the decks
+  // sit, how tall a box stands, and how loud each backdrop is. The canvas
+  // keeps its exploded height so the layout never jumps under the slider.
+  const gap = 12 + (DECK_GAP - 12) * tilt;
+  const boxH = 3 + (BOX_H - 3) * tilt;
   const H = TOP + decks.length * DECK_GAP + 26;
+  const yOff = ((decks.length * (DECK_GAP - gap)) / 2) * 1;
+  const deckY = new Map(decks.map(([code], i) => [code, TOP + yOff + (i + 1) * gap]));
 
   // Bow (low frame) to the right, as on every other hull canvas here.
   const u = (frame: number) => LABEL_W + ((fHi - frame) / (fHi - fLo)) * PLOT_W;
@@ -121,6 +158,16 @@ export function IsoWalk({
   }
   const unplaceable = (step?.spaces ?? []).filter((no) => !geom.has(no));
 
+  // The whole footprint, tinted before the telling reaches it.
+  const castTone = new Map(cast.map((c) => [c.space, c.tone]));
+  // Spaces the hazard rides THROUGH: on a route, but in nobody's effect list.
+  const viaSpaces = new Set(
+    routes
+      .flat()
+      .filter((no) => geom.has(no) && !castTone.has(no) && !current.has(no) && !walked.has(no)),
+  );
+  const routeColour = STATE_STYLE.SUSPEND.fg;
+
   const arrows =
     step?.arrowFrom && geom.has(step.arrowFrom)
       ? step.spaces
@@ -134,13 +181,13 @@ export function IsoWalk({
     const isCurrent = current.has(no);
     const walkedTone = walked.get(no);
     const heldNow = !g.row.permits_work;
-    const tone = isCurrent ? step?.tone : walkedTone;
+    const tone = isCurrent ? step?.tone : (walkedTone ?? castTone.get(no));
     const front = tone
       ? TONE_FILL[tone]
       : heldNow
         ? "rgba(220,38,38,0.28)"
         : "rgba(148,163,184,0.22)";
-    const dimmer = isCurrent ? 1 : walkedTone ? 0.75 : 0.6;
+    const dimmer = isCurrent ? 1 : walkedTone ? 0.8 : castTone.has(no) ? 0.62 : 0.55;
     const { sx, sy } = g;
     return (
       <g
@@ -150,7 +197,7 @@ export function IsoWalk({
         opacity={dimmer}
       >
         <title>
-          {`${no} — ${g.row.compartment.name}\n${g.row.compartment.zone} · ${g.row.compartment.deck_code} deck · Fr ${g.row.compartment.frame} ${g.row.compartment.side}\n${heldNow ? "held now" : "permits work"} · ${mh(g.row.remaining_hours)} remaining\nClick to open on the deck plan.`}
+          {`${no} — ${g.row.compartment.name}\n${g.row.compartment.zone} · ${g.row.compartment.deck_code} deck · Fr ${g.row.compartment.frame} ${g.row.compartment.side}\n${heldNow ? "held now" : "permits work"} · ${mh(g.row.remaining_hours)} remaining${viaSpaces.has(no) ? "\nA hazard route on file passes through this space." : ""}\nClick to open on the deck plan.`}
         </title>
         {/* zone plinth: the grouping, worn at the base */}
         <path
@@ -159,10 +206,10 @@ export function IsoWalk({
           opacity={0.55}
         />
         {/* front */}
-        <rect x={sx} y={sy - BOX_H} width={BOX_W} height={BOX_H} fill={front} stroke="#00000055" strokeWidth={0.4} />
+        <rect x={sx} y={sy - boxH} width={BOX_W} height={boxH} fill={front} stroke="#00000055" strokeWidth={0.4} />
         {/* top */}
         <path
-          d={`M ${sx} ${sy - BOX_H} l ${BOX_W} 0 l ${BOX_KX} ${-BOX_KY} l ${-BOX_W} 0 z`}
+          d={`M ${sx} ${sy - boxH} l ${BOX_W} 0 l ${BOX_KX} ${-BOX_KY} l ${-BOX_W} 0 z`}
           fill={front}
           style={{ filter: "brightness(1.55)" }}
           opacity={0.9}
@@ -171,10 +218,19 @@ export function IsoWalk({
         />
         {/* side */}
         <path
-          d={`M ${sx + BOX_W} ${sy - BOX_H} l ${BOX_KX} ${-BOX_KY} l 0 ${BOX_H} l ${-BOX_KX} ${BOX_KY} z`}
+          d={`M ${sx + BOX_W} ${sy - boxH} l ${BOX_KX} ${-BOX_KY} l 0 ${boxH} l ${-BOX_KX} ${BOX_KY} z`}
           fill="#000000"
           opacity={0.32}
         />
+        {/* the wire's waypoint: a hazard route rides through, says the trace */}
+        {viaSpaces.has(no) && (
+          <path
+            d={`M ${sx + BOX_W / 2} ${sy - boxH - 11} l 4.5 4.5 l -4.5 4.5 l -4.5 -4.5 z`}
+            fill="none"
+            stroke={routeColour}
+            strokeWidth={1.2}
+          />
+        )}
         {isCurrent && (
           <>
             {/* the ring that says "you are here" */}
@@ -183,7 +239,7 @@ export function IsoWalk({
             </ellipse>
             <text
               x={sx + BOX_W / 2 + 4}
-              y={sy - BOX_H - 12}
+              y={sy - boxH - 12}
               fill={TONE_FG[step?.tone ?? "accent"]}
               fontSize={9.5}
               fontWeight={700}
@@ -218,26 +274,136 @@ export function IsoWalk({
       }}
       style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.well, outline: "none" }}
     >
+      {/* the camera: how the same scene is angled */}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "7px 12px 5px", fontSize: 10, color: C.dim }}>
+        <span style={{ textTransform: "uppercase", letterSpacing: 0.9, fontSize: 8.5, color: C.subtle }}>Tilt</span>
+        {([["Plan", 0], ["Tilt", 0.55], ["Exploded", 1]] as const).map(([label, t]) => (
+          <button
+            key={label}
+            onClick={() => setTilt(t)}
+            title={
+              t === 0
+                ? "Every deck collapsed onto one plane — which frames and sides are touched, anywhere in the ship"
+                : t === 1
+                  ? "Decks fully separated — which deck carries what"
+                  : "Between the two: vertical structure and plan extent in one look"
+            }
+            style={{
+              font: "inherit", fontSize: 10, padding: "1px 8px", borderRadius: 5, cursor: "pointer",
+              background: Math.abs(tilt - t) < 0.05 ? C.raised : "transparent",
+              color: Math.abs(tilt - t) < 0.05 ? C.text : C.dim,
+              border: `1px solid ${Math.abs(tilt - t) < 0.05 ? C.accent : C.line}`,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={Math.round(tilt * 100)}
+          onChange={(e) => setTilt(Number(e.target.value) / 100)}
+          title="Tilt the camera: plan overlay ⟷ exploded deck stack"
+          style={{ width: 150, accentColor: C.accent }}
+        />
+        {routes.length > 0 && (
+          <span style={{ marginLeft: "auto", color: C.dim }}>
+            <span style={{ color: routeColour }}>‒ ‒</span> hazard route on file ·{" "}
+            <span style={{ color: routeColour }}>◇</span> rides through
+          </span>
+        )}
+      </div>
+
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block" }}>
-        {/* deck planes, top of the ship first */}
+        {/* The ship's shell, sketched: a carrier profile while the stack is
+            tilted up, fading out as the decks collapse into plan. */}
+        {tilt > 0.15 && (() => {
+          const first = TOP + yOff + gap;
+          const last = TOP + yOff + decks.length * gap;
+          const flightY = first - boxH - 22;
+          const keelY = last + 16;
+          const xL = LABEL_W - 26;
+          const xR = LABEL_W + PLOT_W + 40;
+          return (
+            <g opacity={0.55 * tilt} pointerEvents="none">
+              <path
+                d={
+                  `M ${xL + 10} ${flightY} L ${xR + 8} ${flightY} ` + // flight deck
+                  `L ${xR + 2} ${flightY + 14} L ${xR - 30} ${flightY + 26} ` + // bow overhang
+                  `C ${xR - 52} ${flightY + 40}, ${xR - 60} ${keelY - 18}, ${xR - 78} ${keelY} ` + // bow rake
+                  `L ${xL + 34} ${keelY} ` + // keel
+                  `L ${xL + 10} ${keelY - 26} z` // stern
+                }
+                fill="rgba(148,163,184,0.03)"
+                stroke={C.faint}
+                strokeWidth={0.8}
+              />
+              {/* the island, aft-starboard on the flight deck */}
+              <path
+                d={`M ${xL + (xR - xL) * 0.34} ${flightY} l 0 -13 l 7 0 l 0 -6 l 12 0 l 0 19 z`}
+                fill="rgba(148,163,184,0.05)"
+                stroke={C.faint}
+                strokeWidth={0.8}
+              />
+            </g>
+          );
+        })()}
+        {/* The deck-edge planform, fading in as the decks flatten to plan. */}
+        {tilt < 0.6 && (() => {
+          const yBase = TOP + yOff + gap + 10;
+          const p = (frame: number, v: number) => `${u(frame) + v * SKEW_X} ${yBase - v * SKEW_Y}`;
+          return (
+            <path
+              d={
+                `M ${p(fHi + 4, 0.1)} L ${p(fLo + 18, 0)} ` +
+                `Q ${p(fLo - 9, 0.14)} ${p(fLo - 11, 0.5)} ` + // bow taper
+                `Q ${p(fLo - 9, 0.86)} ${p(fLo + 18, 1)} ` +
+                `L ${p(fHi + 4, 0.9)} z`
+              }
+              fill="rgba(148,163,184,0.028)"
+              stroke={C.faint}
+              strokeWidth={0.8}
+              opacity={(0.6 - tilt) / 0.6}
+              pointerEvents="none"
+            />
+          );
+        })()}
+
+        {/* deck planes, top of the ship first; they quieten as they merge */}
         {decks.map(([code], i) => {
-          const y = TOP + (i + 1) * DECK_GAP;
+          const y = TOP + yOff + (i + 1) * gap;
           return (
             <g key={code}>
               <path
                 d={`M ${LABEL_W - 8} ${y + 6} L ${LABEL_W + PLOT_W + 26} ${y + 6} l ${SKEW_X} ${-SKEW_Y} L ${LABEL_W - 8 + SKEW_X} ${y + 6 - SKEW_Y} z`}
                 fill={i % 2 === 0 ? "#101118" : "#0d0e13"}
                 stroke={C.hairline}
+                opacity={0.25 + 0.75 * tilt}
               />
-              <text x={10} y={y + 2} fill={C.dim} fontSize={10} fontWeight={700}>
-                {code}
-              </text>
-              <text x={10} y={y + 13} fill={C.faint} fontSize={8}>
-                deck
-              </text>
+              {/* At low tilt the labels would overprint in the merged stack;
+                  one label speaks for all of them instead. */}
+              {tilt >= 0.25 && (
+                <>
+                  <text x={10} y={y + 2} fill={C.dim} fontSize={10} fontWeight={700} opacity={0.35 + 0.65 * tilt}>
+                    {code}
+                  </text>
+                  <text x={10} y={y + 13} fill={C.faint} fontSize={8} opacity={0.35 + 0.65 * tilt}>
+                    deck
+                  </text>
+                </>
+              )}
             </g>
           );
         })}
+        {tilt < 0.25 && (
+          <text x={10} y={TOP + yOff + gap + 2} fill={C.dim} fontSize={9} fontWeight={700}>
+            all decks
+            <tspan x={10} dy={11} fill={C.faint} fontSize={8} fontWeight={400}>
+              plan
+            </tspan>
+          </text>
+        )}
         {/* bow marker: the shared orientation every hull canvas keeps */}
         <text x={LABEL_W + PLOT_W + 18} y={TOP + 14} fill={C.faint} fontSize={8.5} letterSpacing={1}>
           BOW ⟶
@@ -245,12 +411,38 @@ export function IsoWalk({
 
         {drawOrder.map((g) => box(g))}
 
+        {/* The cause layer: the engine's decision-trace hops, drawn on file.
+            This is why a consequence three decks away is not arbitrary — the
+            trunk or bus that carries it is on screen. Hops landing on the
+            current step's spaces speak loudest. */}
+        {routes.map(([from, to]) => {
+          const a = geom.get(from);
+          const b = geom.get(to);
+          if (!a || !b) return null;
+          const x1 = a.sx + BOX_W / 2;
+          const y1 = a.sy - boxH / 2;
+          const x2 = b.sx + BOX_W / 2;
+          const y2 = b.sy - boxH / 2;
+          const hot = current.has(to) || current.has(from);
+          return (
+            <g key={`route-${from}-${to}`} pointerEvents="none">
+              <line
+                x1={x1} y1={y1} x2={x2} y2={y2}
+                stroke={routeColour}
+                strokeWidth={hot ? 1.7 : 1}
+                strokeDasharray="5 4"
+                opacity={hot ? 0.95 : 0.4}
+              />
+            </g>
+          );
+        })}
+
         {/* the step's arrows, above every box: consequence in flight */}
         {arrows.map(({ from, to }) => {
           const x1 = from.sx + BOX_W / 2 + 4;
-          const y1 = from.sy - BOX_H - 4;
+          const y1 = from.sy - boxH - 4;
           const x2 = to.sx + BOX_W / 2 + 4;
-          const y2 = to.sy - BOX_H - 4;
+          const y2 = to.sy - boxH - 4;
           const lift = Math.max(26, Math.abs(x2 - x1) / 5 + Math.abs(y2 - y1) / 3);
           return (
             <g key={`${from.row.compartment.compartment_no}->${to.row.compartment.compartment_no}`}>

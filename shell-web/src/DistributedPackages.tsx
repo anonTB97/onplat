@@ -10,6 +10,7 @@ import {
   type PackageSummary,
 } from "./api";
 import { IsoWalk, type WalkStep, type WalkTone } from "./IsoWalk";
+import { Loading } from "./Loading";
 import { C, fmtClear, mh, STATE_STYLE } from "./theme";
 
 export default function DistributedPackages({
@@ -29,31 +30,53 @@ export default function DistributedPackages({
   spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
 }) {
-  const [packages, setPackages] = useState<PackageSummary[]>([]);
+  // `null` while the list is in flight: "no distributed packages" is a claim
+  // about the hull, and a claim must not render while the answer is unknown.
+  const [packages, setPackages] = useState<PackageSummary[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<PackageDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setError(null);
     setDetail(null);
+    setPackages(null);
+    let stale = false;
     listPackages(identity, vesselId)
       .then((p) => {
+        if (stale) return;
         setPackages(p);
         setSelected(p[0]?.code ?? null);
       })
       .catch((e: unknown) => {
-        setPackages([]);
+        if (stale) return;
+        setPackages(null);
         setSelected(null);
         setError(String(e));
       });
+    return () => {
+      stale = true;
+    };
   }, [identity, vesselId]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected) return undefined;
+    // Cleared up front and guarded against reordering: a slow response for
+    // the previous tab must never render under the newly selected one.
+    setDetail(null);
+    setDetailError(null);
+    let stale = false;
     getPackage(identity, vesselId, selected, asOf)
-      .then(setDetail)
-      .catch(() => setDetail(null));
+      .then((d) => {
+        if (!stale) setDetail(d);
+      })
+      .catch((e: unknown) => {
+        if (!stale) setDetailError(String(e));
+      });
+    return () => {
+      stale = true;
+    };
   }, [identity, vesselId, selected, asOf]);
 
   // The cause layer: the held footprint spaces' decision traces carry the
@@ -61,9 +84,11 @@ export default function DistributedPackages({
   // from its origin stops looking arbitrary.
   const [routes, setRoutes] = useState<[string, string][]>([]);
   useEffect(() => {
+    // Cleared before the fetch, not after: the previous package's routes must
+    // not draw under this one's legend while the traces are in flight.
+    setRoutes([]);
     const held = detail?.footprint.filter((f) => f.state !== "ALLOW") ?? [];
     if (held.length === 0) {
-      setRoutes([]);
       return undefined;
     }
     let stale = false;
@@ -95,6 +120,9 @@ export default function DistributedPackages({
 
   if (error) {
     return <p style={{ color: C.danger }}>This hull is out of scope for you ({error}).</p>;
+  }
+  if (packages === null) {
+    return <Loading label="Reading the distributed packages…" />;
   }
   if (packages.length === 0) {
     return (
@@ -194,6 +222,13 @@ export default function DistributedPackages({
           </button>
         ))}
       </div>
+
+      {detailError && (
+        <p style={{ color: C.danger, fontSize: 12.5 }}>
+          Package detail unavailable ({detailError}).
+        </p>
+      )}
+      {!detail && !detailError && <Loading label="Reading the footprint…" />}
 
       {detail && (
         <>

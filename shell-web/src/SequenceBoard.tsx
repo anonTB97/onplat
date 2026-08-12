@@ -132,8 +132,12 @@ export default function SequenceBoard({
 
   useEffect(() => {
     setError(null);
+    // Guarded against reordering: with the time control playing, a slow
+    // response for one instant must not land after a faster later one.
+    let stale = false;
     listActivities(identity, vesselId, asOf)
       .then((r) => {
+        if (stale) return;
         setActivities(r.activities);
         setAsOfMs(r.as_of);
         setSource(r.schedule_source);
@@ -141,10 +145,40 @@ export default function SequenceBoard({
         setEdges(r.edges);
       })
       .catch((e: unknown) => {
+        if (stale) return;
         setActivities(null);
         setError(String(e));
       });
+    return () => {
+      stale = true;
+    };
   }, [identity, vesselId, asOf, reloadNonce]);
+
+  // A hull switch invalidates everything the reader had staged or narrowed:
+  // a preview audited against hull A must never be one click from committing
+  // into hull B, and a filter naming a trade or space the new hull lacks
+  // would empty the register with no visible cause.
+  useEffect(() => {
+    setPending(null);
+    setImportMsg(null);
+    setSearch("");
+    setTrade(null);
+    setSpace(null);
+    setStatus("all");
+    setSort(null);
+    setOpenEvidence(null);
+  }, [vesselId]);
+
+  // A new register (import, revert) can drop the selected trade or space;
+  // a filter naming a value with no rows behind it resets rather than
+  // silently emptying the table.
+  useEffect(() => {
+    if (activities === null) return;
+    const tradesNow = new Set(activities.map((a) => a.trade));
+    const spacesNow = new Set(activities.map((a) => a.compartment_no).filter(Boolean));
+    setTrade((t) => (t !== null && !tradesNow.has(t) ? null : t));
+    setSpace((sp) => (sp !== null && sp !== "unlocated" && !spacesNow.has(sp) ? null : sp));
+  }, [activities]);
 
   const trades = useMemo(
     () => [...new Set((activities ?? []).map((a) => a.trade).filter((t) => t !== "—"))].sort(),
@@ -297,7 +331,11 @@ export default function SequenceBoard({
           Space lanes
         </button>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-          {importMsg && <span style={{ fontSize: 11, color: importMsg.startsWith("✓") ? C.ok : C.danger }}>{importMsg}</span>}
+          {importMsg && (
+            <span style={{ fontSize: 11, color: importMsg.startsWith("✓") ? C.ok : importMsg.startsWith("⏳") ? C.warn : C.danger }}>
+              {importMsg}
+            </span>
+          )}
           <label style={{ ...chip(false), display: "inline-flex", alignItems: "center", gap: 5 }} title="Import a Primavera P6 XER export as this hull's schedule of record. All-or-nothing: one rejected line refuses the file.">
             ⭱ Import XER
             <input
@@ -308,6 +346,7 @@ export default function SequenceBoard({
                 const file = e.target.files?.[0];
                 e.target.value = "";
                 if (!file) return;
+                setImportMsg(`⏳ reading ${file.name}…`);
                 void file.text().then((xer) =>
                   previewSchedule(identity, vesselId, file.name, xer)
                     .then((r) => {
@@ -401,6 +440,7 @@ export default function SequenceBoard({
                     const staged = pending;
                     setPending(null);
                     if (!staged) return;
+                    setImportMsg(`⏳ ingesting ${staged.label}…`);
                     void importSchedule(identity, vesselId, staged.label, staged.xer)
                       .then((r) => {
                         setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);

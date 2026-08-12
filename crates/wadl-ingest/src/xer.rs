@@ -45,6 +45,13 @@ impl XerTable {
     }
 }
 
+/// The most cells a document may carry. A real multi-year carrier export is
+/// a few million cells; a 256 MB body of one-character cells would be ~10⁸,
+/// and every cell becomes an owned `String` (header + heap block), so an
+/// unbounded parse amplifies an adversarial body several-fold in resident
+/// memory. Refused with its reason, like every other rejection.
+const MAX_CELLS: usize = 20_000_000;
+
 /// A parsed XER file: sections by table name.
 #[derive(Debug, Clone, Default)]
 pub struct XerDocument {
@@ -66,6 +73,7 @@ impl XerDocument {
 pub fn parse_xer(input: &str) -> XerDocument {
     let mut doc = XerDocument::default();
     let mut current: Option<String> = None;
+    let mut cell_count: usize = 0;
     for (line_no, raw) in input.lines().enumerate() {
         let row = line_no + 1;
         let mut cells = raw.split('\t');
@@ -98,19 +106,33 @@ pub fn parse_xer(input: &str) -> XerDocument {
                 let Some(table) = doc.tables.get_mut(name) else {
                     continue;
                 };
-                let values: Vec<String> = cells.map(str::to_owned).collect();
-                if values.len() != table.fields.len() {
+                // Width is checked on borrowed cells BEFORE anything is
+                // owned: a rejected row must not cost an allocation per cell.
+                let borrowed: Vec<&str> = cells.collect();
+                if borrowed.len() != table.fields.len() {
                     doc.rejected.push(Rejection {
                         row,
                         reason: format!(
                             "{name}: {} values for {} fields",
-                            values.len(),
+                            borrowed.len(),
                             table.fields.len()
                         ),
                     });
                     continue;
                 }
-                table.rows.push((row, values));
+                cell_count += borrowed.len();
+                if cell_count > MAX_CELLS {
+                    doc.rejected.push(Rejection {
+                        row,
+                        reason: format!(
+                            "document exceeds {MAX_CELLS} cells — not a schedule export this tool will hold in memory"
+                        ),
+                    });
+                    break;
+                }
+                table
+                    .rows
+                    .push((row, borrowed.into_iter().map(str::to_owned).collect()));
             }
             Some("%E") => current = None,
             // ERMHDR and anything else outside a section is header noise.

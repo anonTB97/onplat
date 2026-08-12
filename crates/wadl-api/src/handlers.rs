@@ -18,6 +18,21 @@ use crate::auth::Caller;
 use crate::error::ApiError;
 use crate::AppState;
 
+/// Reads and parses an import door's JSON body — called AFTER the caller's
+/// scope has admitted the vessel, so a foreign hull is not-found before a
+/// single body byte is buffered. Read by hand against [`crate::MAX_IMPORT_BYTES`]
+/// so the generous import ceiling applies to exactly these doors; every other
+/// route keeps axum's small default limit.
+async fn read_import_body<T: serde::de::DeserializeOwned>(
+    req: axum::extract::Request,
+) -> Result<T, ApiError> {
+    let bytes = axum::body::to_bytes(req.into_body(), crate::MAX_IMPORT_BYTES)
+        .await
+        .map_err(|_| ApiError::PayloadTooLarge(crate::MAX_IMPORT_BYTES))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| ApiError::OutOfRange(format!("invalid JSON body: {e}")))
+}
+
 /// The `?as_of=` parameter: the instant the caller wants the answer for.
 ///
 /// Epoch milliseconds, matching how [`Timestamp`] already crosses the wire, so a
@@ -1188,17 +1203,18 @@ pub(crate) async fn acknowledge_issue(
 /// All-or-nothing: one rejected line refuses the whole import with the
 /// rejection reasons in the response, because a partially loaded schedule
 /// presenting as the whole one is the lie the ingest grading exists to
-/// prevent. The scope check runs first, so a foreign hull is not-found before
-/// the body is ever parsed.
+/// prevent. The scope check runs first — the body is read by hand after it,
+/// so a foreign hull is not-found before a single body byte is buffered.
 pub(crate) async fn import_schedule(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
-    Json(body): Json<ImportSchedule>,
+    req: axum::extract::Request,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportSchedule = read_import_body(req).await?;
     let sor = crate::schedule::parse_xer(&body.label, &body.xer)
         .map_err(|reasons| ApiError::OutOfRange(format!("XER rejected: {reasons}")))?;
     let activities = sor.activities.len();
@@ -1421,10 +1437,11 @@ pub(crate) async fn import_zones(
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
-    Json(body): Json<ImportZones>,
+    req: axum::extract::Request,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportZones = read_import_body(req).await?;
 
     let mut rejections: Vec<String> = Vec::new();
     if body.label.trim().is_empty() {
@@ -1511,10 +1528,11 @@ pub(crate) async fn import_budgets(
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
-    Json(body): Json<ImportBudgets>,
+    req: axum::extract::Request,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportBudgets = read_import_body(req).await?;
 
     let mut rejections: Vec<String> = Vec::new();
     if body.label.trim().is_empty() {

@@ -24,6 +24,9 @@ pub(crate) enum ApiError {
     /// changing the request, and "unprocessable" with no reason is a dead end for
     /// whoever is holding the time control.
     OutOfRange(String),
+    /// The body exceeds the import ceiling. Carries the ceiling so the caller
+    /// learns the actual limit instead of guessing at it.
+    PayloadTooLarge(usize),
     /// An internal failure. Detail is logged, never returned.
     Internal,
 }
@@ -49,6 +52,14 @@ impl IntoResponse for ApiError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "instant out of range",
                 Some(detail),
+            ),
+            Self::PayloadTooLarge(ceiling) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload too large",
+                Some(format!(
+                    "the body exceeds the import ceiling of {} MB",
+                    ceiling / (1024 * 1024)
+                )),
             ),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error", None),
         };

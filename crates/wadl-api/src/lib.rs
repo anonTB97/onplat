@@ -28,7 +28,6 @@ pub mod schedule;
 
 use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -125,16 +124,20 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/vessels/:id/packages", get(handlers::list_packages))
         .route("/api/vessels/:id/packages/:no", get(handlers::get_package))
-        // A real P6 export for a carrier availability runs tens of megabytes;
-        // axum's 2 MB default would refuse the file at the door with a 413
-        // before the ingest ever saw a line of it.
-        .layer(DefaultBodyLimit::max(MAX_IMPORT_BYTES))
         .with_state(state)
 }
 
-/// The largest document any import door accepts. Sized for a full multi-year
+/// The largest document an import door accepts. Sized for a full multi-year
 /// P6 XER export with generous headroom, and still small enough that a
 /// mistaken upload cannot exhaust the host.
+///
+/// Deliberately NOT installed as a router-wide `DefaultBodyLimit`: that would
+/// raise the ceiling on every small POST (`/issues/acknowledge`,
+/// `/decision`), and — worse — a body extractor runs before the handler body,
+/// so the megabytes would be buffered and parsed before the scope check ever
+/// ran. Instead the three import handlers read their bodies by hand, after
+/// the scope check, against this ceiling; every other route keeps axum's
+/// small default.
 pub const MAX_IMPORT_BYTES: usize = 256 * 1024 * 1024;
 
 /// Builds a router and state over the seeded demo world, returning the world's

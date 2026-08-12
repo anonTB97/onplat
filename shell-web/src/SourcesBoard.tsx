@@ -191,17 +191,46 @@ export default function SourcesBoard({
 
   useEffect(() => {
     setError(null);
+    // Guarded against reordering under a playing time control.
+    let stale = false;
     Promise.all([listActivities(identity, vesselId, asOf), getZoneChart(identity, vesselId)])
       .then(([r, z]) => {
+        if (stale) return;
         setRegister(r);
         setZones(z);
       })
       .catch((e: unknown) => {
+        if (stale) return;
         setRegister(null);
         setZones(null);
         setError(String(e));
       });
+    return () => {
+      stale = true;
+    };
   }, [identity, vesselId, asOf, nonce]);
+
+  // A hull switch invalidates the staging area: a document previewed against
+  // hull A must never be one click from committing into hull B — the staged
+  // commit closure captures its stage-time vessel.
+  useEffect(() => {
+    setStaged(null);
+    setBusy(null);
+    setMsg(null);
+  }, [vesselId]);
+
+  // A file dropped just OUTSIDE a card must not navigate the tab to the file
+  // (taking every screen's state with it). The window swallows strays; the
+  // cards' own handlers still receive their drops first.
+  useEffect(() => {
+    const swallow = (e: DragEvent) => e.preventDefault();
+    window.addEventListener("dragover", swallow);
+    window.addEventListener("drop", swallow);
+    return () => {
+      window.removeEventListener("dragover", swallow);
+      window.removeEventListener("drop", swallow);
+    };
+  }, []);
 
   if (error) return <p style={{ color: C.danger }}>Sources unavailable ({error}).</p>;
   if (!register || !zones) return <Loading label="Reading what this hull is built from…" />;

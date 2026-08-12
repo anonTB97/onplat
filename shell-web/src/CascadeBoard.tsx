@@ -66,16 +66,26 @@ export default function CascadeBoard({
 
   useEffect(() => {
     setError(null);
+    // Cleared up front: the previous instant's counterfactual painted over a
+    // new instant's base rows is a lie between two layers of one screen. The
+    // stale guard keeps a slow old response from landing after a fast new one.
+    setActions(null);
+    let stale = false;
     leverage(identity, vesselId, asOf)
       .then((r) => {
+        if (stale) return;
         setActions(r.actions);
         setAsOfMs(r.as_of);
         setSel(0);
       })
       .catch((e: unknown) => {
+        if (stale) return;
         setActions(null);
         setError(String(e));
       });
+    return () => {
+      stale = true;
+    };
   }, [identity, vesselId, asOf]);
 
   // The cause layer for the walkthrough: each affected space's decision trace
@@ -85,9 +95,11 @@ export default function CascadeBoard({
   // held today — never an interpolation of the counterfactual.
   const [routes, setRoutes] = useState<[string, string][]>([]);
   useEffect(() => {
+    // Cleared before the fetch, not after: the previous action's routes must
+    // not draw under this one's legend while the traces are in flight.
+    setRoutes([]);
     const act = actions?.[sel];
     if (!act) {
-      setRoutes([]);
       return undefined;
     }
     const affected = [...act.effect.frees, ...act.effect.closes];

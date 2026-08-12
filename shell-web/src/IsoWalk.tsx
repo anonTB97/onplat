@@ -43,7 +43,7 @@
 // tilted up, the deck-edge planform when flattened — so the reader is always
 // looking at a ship, not at floating planes.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DeckStateRow } from "./api";
 import { C, mh, STATE_STYLE, zoneColour } from "./theme";
 
@@ -116,7 +116,25 @@ export function IsoWalk({
   /** The camera's angle: 0 = plan (decks collapsed), 1 = exploded stack. */
   const [tilt, setTilt] = useState(1);
 
+  // The steps can shrink under a held index (a refetch shortens the tour
+  // without remounting): clamp the STATE, not just the read, or the counter
+  // reads "9 / 5" and Prev goes dead for the phantom presses.
+  useEffect(() => {
+    setIdx((i) => Math.min(i, Math.max(0, steps.length - 1)));
+  }, [steps.length]);
+
   const placeable = spaces.filter((r) => r.compartment.frame !== null);
+  // Every hook is called by now, so the early return is legal. Without it,
+  // Math.min over zero frames is Infinity and the planform path renders NaN
+  // coordinates — and a register that merely has not loaded yet would be
+  // misreported as "not placeable on the plates".
+  if (placeable.length === 0) {
+    return (
+      <p style={{ color: C.dim, fontSize: 12.5, padding: "10px 12px" }}>
+        Nothing to draw yet — the hull&apos;s spaces have not loaded, or none carries geometry.
+      </p>
+    );
+  }
   const decks = [...new Map(
     placeable.map((r) => [r.compartment.deck_code, r.compartment.deck_ordinal]),
   ).entries()].sort((a, b) => a[1] - b[1]);
@@ -304,6 +322,7 @@ export function IsoWalk({
           max={100}
           value={Math.round(tilt * 100)}
           onChange={(e) => setTilt(Number(e.target.value) / 100)}
+          onKeyDown={(e) => e.stopPropagation()}
           title="Tilt the camera: plan overlay ⟷ exploded deck stack"
           style={{ width: 150, accentColor: C.accent }}
         />

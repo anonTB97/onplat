@@ -498,6 +498,10 @@ async fn the_schedule_door_accepts_a_real_sized_export() {
         let _ = writeln!(xer, "%R\t{i}\t{filler}");
     }
     assert!(xer.len() > 4 * 1024 * 1024, "padding failed: {}", xer.len());
+    assert!(
+        xer.len() < wadl_api::MAX_IMPORT_BYTES,
+        "the test body must sit under the ceiling it exercises"
+    );
 
     let (status, body) = post(
         &app,
@@ -511,4 +515,39 @@ async fn the_schedule_door_accepts_a_real_sized_export() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["activities"], 18, "{body}");
+}
+
+/// The import ceiling belongs to the import doors alone. Every other body
+/// route keeps axum's small default — so a multi-megabyte body posted to a
+/// route whose real payload is a few dozen bytes is refused at the door, not
+/// buffered. Pins the review finding that a router-wide limit would leak
+/// generosity onto `/issues/acknowledge`.
+#[tokio::test]
+async fn small_routes_refuse_import_sized_bodies() {
+    let (app, world) = app_at_anchor();
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/vessels/{}/issues/acknowledge",
+            world.cvn73.as_uuid()
+        ))
+        .header("x-org-id", world.yard_org.as_uuid().to_string())
+        .header("x-assigned-vessels", world.cvn73.as_uuid().to_string())
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            "{{\"key\":\"{}\",\"note\":\"x\"}}",
+            "k".repeat(3 * 1024 * 1024)
+        )))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_ne!(
+        response.status(),
+        StatusCode::OK,
+        "a 3 MB acknowledgement body must be refused, not served"
+    );
+    assert!(
+        response.status().is_client_error(),
+        "expected a 4xx refusal, got {}",
+        response.status()
+    );
 }

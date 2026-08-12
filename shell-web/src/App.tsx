@@ -113,16 +113,31 @@ export default function App() {
   // them. The Deck Explorer fetches its own — one extra read of a small endpoint
   // is a better trade than threading its state up through the chrome.
   useEffect(() => {
-    if (!selected) return;
+    if (!selected) return undefined;
+    // Guarded against reordering: with the time control playing, asOf changes
+    // every tick — a slow response for one instant landing after a faster
+    // later one would leave every consumer of `rows` at the wrong instant.
+    let stale = false;
     deckStates(DEMO_IDENTITY, selected, asOf)
-      .then(setRows)
-      .catch(() => setRows([]));
+      .then((r) => {
+        if (!stale) setRows(r);
+      })
+      .catch(() => {
+        if (!stale) setRows([]);
+      });
     // The issue board, held here because two pieces of chrome spend it: the
     // alert bell's count and the Conflicts & Risk rail badge. One fetch, one
     // number — a bell and a badge that disagreed would be worse than neither.
     listIssues(DEMO_IDENTITY, selected, asOf)
-      .then((r) => setIssues(r.issues))
-      .catch(() => setIssues([]));
+      .then((r) => {
+        if (!stale) setIssues(r.issues);
+      })
+      .catch(() => {
+        if (!stale) setIssues([]);
+      });
+    return () => {
+      stale = true;
+    };
   }, [selected, asOf]);
 
   // The hull's time frame. Re-read on hull change and never cached across hulls:

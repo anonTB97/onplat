@@ -481,6 +481,8 @@ async fn the_dry_run_reports_the_location_mapping() {
 /// ceiling all the way through the dry run.
 #[tokio::test]
 async fn the_schedule_door_accepts_a_real_sized_export() {
+    use std::fmt::Write as _;
+
     let (app, world) = app_at_anchor();
     let base = include_str!("../../../reference/p6-sample/CVN73-PIA26.xer");
     let mut xer = String::with_capacity(6 << 20);
@@ -493,7 +495,7 @@ async fn the_schedule_door_accepts_a_real_sized_export() {
     xer.push_str("%T\tNOTEBOOK\n%F\tnote_id\tnote_text\n");
     let filler = "x".repeat(1000);
     for i in 0..6000 {
-        xer.push_str(&format!("%R\t{i}\t{filler}\n"));
+        let _ = writeln!(xer, "%R\t{i}\t{filler}");
     }
     assert!(xer.len() > 4 * 1024 * 1024, "padding failed: {}", xer.len());
 

@@ -431,6 +431,8 @@ export default function App() {
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
+              spaces={rows}
+              onOpenSpace={jump}
             />
           )}
 

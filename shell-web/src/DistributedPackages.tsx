@@ -3,10 +3,12 @@ import {
   getPackage,
   listPackages,
   type AsOf,
+  type DeckStateRow,
   type Identity,
   type PackageDetail,
   type PackageSummary,
 } from "./api";
+import { IsoWalk, type WalkStep } from "./IsoWalk";
 import { C, fmtClear, mh, STATE_STYLE } from "./theme";
 
 export default function DistributedPackages({
@@ -14,12 +16,17 @@ export default function DistributedPackages({
   vesselId,
   hullLabel,
   asOf,
+  spaces,
+  onOpenSpace,
 }: {
   identity: Identity;
   vesselId: string;
   hullLabel: string;
   /** The instant the footprint's authorization is read at; `null` is live. */
   asOf: AsOf;
+  /** Per-space verdicts at the same instant — the walkthrough hull's ground truth. */
+  spaces: DeckStateRow[];
+  onOpenSpace: (compartment: string) => void;
 }) {
   const [packages, setPackages] = useState<PackageSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -68,6 +75,43 @@ export default function DistributedPackages({
   const g = detail?.governing ?? null;
   const govStyle =
     g && g.constraint.kind === "authorization" ? STATE_STYLE[g.constraint.state] : null;
+
+  // The footprint as a guided tour: upstream to downstream, the order the
+  // test authority walks it, with the governing constraint told loudest.
+  const walkSteps: WalkStep[] = [];
+  if (detail) {
+    walkSteps.push({
+      title: `Walk the ${detail.package.code} footprint`,
+      tone: "accent",
+      body:
+        `${detail.package.name} — one work order across ${detail.package.compartment_count} compartments. ` +
+        `A segment cannot be ${detail.package.test_verb} until it and everything upstream of it is complete, so the walk runs upstream → downstream.`,
+      spaces: detail.footprint.map((f) => f.compartment_no),
+    });
+    detail.footprint.forEach((f, i) => {
+      const isGov = g !== null && g.compartment === f.compartment_no;
+      walkSteps.push({
+        title: `${i + 1} · ${f.compartment_no}${isGov ? " — THE GOVERNING CONSTRAINT" : ""}`,
+        tone: isGov ? "danger" : f.state === "ALLOW" ? "ok" : "warn",
+        body:
+          (isGov && g ? `${g.consequence} ` : "") +
+          `${f.state}${f.rules_fired.length > 0 ? ` (${f.rules_fired.join(", ")})` : ""} · ` +
+          (f.complete ? "work complete" : `${mh(f.remaining_hours)} of work left`) +
+          (isGov ? "" : f.state === "ALLOW" ? " — nothing refuses this segment's work." : " — held; downstream segments wait on this space."),
+        spaces: [f.compartment_no],
+        arrowFrom: i > 0 ? detail.footprint[i - 1]?.compartment_no : undefined,
+      });
+    });
+    const stranded = detail.package.total_stranded_hours;
+    walkSteps.push({
+      title: "What the distribution costs",
+      tone: stranded > 0 ? "danger" : "ok",
+      body:
+        `${mh(stranded)} stranded — finished or finishable work that cannot be ${detail.package.test_verb} from here. ` +
+        `Segments ready: ${detail.package.testable_segment_count} of ${detail.package.segment_count}. One held compartment strands man-hours it does not contain.`,
+      spaces: detail.footprint.filter((f) => f.state !== "ALLOW").map((f) => f.compartment_no),
+    });
+  }
 
   return (
     <div>
@@ -171,6 +215,14 @@ export default function DistributedPackages({
               </div>
             </div>
           )}
+
+          {/* the footprint in three dimensions, stepped */}
+          <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: C.dim, marginBottom: 7 }}>
+            3D walkthrough · the footprint, upstream to downstream
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <IsoWalk key={selected ?? ""} spaces={spaces} steps={walkSteps} onOpenSpace={onOpenSpace} />
+          </div>
 
           <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
             {/* segment topology */}

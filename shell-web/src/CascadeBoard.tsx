@@ -21,10 +21,11 @@ import {
   type Identity,
   type Mitigation,
 } from "./api";
+import { IsoWalk, type WalkStep } from "./IsoWalk";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { actionTitle } from "./Mitigations";
-import { C, mh } from "./theme";
+import { C, chipStyle, mh } from "./theme";
 
 const W = 1000;
 const LABEL_W = 105;
@@ -60,6 +61,7 @@ export default function CascadeBoard({
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sel, setSel] = useState(0);
+  const [view, setView] = useState<"map" | "walk">("map");
 
   useEffect(() => {
     setError(null);
@@ -131,6 +133,54 @@ export default function CascadeBoard({
     }
   }
 
+  // The same consequence, as a guided tour: the action first, then every
+  // space it frees, then — loudest — every space it shuts, then the net.
+  const byName = new Map(spaces.map((r) => [r.compartment.compartment_no, r]));
+  const walkSteps: WalkStep[] = [];
+  if (chosen) {
+    const a = chosen.action;
+    const originSpaces =
+      a.kind === "discharge" ? [a.origin] : a.kind === "interrupt" ? [a.from, a.to] : [];
+    const origin = originSpaces[0];
+    walkSteps.push({
+      title: "Step in: the action",
+      tone: "accent",
+      body:
+        `${actionTitle(a)} — ${CONFIDENCE_GLOSS[chosen.confidence]}. ` +
+        "Everything that follows is a counterfactual engine verdict: the world rebuilt with this done, and re-evaluated.",
+      spaces: originSpaces,
+    });
+    for (const no of chosen.effect.frees) {
+      const r = byName.get(no);
+      walkSteps.push({
+        title: `Frees ${no}`,
+        tone: "ok",
+        body: `${r?.compartment.name ?? "not in the register"} — held now; opens once the action lands. ${mh(r?.remaining_hours ?? 0)} of booked work unblocked.`,
+        spaces: [no],
+        arrowFrom: origin,
+      });
+    }
+    for (const no of chosen.effect.closes) {
+      const r = byName.get(no);
+      walkSteps.push({
+        title: `SHUTS ${no}`,
+        tone: "danger",
+        body: `${r?.compartment.name ?? "not in the register"} — open today, refused after. ${mh(r?.remaining_hours ?? 0)} of booked work parked. The cost, never elided.`,
+        spaces: [no],
+        arrowFrom: origin,
+      });
+    }
+    walkSteps.push({
+      title: "Step out: the net",
+      tone: closed.size > 0 ? "warn" : "ok",
+      body:
+        `Frees ${freed.size} space${freed.size === 1 ? "" : "s"} (+${mh(chosen.effect.freed_hours)})` +
+        (closed.size > 0 ? `, shuts ${closed.size} (−${mh(chosen.effect.closed_hours)})` : "") +
+        ` · ${stillHeld} stay held either way. The decision stays the planner's — on the space's options panel, into the ledger.`,
+      spaces: [...freed, ...closed],
+    });
+  }
+
   return (
     <div>
       <ModuleHeader
@@ -171,8 +221,19 @@ export default function CascadeBoard({
                   </b>
                 )}
                 <span style={{ color: C.dim }}>{stillHeld} still held either way</span>
+                <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                  <button style={chipStyle(view === "map")} onClick={() => setView("map")} title="Every deck a lane, every space a state dot — the whole consequence at once.">
+                    Map
+                  </button>
+                  <button style={chipStyle(view === "walk")} onClick={() => setView("walk")} title="The hull in three dimensions, stepped through one consequence at a time.">
+                    3D walkthrough
+                  </button>
+                </span>
               </div>
 
+              {view === "walk" ? (
+                <IsoWalk key={sel} spaces={spaces} steps={walkSteps} onOpenSpace={onOpenSpace} />
+              ) : (
               <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block", background: "#0b0c0e" }}>
                 {lanes.map((deck, i) => (
                   <g key={deck.code}>
@@ -245,7 +306,9 @@ export default function CascadeBoard({
                   );
                 })}
               </svg>
+              )}
 
+              {view === "map" && (
               <div style={{ display: "flex", gap: 14, flexWrap: "wrap", padding: "7px 11px", borderTop: `1px solid ${C.line}`, fontSize: 10.5, color: C.dim }}>
                 <span><span style={{ color: C.ok }}>■</span> freed by this action</span>
                 <span><span style={{ color: C.danger }}>■</span> shut by this action — the cost, never elided</span>
@@ -257,6 +320,7 @@ export default function CascadeBoard({
                   </span>
                 )}
               </div>
+              )}
             </div>
           </div>
         </div>

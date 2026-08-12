@@ -1,0 +1,15 @@
+# CVN-73 PIA-26 budget book — the yard's hours authority per work item.
+# code,title,trade,budget_mh,earned_mh
+#
+# Two deliberate findings for the demo: WI-3318 is budgeted 700 here where
+# the register carries 680 (the book and the schedule disagree by 20 MH),
+# and WI-9101 is growth work no register activity carries hours against.
+WI-3318,Reserve feed water tank preservation,Preservation,700,512
+WI-3402,Sounding & vent piping modification,Mechanical,240,0
+WI-4471,Hangar Bay 2 structural hot work,Welding,410,12
+WI-3905,Aft IC preservation & cableway closure,Electrical,340,0
+WI-1905,Switchboard No. 1 rip-out,Electrical,160,0
+WI-5571,Fan room duct insulation,Preservation,140,0
+WI-2201,AC Plant No. 2 — supply & return distribution,Sheet Metal,4150,2581
+WI-3310,Zone 3 overhead cableway — power and IC pulls,Electrical,1490,1000
+WI-9101,Growth — pier services rerun,Electrical,120,0

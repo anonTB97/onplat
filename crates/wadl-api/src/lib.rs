@@ -103,6 +103,14 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::revert_zones),
         )
         .route(
+            "/api/vessels/:id/budget-book",
+            post(handlers::import_budgets),
+        )
+        .route(
+            "/api/vessels/:id/budget-book/revert",
+            post(handlers::revert_budgets),
+        )
+        .route(
             "/api/vessels/:id/schedule-of-record",
             post(handlers::import_schedule),
         )

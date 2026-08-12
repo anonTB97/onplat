@@ -74,6 +74,15 @@ pub fn inventory() -> Vec<RouteSpec> {
         ("POST", "/api/vessels/:id/zones/revert", true, None),
         (
             "POST",
+            "/api/vessels/:id/budget-book",
+            true,
+            Some(
+                r#"{"label":"leak test","items":[{"code":"WI-0","title":"t","trade":"t","budget_hours":1,"earned_hours":0}]}"#,
+            ),
+        ),
+        ("POST", "/api/vessels/:id/budget-book/revert", true, None),
+        (
+            "POST",
             "/api/vessels/:id/schedule-of-record",
             true,
             Some(r#"{"label":"leak test","xer":""}"#),

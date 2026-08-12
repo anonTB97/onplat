@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  importBudgetBook,
+  listActivities,
   listWorkOrders,
+  revertBudgetBook,
   type AsOf,
+  type BudgetItem,
   type DeckStateRow,
   type Identity,
+  type ReconciliationMismatch,
   type WorkOrder,
 } from "./api";
 import { C, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
@@ -45,6 +50,21 @@ export default function WorkOrders({
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("remaining");
   const [unverifiedOnly, setUnverifiedOnly] = useState(false);
+  // What the hours answer to — the reconciliation block from the register's
+  // own endpoint, so this screen and the Sequence Board read one truth.
+  const [recon, setRecon] = useState<{
+    source: string | null;
+    items: number;
+    mismatches: ReconciliationMismatch[];
+    unmapped_budget_hours: number;
+  } | null>(null);
+  const [bookMsg, setBookMsg] = useState<string | null>(null);
+  const [pendingBook, setPendingBook] = useState<{
+    label: string;
+    items: BudgetItem[];
+    summary: string;
+  } | null>(null);
+  const [bookNonce, setBookNonce] = useState(0);
 
   useEffect(() => {
     setError(null);
@@ -54,7 +74,10 @@ export default function WorkOrders({
         setOrders([]);
         setError(String(e));
       });
-  }, [identity, vesselId, asOf]);
+    listActivities(identity, vesselId, asOf)
+      .then((r) => setRecon(r.reconciliation))
+      .catch(() => setRecon(null));
+  }, [identity, vesselId, asOf, bookNonce]);
 
   const remaining = (w: WorkOrder) => Math.max(0, w.budget_hours - w.earned_hours);
 
@@ -109,6 +132,35 @@ export default function WorkOrders({
         {rows.filter((w) => w.in_window).length} in progress at the instant on the time control.
         Every row carries the document it came from;{" "}
         {unverified === 0 ? "all provenance is planner-confirmed" : `${unverified} still await planner confirmation`}.
+        {recon && (
+          <>
+            {" "}Hours answer to{" "}
+            <b style={{ color: "#ccd1da" }}>
+              {recon.source ?? "the seeded work items"}
+            </b>{" "}
+            ({recon.items} items)
+            {recon.mismatches.length > 0 && (
+              <>
+                {" "}—{" "}
+                <b style={{ color: "#f59e0b" }}>
+                  {recon.mismatches.length} do{recon.mismatches.length === 1 ? "es" : ""} not
+                  reconcile
+                </b>{" "}
+                <span
+                  title={recon.mismatches
+                    .map(
+                      (m) =>
+                        `${m.code}: book ${m.item_budget}/${m.item_earned} MH vs register ${m.register_budget}/${m.register_earned} MH`,
+                    )
+                    .join(" · ")}
+                >
+                  ({recon.mismatches.map((m) => m.code).join(", ")})
+                </span>
+              </>
+            )}
+            .
+          </>
+        )}
       </p>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
@@ -141,7 +193,123 @@ export default function WorkOrders({
           />
           Unconfirmed provenance only
         </label>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+          {bookMsg && (
+            <span style={{ fontSize: 11, color: bookMsg.startsWith("✓") ? "#22c55e" : C.danger }}>
+              {bookMsg}
+            </span>
+          )}
+          <label
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 10px",
+              borderRadius: 6, cursor: "pointer", font: "inherit", fontSize: 11.5,
+              color: C.dim, border: `1px solid ${C.line}`,
+            }}
+            title="Ingest the yard's budget book (CSV: code,title,trade,budget_mh,earned_mh). From then on the register's hours answer to the book, not the seeded items. All-or-nothing; previews before storing."
+          >
+            ⭱ Budget CSV
+            <input
+              type="file"
+              accept=".csv,text/csv,text/plain"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                void file.text().then((text) => {
+                  const items: BudgetItem[] = [];
+                  for (const line of text.split("\n")) {
+                    const t = line.trim();
+                    if (!t || t.startsWith("#")) continue;
+                    const [code, title, trade, budget, earned] = t.split(",").map((x) => x.trim());
+                    items.push({
+                      code: code ?? "",
+                      title: title ?? "",
+                      trade: trade ?? "",
+                      budget_hours: Number(budget),
+                      earned_hours: Number(earned),
+                    });
+                  }
+                  importBudgetBook(identity, vesselId, file.name, items, true)
+                    .then((r) => {
+                      const codes = r.reconciliation.mismatches.map((m) => m.code).join(", ");
+                      setPendingBook({
+                        label: file.name,
+                        items,
+                        summary:
+                          `${r.items} items` +
+                          (codes ? ` · register disagrees on: ${codes}` : " · register agrees with the book") +
+                          (r.reconciliation.unmapped_budget_hours > 0
+                            ? ` · ${r.reconciliation.unmapped_budget_hours} MH in the register map to no item`
+                            : ""),
+                      });
+                      setBookMsg(null);
+                    })
+                    .catch((err: unknown) => setBookMsg(String(err)));
+                });
+              }}
+            />
+          </label>
+          {recon?.source && (
+            <button
+              style={{
+                padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit",
+                fontSize: 11.5, color: C.dim, background: "transparent", border: `1px solid ${C.line}`,
+              }}
+              title="Discard the book — hours answer to the seeded work items again."
+              onClick={() => {
+                void revertBudgetBook(identity, vesselId)
+                  .then(() => {
+                    setBookMsg("✓ back to the seeded budgets");
+                    setBookNonce((n) => n + 1);
+                  })
+                  .catch((err: unknown) => setBookMsg(String(err)));
+              }}
+            >
+              ⟲ Seeded budgets
+            </button>
+          )}
+        </span>
       </div>
+
+      {/* The book's dry run: what the register would answer to, and where the
+          two disagree — before anything is stored. */}
+      {pendingBook && (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, padding: "8px 12px", border: `1px solid #f59e0b66`, borderRadius: 8, background: "rgba(245,158,11,0.06)", fontSize: 12 }}>
+          <b>{pendingBook.label}</b>
+          <span style={{ color: C.dim }}>{pendingBook.summary}</span>
+          <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button
+              style={{
+                padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit",
+                fontSize: 11.5, color: C.text, background: "#20222b", border: `1px solid ${C.accent}`,
+              }}
+              onClick={() => {
+                const staged = pendingBook;
+                setPendingBook(null);
+                if (!staged) return;
+                void importBudgetBook(identity, vesselId, staged.label, staged.items, false)
+                  .then((r) => {
+                    setBookMsg(`✓ ${r.label}: hours now answer to ${r.items} book items`);
+                    setBookNonce((n) => n + 1);
+                  })
+                  .catch((err: unknown) => setBookMsg(String(err)));
+              }}
+            >
+              Confirm book
+            </button>
+            <button
+              style={{
+                padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit",
+                fontSize: 11.5, color: C.dim, background: "transparent", border: `1px solid ${C.line}`,
+              }}
+              onClick={() => setPendingBook(null)}
+            >
+              Cancel
+            </button>
+          </span>
+        </div>
+      )}
 
       <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 8 }}>
         <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 900 }}>

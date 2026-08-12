@@ -663,6 +663,11 @@ export interface ActivityRegister {
   /** null = the generated demo register; a label = the ingested export it came from. */
   schedule_source: string | null;
   reconciliation: {
+    /** What the hours answer to: an ingested budget book's label, or null =
+     *  the seeded work items. "Reconciles" is only as strong as this. */
+    source: string | null;
+    /** How many work items sit on the other side of the comparison. */
+    items: number;
     mismatches: ReconciliationMismatch[];
     /** Budgeted hours the register maps to no work item at all. */
     unmapped_budget_hours: number;
@@ -846,4 +851,50 @@ export async function revertZoneChart(id: Identity, vesselId: string): Promise<v
     headers: headers(id),
   });
   if (!res.ok) throw new Error(`zones revert → ${res.status}`);
+}
+
+/* -------------------------------------------------------------- budget book */
+
+/** One work item's budget line, as a book carries it. */
+export interface BudgetItem {
+  code: string;
+  title: string;
+  trade: string;
+  budget_hours: number;
+  earned_hours: number;
+}
+
+/** Ingests a budget book, all-or-nothing. `dryRun` previews the comparison. */
+export async function importBudgetBook(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  items: BudgetItem[],
+  dryRun: boolean,
+): Promise<{
+  stored: boolean;
+  label: string;
+  items: number;
+  reconciliation: {
+    source: string | null;
+    items: number;
+    mismatches: ReconciliationMismatch[];
+    unmapped_budget_hours: number;
+  };
+}> {
+  const res = await fetch(`/api/vessels/${vesselId}/budget-book${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, items }),
+  });
+  if (!res.ok) throw new Error(`budget book → ${res.status}: ${await res.text()}`);
+  return (await res.json()) as never;
+}
+
+export async function revertBudgetBook(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/budget-book/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`budget book revert → ${res.status}`);
 }

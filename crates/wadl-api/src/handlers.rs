@@ -234,20 +234,41 @@ async fn reconcile(
             None => unmapped_budget += a.budget_hours.get(),
         }
     }
-    let orders = state.store.list_work_orders(scope, vessel).await?;
-    let packages = state.store.list_packages(scope, vessel).await?;
-    let targets = orders
-        .iter()
-        .map(|o| (o.code.as_str(), o.budget_hours, o.earned_hours))
-        .chain(
-            packages
+    // The other side of the comparison: an ingested budget book when one
+    // exists — the yard's own hours authority — else the seeded work items.
+    // The response names which, because "reconciles" is only as strong as
+    // what it reconciles AGAINST.
+    let book = state.store.budget_book(scope, vessel).await?;
+    let (source, targets): (Option<String>, Vec<(String, i64, i64)>) = if let Some(book) = book {
+        (
+            Some(book.label),
+            book.items
                 .iter()
-                .map(|p| (p.code.as_str(), p.budget_hours, p.earned_hours)),
-        );
+                .map(|i| (i.code.clone(), i.budget_hours.get(), i.earned_hours.get()))
+                .collect(),
+        )
+    } else {
+        let orders = state.store.list_work_orders(scope, vessel).await?;
+        let packages = state.store.list_packages(scope, vessel).await?;
+        (
+            None,
+            orders
+                .iter()
+                .map(|o| (o.code.clone(), o.budget_hours.get(), o.earned_hours.get()))
+                .chain(
+                    packages
+                        .iter()
+                        .map(|p| (p.code.clone(), p.budget_hours.get(), p.earned_hours.get())),
+                )
+                .collect(),
+        )
+    };
+    let items = targets.len();
     let mismatches: Vec<Value> = targets
+        .into_iter()
         .filter_map(|(code, budget, earned)| {
-            let (rb, re) = by_item.get(code).copied().unwrap_or((0, 0));
-            (rb != budget.get() || re != earned.get()).then(|| {
+            let (rb, re) = by_item.get(code.as_str()).copied().unwrap_or((0, 0));
+            (rb != budget || re != earned).then(|| {
                 json!({
                     "code": code,
                     "item_budget": budget,
@@ -259,6 +280,8 @@ async fn reconcile(
         })
         .collect();
     Ok(json!({
+        "source": source,
+        "items": items,
         "mismatches": mismatches,
         "unmapped_budget_hours": unmapped_budget,
     }))
@@ -1464,6 +1487,143 @@ pub(crate) async fn import_zones(
         "zones": zones,
         "audit": audit,
     })))
+}
+
+/// The body of a budget-book import: one line per work item.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportBudgets {
+    /// Where the book came from, named wherever its numbers are used.
+    pub(crate) label: String,
+    /// The budget lines.
+    pub(crate) items: Vec<wadl_store::model::BudgetItemSummary>,
+}
+
+/// Ingests a budget book as the hull's hours authority.
+///
+/// From the next read on, reconciliation holds the register's hours to THIS
+/// book instead of the seeded work items — the book does not replace the
+/// operational work orders, it replaces what the hours answer to. Same seam
+/// discipline as the other two doors: all-or-nothing with every rejection
+/// reason listed, and `?dry_run=true` answers with the reconciliation the
+/// book WOULD produce against the current register, storing nothing.
+pub(crate) async fn import_budgets(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    Json(body): Json<ImportBudgets>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the book carries no label".to_owned());
+    }
+    if body.items.is_empty() {
+        rejections.push("the book carries no items".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for item in &body.items {
+        if item.code.trim().is_empty() {
+            rejections.push(format!("a line titled {:?} names no code", item.title));
+        }
+        if item.budget_hours.get() < 0 || item.earned_hours.get() < 0 {
+            rejections.push(format!("{}: negative hours", item.code));
+        }
+        if !seen.insert(item.code.as_str()) {
+            rejections.push(format!("{} is budgeted twice", item.code));
+        }
+    }
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the book was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let book = wadl_store::memory::BudgetBook {
+        label: body.label,
+        items: body.items,
+    };
+    if dry.dry_run.unwrap_or(false) {
+        // Priced against the register as-if: swap the book in only for the
+        // comparison, never for the store.
+        let activities = state.store.list_activities(&scope, vessel).await?;
+        let preview = reconcile_against(&activities, &book);
+        return Ok(Json(json!({
+            "stored": false,
+            "label": book.label,
+            "items": book.items.len(),
+            "reconciliation": preview,
+        })));
+    }
+    let label = book.label.clone();
+    let items = book.items.len();
+    state.store.set_budget_book(&scope, vessel, book).await?;
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let reconciliation = reconcile(&state, &scope, vessel, &activities).await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "items": items,
+        "reconciliation": reconciliation,
+    })))
+}
+
+/// The dry run's comparison: the register's hours against a book that is NOT
+/// stored — the same arithmetic as [`reconcile`], against a candidate.
+fn reconcile_against(
+    activities: &[wadl_store::model::ActivitySummary],
+    book: &wadl_store::memory::BudgetBook,
+) -> Value {
+    let mut by_item: std::collections::BTreeMap<&str, (i64, i64)> =
+        std::collections::BTreeMap::new();
+    let mut unmapped_budget = 0_i64;
+    for a in activities.iter().filter(|a| !a.is_milestone) {
+        match a.work_order_code.as_deref() {
+            Some(code) => {
+                let entry = by_item.entry(code).or_insert((0, 0));
+                entry.0 += a.budget_hours.get();
+                entry.1 += a.earned_hours.get();
+            }
+            None => unmapped_budget += a.budget_hours.get(),
+        }
+    }
+    let mismatches: Vec<Value> = book
+        .items
+        .iter()
+        .filter_map(|i| {
+            let (rb, re) = by_item.get(i.code.as_str()).copied().unwrap_or((0, 0));
+            (rb != i.budget_hours.get() || re != i.earned_hours.get()).then(|| {
+                json!({
+                    "code": i.code,
+                    "item_budget": i.budget_hours,
+                    "register_budget": rb,
+                    "item_earned": i.earned_hours,
+                    "register_earned": re,
+                })
+            })
+        })
+        .collect();
+    json!({
+        "source": book.label,
+        "items": book.items.len(),
+        "mismatches": mismatches,
+        "unmapped_budget_hours": unmapped_budget,
+    })
+}
+
+/// Discards the ingested budget book; reconciliation returns to the seeded
+/// work items.
+pub(crate) async fn revert_budgets(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_budget_book(&scope, vessel).await?;
+    Ok(Json(json!({ "reverted": true })))
 }
 
 /// Discards the ingested zone chart; the views return to inferred bands.

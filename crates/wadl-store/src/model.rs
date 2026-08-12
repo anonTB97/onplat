@@ -326,6 +326,27 @@ pub struct ZoneBoundSummary {
     pub hi_frame: i32,
 }
 
+/// One work item's budget line from an ingested budget book.
+///
+/// The reconciliation target, once a book is ingested: register hours are
+/// compared against THESE budgets instead of the seeded work items'. The book
+/// is the hours authority, not a work-order register — it does not replace
+/// the operational work orders, it replaces what the register's hours are
+/// held accountable to.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BudgetItemSummary {
+    /// WI / WO code, e.g. `WI-2201`.
+    pub code: String,
+    /// The item's title, as the book writes it.
+    pub title: String,
+    /// The owning trade.
+    pub trade: String,
+    /// Budgeted man-hours.
+    pub budget_hours: ManHours,
+    /// Earned man-hours.
+    pub earned_hours: ManHours,
+}
+
 /// An append-only ledger record, as a surface reads it.
 ///
 /// Hashes are hex rather than bytes because the only consumers are a JSON API and

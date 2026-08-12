@@ -154,6 +154,41 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<(), StoreError>;
 
+    /// The hull's ingested budget book — the hours authority per work item —
+    /// or `None` when reconciliation runs against the seeded work items.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn budget_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::BudgetBook>, StoreError>;
+
+    /// Replaces a hull's budget book. All-or-nothing at the caller: this
+    /// stores what it is given, and the API layer refuses malformed books
+    /// whole.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_budget_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        book: crate::memory::BudgetBook,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's ingested budget book; reconciliation returns to the
+    /// seeded work items. A no-op when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_budget_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
     /// The stranded man-hours on a hull.
     ///
     /// # Errors

@@ -308,6 +308,9 @@ pub struct InMemoryStore {
     /// authored bounds instead of inferring bands from space extents — and can
     /// check the register's assignments against them.
     zone_register: std::sync::RwLock<BTreeMap<VesselId, ZoneRegister>>,
+    /// An ingested budget book per hull. When present, reconciliation holds
+    /// the register's hours to ITS budgets instead of the seeded work items'.
+    budget_book: std::sync::RwLock<BTreeMap<VesselId, BudgetBook>>,
 }
 
 /// An ingested schedule of record, in the store's own read models.
@@ -340,6 +343,19 @@ pub struct ZoneRegister {
     pub label: String,
     /// The authored bounds, one per zone.
     pub bounds: Vec<crate::model::ZoneBoundSummary>,
+}
+
+/// An ingested budget book: the hours authority per work item.
+///
+/// Deliberately NOT a work-order register — the operational work orders stay
+/// what they are; the book replaces what the register's hours are held
+/// accountable to, which is the reconciliation report's other side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetBook {
+    /// Where it came from, e.g. `CVN73-budgets.csv`.
+    pub label: String,
+    /// One line per work item.
+    pub items: Vec<crate::model::BudgetItemSummary>,
 }
 
 /// The identifiers of the seeded demo world, handed back so the API and tests
@@ -434,6 +450,7 @@ impl InMemoryStore {
             audit: std::sync::Mutex::new(Vec::new()),
             schedule_of_record: std::sync::RwLock::new(BTreeMap::new()),
             zone_register: std::sync::RwLock::new(BTreeMap::new()),
+            budget_book: std::sync::RwLock::new(BTreeMap::new()),
         };
         (store, world)
     }
@@ -1408,6 +1425,14 @@ impl InMemoryStore {
             .get(&vessel)
             .cloned()
     }
+
+    fn ingested_budgets(&self, vessel: VesselId) -> Option<BudgetBook> {
+        self.budget_book
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
 }
 
 /// The schedule of record's edges, generated from the register the same way
@@ -1657,6 +1682,42 @@ impl Repositories for InMemoryStore {
     ) -> Result<(), StoreError> {
         self.scoped_vessel(scope, vessel)?;
         self.zone_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn budget_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<BudgetBook>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.ingested_budgets(vessel))
+    }
+
+    async fn set_budget_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        book: BudgetBook,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.budget_book
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, book);
+        Ok(())
+    }
+
+    async fn clear_budget_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.budget_book
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&vessel);

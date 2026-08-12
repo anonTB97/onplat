@@ -17,6 +17,7 @@ import { useEffect, useState } from "react";
 import {
   getZoneChart,
   listActivities,
+  revertBudgetBook,
   revertSchedule,
   revertZoneChart,
   type ActivityRegister,
@@ -176,6 +177,38 @@ export default function SourcesBoard({
                   void revertZoneChart(identity, vesselId)
                     .then(() => {
                       setMsg("✓ back to inferred bands");
+                      setNonce((n) => n + 1);
+                    })
+                    .catch((e: unknown) => setMsg(String(e)))
+              : undefined
+          }
+        />
+
+        <SourceCard
+          kind="Budget book"
+          status={register.reconciliation.source ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "SEEDED", tone: "#94a3b8" }}
+          name={register.reconciliation.source ?? "the seeded work items' own budgets"}
+          lines={[
+            {
+              text: `${register.reconciliation.items} work items — what the register's hours answer to`,
+              gloss:
+                "The book is the hours authority, not a work-order register: the operational work orders stay what they are; the book replaces what the hours are held accountable to.",
+            },
+            {
+              text: mismatches.length > 0
+                ? `register disagrees on: ${mismatches.map((x) => x.code).join(", ")}`
+                : "register agrees",
+              tone: mismatches.length > 0 ? "#f59e0b" : "#22c55e",
+            },
+          ]}
+          importHint="Import a budget CSV on Work Orders"
+          onOpenHome={() => onOpenModule("workOrders")}
+          onRevert={
+            register.reconciliation.source
+              ? () =>
+                  void revertBudgetBook(identity, vesselId)
+                    .then(() => {
+                      setMsg("✓ back to the seeded budgets");
                       setNonce((n) => n + 1);
                     })
                     .catch((e: unknown) => setMsg(String(e)))

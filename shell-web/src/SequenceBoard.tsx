@@ -30,6 +30,7 @@ import {
   type ScheduleEdge,
 } from "./api";
 import { Loading } from "./Loading";
+import { LoadDigest } from "./LoadDigest";
 import { ModuleHeader } from "./ModuleHeader";
 import { ZoneLanes } from "./ZoneLanes";
 import { tdStyle, thStyle, chipStyle, C, mh } from "./theme";
@@ -113,7 +114,7 @@ export default function SequenceBoard({
 }) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
-  const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes">("register");
+  const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes" | "digest">("register");
   const [importMsg, setImportMsg] = useState<string | null>(null);
   const [pending, setPending] = useState<{ label: string; xer: string; preview: ImportPreview } | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -330,6 +331,13 @@ export default function SequenceBoard({
         >
           Space lanes
         </button>
+        <button
+          style={chip(boardView === "digest")}
+          onClick={() => setBoardView("digest")}
+          title="The whole availability as a zone × week (or month) heat map — where the load sits, where the refusals cluster. The right first read of a large ingest."
+        >
+          Load digest
+        </button>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           {importMsg && (
             <span style={{ fontSize: 11, color: importMsg.startsWith("✓") ? C.ok : importMsg.startsWith("⏳") ? C.warn : C.danger }}>
@@ -465,15 +473,19 @@ export default function SequenceBoard({
                   title="A placard parsed out of the task's own name — the parser's guess, graded medium and listed so it can be inspected and refused."
                 >
                   · {m.located_derived.length} read from task names:{" "}
-                  {m.located_derived.map((d) => `${d.activity} → ${d.compartment}`).join(", ")}
+                  {m.located_derived.slice(0, 8).map((d) => `${d.activity} → ${d.compartment}`).join(", ")}
+                  {m.located_derived.length > 8 && ` … +${m.located_derived.length - 8} more (all marked ≈ on the register)`}
                 </span>
               )}
               {m.unlocated.length > 0 && (
                 <span style={{ color: C.danger, fontWeight: 700 }} title="The schedule did not say where. These rows serve as unlocated — visible on the register, undrawable on the ship. A WBS zone hint places the row in its swim lane at zone grain, nothing finer.">
                   · {m.unlocated.length} unlocated:{" "}
                   {m.unlocated
+                    .slice(0, 8)
                     .map((u) => `${u.activity}${u.zone_hint ? ` (${u.zone_hint} per WBS)` : ""}`)
                     .join(", ")}
+                  {m.unlocated.length > 8 &&
+                    ` … +${m.unlocated.length - 8} more (${m.unlocated.filter((u) => u.zone_hint).length} carry a WBS zone hint)`}
                 </span>
               )}
               {m.unlocated.length === 0 && m.located_derived.length === 0 && (
@@ -484,7 +496,8 @@ export default function SequenceBoard({
               <div style={line}>
                 <span style={tag}>Unknown</span>
                 <span style={{ color: C.danger, fontWeight: 700 }} title="Located to a compartment this hull's register does not carry — mapped, and to nowhere this hull knows.">
-                  {m.unknown_spaces.map((u) => `${u.activity} → ${u.compartment}`).join(", ")} — not in this hull&apos;s register
+                  {m.unknown_spaces.slice(0, 8).map((u) => `${u.activity} → ${u.compartment}`).join(", ")}
+                  {m.unknown_spaces.length > 8 && ` … +${m.unknown_spaces.length - 8} more`} — not in this hull&apos;s register
                 </span>
               </div>
             )}
@@ -504,6 +517,10 @@ export default function SequenceBoard({
           </div>
         );
       })()}
+
+      {boardView === "digest" && (
+        <LoadDigest activities={activities} spaces={spaces} asOf={asOfMs} />
+      )}
 
       {(boardView === "lanes" || boardView === "spaceLanes") && (
         <ZoneLanes

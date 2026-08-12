@@ -103,7 +103,11 @@ export function ZoneLanes({
 }) {
   // The time camera. `null` = the full availability; a window = zoomed in.
   const [view, setView] = useState<TimeWindow | null>(null);
-  const [logic, setLogic] = useState<LogicMode>("all");
+  // At production scale a thousand forward arrows are fog, not logic, so the
+  // spine defaults off past a threshold — but only as a DEFAULT: the reader's
+  // explicit choice always wins, and inversions are never hidden.
+  const [logicChoice, setLogicChoice] = useState<LogicMode | null>(null);
+  const logic: LogicMode = logicChoice ?? (edges.length > 800 ? "inversions" : "all");
   const svgRef = useRef<SVGSVGElement | null>(null);
   // The wheel handler is a native non-passive listener (React's is passive, and
   // a wheel that scrolls the page instead of zooming the axis is unusable), so
@@ -518,7 +522,7 @@ export function ZoneLanes({
           {(["all", "inversions", "off"] as LogicMode[]).map((m) => (
             <button
               key={m}
-              onClick={() => setLogic(m)}
+              onClick={() => setLogicChoice(m)}
               title={
                 m === "all" ? "Every dependency edge" : m === "inversions" ? "Only the negative lags" : "No arrows"
               }

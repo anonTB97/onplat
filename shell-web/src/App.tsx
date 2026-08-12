@@ -26,6 +26,7 @@ import DailyOps from "./DailyOps";
 import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
 import DistributedPackages from "./DistributedPackages";
+import FieldGuide from "./FieldGuide";
 import CascadeBoard from "./CascadeBoard";
 import SourcesBoard from "./SourcesBoard";
 import LedgerBoard from "./LedgerBoard";
@@ -49,6 +50,7 @@ const MODULES: ModuleDef[] = [
   { group: "Authorization", label: "Distributed Packages", id: "distPackages", icon: "distPackages", built: true },
   { group: "", label: "Decisions Ledger", id: "ledger", icon: "ledger", built: true },
   { group: "", label: "Deconfliction Cascade", id: "cascade", icon: "cascade", built: true },
+  { group: "Help", label: "Field Guide", id: "guide", icon: "guide", built: true },
 ];
 
 const DECK_EXPLORER = MODULES[1] as ModuleDef;
@@ -468,6 +470,15 @@ export default function App() {
               asOf={asOf}
               spaces={rows}
               onOpenSpace={jump}
+            />
+          )}
+
+          {!error && module.id === "guide" && (
+            <FieldGuide
+              onOpenModule={(id) => {
+                const target = MODULES.find((mod) => mod.id === id && mod.built);
+                if (target) setModule(target);
+              }}
             />
           )}
 

@@ -309,7 +309,7 @@ export default function SourcesBoard({
               tone: m.unlocated.length > 0 ? C.danger : m.located_derived.length > 0 ? C.warn : C.ok,
               gloss:
                 m.located_derived.length > 0
-                  ? `Read from task names: ${m.located_derived.map((d) => `${d.activity} → ${d.compartment}`).join(", ")} — graded guesses, marked ≈ wherever they appear.`
+                  ? `Read from task names: ${m.located_derived.slice(0, 8).map((d) => `${d.activity} → ${d.compartment}`).join(", ")}${m.located_derived.length > 8 ? ` … +${m.located_derived.length - 8} more` : ""} — graded guesses, marked ≈ wherever they appear.`
                   : "Every located row is authored by the schedule.",
             },
             ...(m.unknown_spaces.length > 0

@@ -80,22 +80,18 @@ fn actuals_override_the_cpm_pass_and_the_baseline_is_never_consulted() {
     assert_eq!(w.end.epoch_millis(), hour("2026-08-10 11:00"), "CPM finish");
 }
 
+/// Locating an activity, graded per path: UDF = the schedule saying where
+/// (High); a placard parsed from the task's own name = this parser guessing
+/// where (Medium, never presented as authored); neither = Low with `None`.
+/// Guessing from free text is allowed exactly because it is graded and
+/// reported — what stays forbidden is guessing SILENTLY.
 #[test]
-fn a_missing_compartment_udf_is_low_grade_none_not_a_guess() {
+fn location_is_graded_per_path_udf_name_or_nothing() {
     let report = ingest_xer(SAMPLE, "CVN73-PIA26.xer");
-    let a4040 = report
-        .activities
-        .iter()
-        .find(|a| a.code == "A4040")
-        .unwrap();
-    assert_eq!(a4040.compartment_no, None, "the fixture's deliberate gap");
-    assert_eq!(a4040.compartment_reliability, Reliability::Low);
-    // And a task WITH the UDF is high-grade.
-    let a4020 = report
-        .activities
-        .iter()
-        .find(|a| a.code == "A4020")
-        .unwrap();
+    let by_code = |code: &str| report.activities.iter().find(|a| a.code == code).unwrap();
+
+    // A task WITH the UDF is high-grade — and its name is never consulted.
+    let a4020 = by_code("A4020");
     assert_eq!(
         a4020
             .compartment_no
@@ -104,6 +100,26 @@ fn a_missing_compartment_udf_is_low_grade_none_not_a_guess() {
         Some("3-160-2-Q")
     );
     assert_eq!(a4020.compartment_reliability, Reliability::High);
+
+    // A4040 has no UDF, but its name carries "(3-185-0-L)": located from the
+    // name, graded as the guess it is.
+    let a4040 = by_code("A4040");
+    assert_eq!(
+        a4040
+            .compartment_no
+            .as_ref()
+            .map(wadl_domain::CompartmentNo::as_str),
+        Some("3-185-0-L"),
+        "the placard written in the task name"
+    );
+    assert_eq!(a4040.compartment_reliability, Reliability::Medium);
+
+    // "Fr 160" in a name is a frame reference, not a placard — it must NOT
+    // locate anything. A4010 has a UDF; strip the UDF case by checking a
+    // milestone, which carries neither UDF nor placard.
+    let m0100 = by_code("M0100");
+    assert_eq!(m0100.compartment_no, None);
+    assert_eq!(m0100.compartment_reliability, Reliability::Low);
 }
 
 #[test]

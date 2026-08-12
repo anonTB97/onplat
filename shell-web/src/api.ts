@@ -687,20 +687,45 @@ export async function importSchedule(
   return (await res.json()) as { label: string; activities: number; edges: number };
 }
 
+/**
+ * The location-mapping report: how the export's work landed on the hull,
+ * graded per path — the schedule saying where (authored), this parser
+ * guessing where (derived, listed so the guess can be inspected and refused),
+ * or nothing at all. `unknown_spaces` is the finding most worth a look:
+ * mapped, and to nowhere this hull knows.
+ */
+export interface MappingReport {
+  work_activities: number;
+  located_authored: number;
+  located_derived: { activity: string; compartment: string }[];
+  unlocated: string[];
+  unknown_spaces: { activity: string; compartment: string }[];
+  milestones: number;
+}
+
+/** Everything a schedule import would claim — the dry run and the confirm alike. */
+export interface ImportPreview {
+  label: string;
+  activities: number;
+  edges: number;
+  reconciliation: { mismatches: ReconciliationMismatch[]; unmapped_budget_hours: number };
+  mapping: MappingReport;
+}
+
 /** Dry-runs an import: everything the import would say, nothing it would do. */
 export async function previewSchedule(
   id: Identity,
   vesselId: string,
   label: string,
   xer: string,
-): Promise<{ activities: number; edges: number; reconciliation: { mismatches: ReconciliationMismatch[]; unmapped_budget_hours: number } }> {
+): Promise<ImportPreview> {
   const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record?dry_run=true`, {
     method: "POST",
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, xer }),
   });
   if (!res.ok) throw new Error(`preview → ${res.status}: ${await res.text()}`);
-  return (await res.json()) as never;
+  return (await res.json()) as ImportPreview;
 }
 
 /** Reverts to the generated register, discarding the ingested schedule. */

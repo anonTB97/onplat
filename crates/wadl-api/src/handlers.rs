@@ -1175,8 +1175,11 @@ pub(crate) async fn import_schedule(
     let edges = sor.edges.len();
     // The dry run: everything the import would say, nothing it would do —
     // including the reconciliation the reader currently only sees AFTER the
-    // swap. Committing a schedule blind was the sharpest edge on this door.
+    // swap, and the location-mapping report. Committing a schedule blind was
+    // the sharpest edge on this door.
     let reconciliation = reconcile(&state, &scope, vessel, &sor.activities).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let mapping = mapping_report(&sor.activities, &compartments);
     if dry.dry_run.unwrap_or(false) {
         return Ok(Json(json!({
             "dry_run": true,
@@ -1184,6 +1187,7 @@ pub(crate) async fn import_schedule(
             "activities": activities,
             "edges": edges,
             "reconciliation": reconciliation,
+            "mapping": mapping,
         })));
     }
     state
@@ -1195,7 +1199,66 @@ pub(crate) async fn import_schedule(
         "activities": activities,
         "edges": edges,
         "reconciliation": reconciliation,
+        "mapping": mapping,
     })))
+}
+
+/// The location-mapping report: how the export's work landed on the hull.
+///
+/// The dominant risk of every P6 import is WHERE — locations live in a UDF
+/// when somebody maintained it, in free text when they did not, and nowhere
+/// the rest of the time — so the import door reports the grading per path
+/// instead of one located/unlocated number:
+///
+/// * `located_authored` — the dedicated UDF said where (High).
+/// * `located_derived` — a placard was parsed out of the activity's own name
+///   (Medium); each one is listed, because a guess a reader cannot inspect
+///   is a guess they cannot refuse.
+/// * `unlocated` — the schedule did not say (listed by code).
+/// * `unknown_spaces` — located to a compartment the register does not
+///   carry: mapped, and to nowhere this hull knows — the finding most worth
+///   a look before Confirm.
+///
+/// Milestones are counted apart: key events carry dates and no place, and
+/// folding them into `unlocated` would make every clean import look risky.
+fn mapping_report(
+    activities: &[wadl_store::model::ActivitySummary],
+    compartments: &[wadl_store::model::CompartmentSummary],
+) -> Value {
+    let known: std::collections::BTreeSet<&str> = compartments
+        .iter()
+        .map(|c| c.compartment_no.as_str())
+        .collect();
+    let work: Vec<_> = activities.iter().filter(|a| !a.is_milestone).collect();
+    let mut located_authored = 0_usize;
+    let mut located_derived: Vec<Value> = Vec::new();
+    let mut unlocated: Vec<&str> = Vec::new();
+    let mut unknown_spaces: Vec<Value> = Vec::new();
+    for a in &work {
+        match (&a.compartment_no, a.compartment_reliability) {
+            (Some(no), wadl_store::model::Reliability::High) => {
+                located_authored += 1;
+                if !known.contains(no.as_str()) {
+                    unknown_spaces.push(json!({ "activity": a.code, "compartment": no }));
+                }
+            }
+            (Some(no), _) => {
+                located_derived.push(json!({ "activity": a.code, "compartment": no }));
+                if !known.contains(no.as_str()) {
+                    unknown_spaces.push(json!({ "activity": a.code, "compartment": no }));
+                }
+            }
+            (None, _) => unlocated.push(&a.code),
+        }
+    }
+    json!({
+        "work_activities": work.len(),
+        "located_authored": located_authored,
+        "located_derived": located_derived,
+        "unlocated": unlocated,
+        "unknown_spaces": unknown_spaces,
+        "milestones": activities.len() - work.len(),
+    })
 }
 
 /// The `?dry_run=` flag on a schedule import.

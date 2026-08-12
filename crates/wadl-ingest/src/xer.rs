@@ -156,10 +156,13 @@ pub struct XerActivity {
     /// The WI/WO number from the `wi_number` UDF; `None` = unmapped, a visible
     /// state for the register.
     pub work_order_code: Option<String>,
-    /// The compartment from the dedicated UDF.
+    /// The compartment: from the dedicated UDF, or parsed out of the task
+    /// name when the UDF is silent.
     pub compartment_no: Option<CompartmentNo>,
-    /// [`Reliability::High`] when the dedicated UDF carried it; [`Reliability::Low`]
-    /// when the schedule did not say. Never silently guessed from free text.
+    /// [`Reliability::High`] when the dedicated UDF carried it — the schedule
+    /// saying where. [`Reliability::Medium`] when a placard was parsed out of
+    /// the task's own name — this parser guessing where, graded as the guess
+    /// it is. [`Reliability::Low`] when the schedule did not say at all.
     pub compartment_reliability: Reliability,
     /// The assigned resource's short name — the trade, where resources are
     /// modelled per trade.
@@ -381,19 +384,25 @@ fn extract_activity(
         .get(task_id)
         .cloned()
         .unwrap_or((0, 0, String::new()));
-    let compartment = compartments.get(task_id).copied();
+    // Locating an activity, in order of trust: the dedicated UDF is the one
+    // authored home the crosswalk names; failing that, a placard parsed out of
+    // the activity's own NAME — schedulers write "... (3-160-2-Q)" constantly,
+    // and refusing to read it would unlocate half of a real export. The two
+    // paths are graded apart because they are different claims: the UDF is the
+    // schedule saying where, the name is this parser guessing where.
+    let (compartment, compartment_reliability) = match compartments.get(task_id).copied() {
+        Some(udf) => (Some(udf.to_owned()), Reliability::High),
+        None => match placard_in(name) {
+            Some(found) => (Some(found), Reliability::Medium),
+            None => (None, Reliability::Low),
+        },
+    };
     Ok(XerActivity {
         code: code.to_owned(),
         name: name.to_owned(),
         work_order_code: wi_numbers.get(task_id).map(|s| (*s).to_owned()),
         compartment_no: compartment.map(CompartmentNo::new),
-        // The dedicated UDF is the one high-trust home the crosswalk names;
-        // absence is LOW because "the schedule did not say" is the risk itself.
-        compartment_reliability: if compartment.is_some() {
-            Reliability::High
-        } else {
-            Reliability::Low
-        },
+        compartment_reliability,
         trade,
         planned: planned_window(tasks, row)?,
         budget_hours: ManHours::new(budget),
@@ -402,6 +411,18 @@ fn extract_activity(
         is_milestone: tasks.get(row, "task_type") == Some("TT_Mile"),
         source_ref: format!("{source_label} · {code}"),
     })
+}
+
+/// The first USN placard (`deck-frame-side-usage`, e.g. `3-160-2-Q`) written
+/// inside free text, or `None`. Tokens are tried stripped of the punctuation
+/// a scheduler wraps them in — `(3-160-2-Q)`, `3-160-2-Q,` — and validated by
+/// the domain's own USN parser, never by a looser pattern of this crate's
+/// invention: a string that only looks like a placard must not locate work.
+fn placard_in(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .map(|tok| tok.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .find(|tok| CompartmentNo::new(*tok).parse_usn().is_some())
+        .map(str::to_owned)
 }
 
 /// One TASKPRED row to a relationship, ids resolved to codes.

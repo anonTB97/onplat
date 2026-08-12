@@ -25,6 +25,7 @@ import {
   type AsOf,
   type DeckStateRow,
   type Identity,
+  type ImportPreview,
   type ReconciliationMismatch,
   type ScheduleEdge,
 } from "./api";
@@ -113,7 +114,7 @@ export default function SequenceBoard({
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
   const [boardView, setBoardView] = useState<"register" | "lanes">("register");
   const [importMsg, setImportMsg] = useState<string | null>(null);
-  const [pending, setPending] = useState<{ label: string; xer: string; summary: string } | null>(null);
+  const [pending, setPending] = useState<{ label: string; xer: string; preview: ImportPreview } | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [source, setSource] = useState<string | null>(null);
   const [mismatches, setMismatches] = useState<ReconciliationMismatch[]>([]);
@@ -308,17 +309,7 @@ export default function SequenceBoard({
                 void file.text().then((xer) =>
                   previewSchedule(identity, vesselId, file.name, xer)
                     .then((r) => {
-                      const codes = r.reconciliation.mismatches.map((m) => m.code).join(", ");
-                      setPending({
-                        label: file.name,
-                        xer,
-                        summary:
-                          `${r.activities} activities, ${r.edges} edges` +
-                          (codes ? ` · does not reconcile: ${codes}` : " · reconciles") +
-                          (r.reconciliation.unmapped_budget_hours > 0
-                            ? ` · ${r.reconciliation.unmapped_budget_hours} MH unmapped`
-                            : ""),
-                      });
+                      setPending({ label: file.name, xer, preview: r });
                       setImportMsg(null);
                     })
                     .catch((err: unknown) => setImportMsg(String(err))),
@@ -381,31 +372,93 @@ export default function SequenceBoard({
         </span>
       </div>
 
-      {pending && (
-        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, padding: "8px 12px", border: `1px solid #f59e0b66`, borderRadius: 8, background: "rgba(245,158,11,0.06)", fontSize: 12 }}>
-          <b>{pending.label}</b>
-          <span style={{ color: C.dim }}>{pending.summary}</span>
-          <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button
-              style={chip(true)}
-              onClick={() => {
-                const staged = pending;
-                setPending(null);
-                if (!staged) return;
-                void importSchedule(identity, vesselId, staged.label, staged.xer)
-                  .then((r) => {
-                    setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);
-                    setReloadNonce((n) => n + 1);
-                  })
-                  .catch((err: unknown) => setImportMsg(String(err)));
-              }}
-            >
-              Confirm import
-            </button>
-            <button style={chip(false)} onClick={() => setPending(null)}>Cancel</button>
-          </span>
-        </div>
-      )}
+      {/* The dry run's findings, one line per question a planner asks before
+          Confirm: what arrives, where it lands, and whether the hours agree.
+          Everything here came from the server's preview — nothing is stored
+          yet, and Cancel costs nothing. */}
+      {pending && (() => {
+        const p = pending.preview;
+        const m = p.mapping;
+        const codes = p.reconciliation.mismatches.map((x) => x.code).join(", ");
+        const line: React.CSSProperties = { display: "flex", gap: 6, alignItems: "baseline", fontSize: 12 };
+        const tag: React.CSSProperties = {
+          fontSize: 9, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase",
+          color: C.dim, minWidth: 86,
+        };
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 10, padding: "9px 12px", border: `1px solid #f59e0b66`, borderRadius: 8, background: "rgba(245,158,11,0.06)" }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <b style={{ fontSize: 12.5 }}>{pending.label}</b>
+              <span style={{ fontSize: 11.5, color: C.dim }}>
+                {p.activities} activities · {p.edges} edges · {m.milestones} key events — previewed, nothing stored
+              </span>
+              <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                <button
+                  style={chip(true)}
+                  onClick={() => {
+                    const staged = pending;
+                    setPending(null);
+                    if (!staged) return;
+                    void importSchedule(identity, vesselId, staged.label, staged.xer)
+                      .then((r) => {
+                        setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);
+                        setReloadNonce((n) => n + 1);
+                      })
+                      .catch((err: unknown) => setImportMsg(String(err)));
+                  }}
+                >
+                  Confirm import
+                </button>
+                <button style={chip(false)} onClick={() => setPending(null)}>Cancel</button>
+              </span>
+            </div>
+            <div style={line}>
+              <span style={tag}>Location</span>
+              <span style={{ color: "#ccd1da" }}>
+                {m.located_authored} of {m.work_activities} authored by the schedule
+              </span>
+              {m.located_derived.length > 0 && (
+                <span
+                  style={{ color: "#f59e0b" }}
+                  title="A placard parsed out of the task's own name — the parser's guess, graded medium and listed so it can be inspected and refused."
+                >
+                  · {m.located_derived.length} read from task names:{" "}
+                  {m.located_derived.map((d) => `${d.activity} → ${d.compartment}`).join(", ")}
+                </span>
+              )}
+              {m.unlocated.length > 0 && (
+                <span style={{ color: C.danger, fontWeight: 700 }} title="The schedule did not say where. These rows serve as unlocated — visible on the register, undrawable on the ship.">
+                  · {m.unlocated.length} unlocated: {m.unlocated.join(", ")}
+                </span>
+              )}
+              {m.unlocated.length === 0 && m.located_derived.length === 0 && (
+                <span style={{ color: "#22c55e" }}>· every location authored</span>
+              )}
+            </div>
+            {m.unknown_spaces.length > 0 && (
+              <div style={line}>
+                <span style={tag}>Unknown</span>
+                <span style={{ color: C.danger, fontWeight: 700 }} title="Located to a compartment this hull's register does not carry — mapped, and to nowhere this hull knows.">
+                  {m.unknown_spaces.map((u) => `${u.activity} → ${u.compartment}`).join(", ")} — not in this hull&apos;s register
+                </span>
+              </div>
+            )}
+            <div style={line}>
+              <span style={tag}>Hours</span>
+              {codes ? (
+                <span style={{ color: "#f59e0b" }}>does not reconcile: {codes}</span>
+              ) : (
+                <span style={{ color: "#22c55e" }}>reconciles with the work items</span>
+              )}
+              {p.reconciliation.unmapped_budget_hours > 0 && (
+                <span style={{ color: C.dim }}>
+                  · {mh(p.reconciliation.unmapped_budget_hours)} mapped to no work item
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {boardView === "lanes" && (
         <ZoneLanes activities={activities} spaces={spaces} edges={edges} asOf={asOfMs} onOpenSpace={onOpenSpace} />

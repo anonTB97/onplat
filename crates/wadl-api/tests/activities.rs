@@ -433,3 +433,38 @@ async fn the_ledger_serves_verified_entries() {
         assert!(e["entry_hash"].is_string());
     }
 }
+
+/// The import door's location-mapping report: how the export's work landed on
+/// the hull, graded per path, visible in the dry run BEFORE anything is
+/// stored. The dominant risk of every P6 import is WHERE, and one
+/// located/unlocated number would bury the difference between the schedule
+/// saying so and this parser guessing.
+#[tokio::test]
+async fn the_dry_run_reports_the_location_mapping() {
+    let (app, world) = app_at_anchor();
+    let (status, preview) = post(
+        &app,
+        &world,
+        &format!(
+            "/api/vessels/{}/schedule-of-record?dry_run=true",
+            world.cvn73.as_uuid()
+        ),
+        serde_json::json!({ "label": "CVN73-PIA26.xer", "xer": SAMPLE_XER }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let m = &preview["mapping"];
+    assert_eq!(m["work_activities"], 14, "{m}");
+    assert_eq!(m["milestones"], 3);
+    // Thirteen located by the dedicated UDF — the schedule saying where.
+    assert_eq!(m["located_authored"], 13, "{m}");
+    // One located out of its own task name — the guess, listed so a reader
+    // can inspect and refuse it.
+    let derived = m["located_derived"].as_array().unwrap();
+    assert_eq!(derived.len(), 1, "{m}");
+    assert_eq!(derived[0]["activity"], "A4040");
+    assert_eq!(derived[0]["compartment"], "3-185-0-L");
+    // Nothing unlocated, and every located space is one the register knows.
+    assert_eq!(m["unlocated"].as_array().unwrap().len(), 0, "{m}");
+    assert_eq!(m["unknown_spaces"].as_array().unwrap().len(), 0, "{m}");
+}

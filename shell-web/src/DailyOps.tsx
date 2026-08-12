@@ -24,6 +24,7 @@ import {
   type Identity,
 } from "./api";
 import { Loading } from "./Loading";
+import { ModuleHeader } from "./ModuleHeader";
 import { chipStyle, C, mh } from "./theme";
 
 const fmtTime = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
@@ -234,31 +235,28 @@ export default function DailyOps({
 
   return (
     <div>
-      <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
-        Daily Ops · {hullLabel}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>The shift board</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 780 }}>
-        Every activity {win === null ? "planned" : "touching"}{" "}
-        <b style={{ color: C.bright }}>{sliceLabel}</b>
-        {win === null && " on the time control"}, by trade —{" "}
-        <b style={{ color: C.bright }}>{onShift.length}</b>{" "}
-        {onShift.length === 1 ? "activity" : "activities"},{" "}
-        <b style={{ color: C.bright }}>{mh(remaining)}</b> remaining in them
-        {heldCount > 0 && (
+      <ModuleHeader
+        kicker={`Daily Ops · ${hullLabel}`}
+        title="The shift board"
+        stats={[
+          { value: onShift.length, label: onShift.length === 1 ? "activity" : "activities", title: `Planned for ${sliceLabel}` },
+          { value: mh(remaining), label: "remaining in them" },
+          heldCount > 0 && {
+            value: heldCount, label: "in refused spaces", tone: C.danger,
+            title: "Booked into a space the engine refuses at this instant — live fact, moves with the clock.",
+          },
+          doomedCount > 0 && {
+            value: doomedCount, label: "not executable", tone: C.warn,
+            title: "The space refuses work somewhere inside the activity's own planned window — a property of the plan.",
+          },
+        ]}
+        note={
           <>
-            {" "}· <b style={{ color: C.danger }}>{heldCount}</b> in a space the engine refuses
-            right now
+            Slice: <b style={{ color: C.bright }}>{sliceLabel}</b> — scrub the clock and the
+            shift moves with it; the full register is on the Sequence Board.
           </>
-        )}
-        {doomedCount > 0 && (
-          <>
-            {" "}· <b style={{ color: C.warn }}>{doomedCount}</b> not executable as planned
-          </>
-        )}
-        . Scrub the clock and the shift moves with it; the full register is on the
-        Sequence Board.
-      </p>
+        }
+      />
 
       {/* The slice: this instant, or one of the yard's three shifts on the
           as-of day — so tonight's board is readable this afternoon. */}

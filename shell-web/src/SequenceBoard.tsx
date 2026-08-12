@@ -30,6 +30,7 @@ import {
   type ScheduleEdge,
 } from "./api";
 import { Loading } from "./Loading";
+import { ModuleHeader } from "./ModuleHeader";
 import { ZoneLanes } from "./ZoneLanes";
 import { tdStyle, thStyle, chipStyle, C, mh } from "./theme";
 
@@ -212,72 +213,46 @@ export default function SequenceBoard({
 
   return (
     <div>
-      <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
-        Sequence Board · {hullLabel}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>The activity register</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
-        Every scheduled activity at the grain a crew is handed — the accounting view
-        of this work is the six rows on Work Orders; this is what those rows are made
-        of. <b style={{ color: C.bright }}>{activities.length}</b> activities ·{" "}
-        <b style={{ color: C.bright }}>{inWindow}</b> planned for the instant on the
-        time control
-        {unlocated > 0 && (
-          <>
-            {" "}· <b style={{ color: C.warn }}>{unlocated}</b>{" "}
-            <span title="The schedule did not say which compartment — the dominant risk of every P6 import, shown rather than hidden.">
-              with no located compartment
-            </span>
-          </>
-        )}
-        {derivedLoc > 0 && (
-          <>
-            {" "}· <b style={{ color: C.warn }}>{derivedLoc}</b>{" "}
-            <span title="Located from the task's own name rather than an authored field — marked ≈ in the Space column, graded medium, never presented as authored.">
-              located from task names
-            </span>
-          </>
-        )}
-        {refused > 0 && (
-          <>
-            {" "}· <b style={{ color: C.danger }}>{refused}</b>{" "}
-            <span title="The activity's space, evaluated over its planned window, refuses work during it — a fact neither the schedule nor the engine holds alone.">
-              not executable as planned
-            </span>
-          </>
-        )}
-        .{" "}
-        {source ? (
-          <>
-            Schedule of record: <b style={{ color: C.bright }}>{source}</b> — served
-            as ingested, graded, never smoothed over.
-          </>
-        ) : (
-          <>
-            Generated from the seeded work orders and packages so every hour
-            reconciles with the boards; real P6 ingest replaces this register without
-            changing the screen.
-          </>
-        )}
-        {mismatches.length > 0 && (
-          <>
-            {" "}
-            <b style={{ color: C.warn }}>⚠ {mismatches.length}</b>{" "}
-            <span
-              title={mismatches
-                .map(
-                  (m) =>
-                    `${m.code}: item ${m.item_budget}/${m.item_earned} MH vs register ${m.register_budget}/${m.register_earned} MH`,
-                )
-                .join(" · ")}
-            >
-              work item{mismatches.length === 1 ? " does" : "s do"} not reconcile with
-              the register
-            </span>
-            .
-          </>
-        )}
-      </p>
+      <ModuleHeader
+        kicker={`Sequence Board · ${hullLabel}`}
+        title="The activity register"
+        stats={[
+          { value: activities.length, label: "activities", title: "Every scheduled activity at the grain a crew is handed — the doing grain the six work orders are made of." },
+          { value: inWindow, label: "in window now", title: "Planned for the instant on the time control. The instant marks rows, never filters them." },
+          refused > 0 && {
+            value: refused, label: "not executable", tone: C.danger,
+            title: "The activity's space, evaluated over its planned window, refuses work during it — a fact neither the schedule nor the engine holds alone.",
+          },
+          unlocated > 0 && {
+            value: unlocated, label: "unlocated", tone: C.warn,
+            title: "The schedule did not say which compartment — the dominant risk of every P6 import, shown rather than hidden.",
+          },
+          derivedLoc > 0 && {
+            value: derivedLoc, label: "from task names", tone: C.warn,
+            title: "Located from the task's own name rather than an authored field — marked ≈ in the Space column, never presented as authored.",
+          },
+          mismatches.length > 0 && {
+            value: mismatches.length, label: "not reconciled", tone: C.warn,
+            title: mismatches
+              .map((m) => `${m.code}: item ${m.item_budget}/${m.item_earned} MH vs register ${m.register_budget}/${m.register_earned} MH`)
+              .join(" · "),
+          },
+        ]}
+        note={
+          source ? (
+            <>
+              Schedule of record: <b style={{ color: C.bright }}>{source}</b> — served as
+              ingested, graded, never smoothed over.
+            </>
+          ) : (
+            <>
+              Generated from the seeded work orders and packages so every hour reconciles
+              with the boards; real P6 ingest replaces this register without changing the
+              screen.
+            </>
+          )
+        }
+      />
 
       {/* The board's two shapes, and the door schedules come in and out of.
           Planning tool: the register reads, the lanes sequence, the import is

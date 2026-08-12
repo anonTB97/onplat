@@ -14,6 +14,7 @@
 import React, { useEffect, useState } from "react";
 import { listLedger, type AuditEntry, type Identity, type LedgerReport } from "./api";
 import { Loading } from "./Loading";
+import { ModuleHeader } from "./ModuleHeader";
 import { C } from "./theme";
 
 /** How each recorded action reads at a glance. */
@@ -113,16 +114,14 @@ export default function LedgerBoard({
 
   return (
     <div>
-      <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
-        Decisions Ledger · {hullLabel}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>What was answered for, on the record</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
-        Every mitigation disposition and issue acknowledgement, append-only and
-        hash-chained. Nothing here applies anything — the platform flags and
-        prices, the yard acts; this is the part a board of inquiry asks about
-        and the part no other system holds.
-      </p>
+      <ModuleHeader
+        kicker={`Decisions Ledger · ${hullLabel}`}
+        title="What was answered for, on the record"
+        stats={[
+          { value: report.entries.length, label: report.entries.length === 1 ? "entry" : "entries" },
+        ]}
+        note="Every mitigation disposition and issue acknowledgement, append-only and hash-chained. Nothing here applies anything — the platform flags and prices, the yard acts; this is the part a board of inquiry asks about and the part no other system holds."
+      />
 
       {/* The verdict, before the entries. */}
       {report.verified ? (

@@ -27,6 +27,7 @@ import {
 } from "./api";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
 import { Loading } from "./Loading";
+import { ModuleHeader } from "./ModuleHeader";
 import { C, mh } from "./theme";
 
 export default function SourcesBoard({
@@ -72,17 +73,16 @@ export default function SourcesBoard({
 
   return (
     <div>
-      <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
-        Data Sources · {hullLabel}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>What this hull is built from</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 780 }}>
-        Every document behind the screens, with how much of it landed and how much
-        of what landed is authored versus guessed. Each card reads the same
-        endpoint its home screen reads, so this panel cannot disagree with the
-        screens it summarises. Imports happen on the document&apos;s home screen;
-        taking one back out happens there or here.
-      </p>
+      <ModuleHeader
+        kicker={`Data Sources · ${hullLabel}`}
+        title="What this hull is built from"
+        stats={[
+          { value: register.schedule_source ? "ingested" : "generated", label: "schedule of record" },
+          { value: zones.source ? "authored" : "inferred", label: "zone chart" },
+          { value: register.reconciliation.source ? "ingested" : "seeded", label: "budget book" },
+        ]}
+        note="Every document behind the screens, with how much of it landed and how much of what landed is authored versus guessed. Each card reads the same endpoint its home screen reads, so this panel cannot disagree with the screens it summarises."
+      />
 
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(400px,1fr))", alignItems: "start" }}>
         <SourceCard

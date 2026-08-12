@@ -12,6 +12,7 @@ import {
   type WorkOrder,
 } from "./api";
 import { Loading } from "./Loading";
+import { ModuleHeader } from "./ModuleHeader";
 import { C, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
 
 type SortKey = "code" | "remaining" | "compartment" | "start";
@@ -125,45 +126,33 @@ export default function WorkOrders({
 
   return (
     <div>
-      <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
-        Work Orders · {hullLabel}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>Work on this availability</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
-        {rows.length} orders · {mh(totalRemaining)} remaining ·{" "}
-        {rows.filter((w) => w.in_window).length} in progress at the instant on the time control.
-        Every row carries the document it came from;{" "}
-        {unverified === 0 ? "all provenance is planner-confirmed" : `${unverified} still await planner confirmation`}.
-        {recon && (
-          <>
-            {" "}Hours answer to{" "}
-            <b style={{ color: C.bright }}>
-              {recon.source ?? "the seeded work items"}
-            </b>{" "}
-            ({recon.items} items)
-            {recon.mismatches.length > 0 && (
-              <>
-                {" "}—{" "}
-                <b style={{ color: C.warn }}>
-                  {recon.mismatches.length} do{recon.mismatches.length === 1 ? "es" : ""} not
-                  reconcile
-                </b>{" "}
-                <span
-                  title={recon.mismatches
-                    .map(
-                      (m) =>
-                        `${m.code}: book ${m.item_budget}/${m.item_earned} MH vs register ${m.register_budget}/${m.register_earned} MH`,
-                    )
-                    .join(" · ")}
-                >
-                  ({recon.mismatches.map((m) => m.code).join(", ")})
-                </span>
-              </>
-            )}
-            .
-          </>
-        )}
-      </p>
+      <ModuleHeader
+        kicker={`Work Orders · ${hullLabel}`}
+        title="Work on this availability"
+        stats={[
+          { value: rows.length, label: "orders" },
+          { value: mh(totalRemaining), label: "remaining" },
+          { value: rows.filter((w) => w.in_window).length, label: "in window now" },
+          unverified > 0 && {
+            value: unverified, label: "unconfirmed provenance", tone: C.warn,
+            title: "Ingested, not yet confirmed by a planner. Every row carries the document it came from.",
+          },
+          (recon?.mismatches.length ?? 0) > 0 && {
+            value: recon?.mismatches.length ?? 0, label: "not reconciled", tone: C.warn,
+            title: (recon?.mismatches ?? [])
+              .map((m) => `${m.code}: book ${m.item_budget}/${m.item_earned} MH vs register ${m.register_budget}/${m.register_earned} MH`)
+              .join(" · "),
+          },
+        ]}
+        note={
+          recon && (
+            <>
+              Hours answer to <b style={{ color: C.bright }}>{recon.source ?? "the seeded work items"}</b>{" "}
+              ({recon.items} items). Every row carries the document it came from.
+            </>
+          )
+        }
+      />
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, color: C.dim }}>Sort</span>

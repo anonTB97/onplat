@@ -22,6 +22,7 @@ import {
   type Mitigation,
 } from "./api";
 import { Loading } from "./Loading";
+import { ModuleHeader } from "./ModuleHeader";
 import { actionTitle } from "./Mitigations";
 import { C, mh } from "./theme";
 
@@ -132,22 +133,15 @@ export default function CascadeBoard({
 
   return (
     <div>
-      <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
-        Deconfliction Cascade · {hullLabel}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>If we do it, what happens everywhere else?</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 780 }}>
-        Pick an action; the hull becomes its consequence map. Every effect is a
-        counterfactual engine verdict — the world rebuilt with the action taken and
-        re-evaluated
-        {asOfMs !== null && (
-          <>
-            {" "}as of <b style={{ color: C.bright }}>{fmtInstant(asOfMs)}Z</b>
-          </>
-        )}
-        . Decision support, not automation: this proposes, a planner decides on the
-        space&apos;s options panel, and the ledger remembers.
-      </p>
+      <ModuleHeader
+        kicker={`Deconfliction Cascade · ${hullLabel}`}
+        title="If we do it, what happens everywhere else?"
+        stats={[
+          { value: actions.length, label: actions.length === 1 ? "action on offer" : "actions on offer" },
+          asOfMs !== null && { value: `${fmtInstant(asOfMs)}Z`, label: "evaluated as of" },
+        ]}
+        note="Pick an action; the hull becomes its consequence map. Every effect is a counterfactual engine verdict — the world rebuilt with the action taken and re-evaluated. Decision support, not automation: this proposes, a planner decides on the space's options panel, and the ledger remembers."
+      />
 
       {actions.length === 0 ? (
         <p style={{ color: C.dim, fontSize: 12.5 }}>

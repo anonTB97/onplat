@@ -665,6 +665,8 @@ export interface ActivityRegister {
     /** Budgeted hours the register maps to no work item at all. */
     unmapped_budget_hours: number;
   };
+  /** Where the work landed, graded per path — served on every read. */
+  mapping: MappingReport;
   /** The schedule's logic — what the dates were computed from. */
   edges: ScheduleEdge[];
   activities: Activity[];

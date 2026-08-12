@@ -27,6 +27,7 @@ import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
 import DistributedPackages from "./DistributedPackages";
 import CascadeBoard from "./CascadeBoard";
+import SourcesBoard from "./SourcesBoard";
 import LedgerBoard from "./LedgerBoard";
 import LeverageBoard from "./LeverageBoard";
 import SequenceBoard from "./SequenceBoard";
@@ -44,6 +45,7 @@ const MODULES: ModuleDef[] = [
   { group: "", label: "Work Orders", id: "workOrders", icon: "workOrders", built: true },
   { group: "Decide", label: "Conflicts & Risk", id: "leverage", icon: "conflicts", built: true },
   { group: "Yard", label: "Portfolio", id: "portfolio", icon: "portfolio", built: true },
+  { group: "", label: "Data Sources", id: "sources", icon: "sources", built: true },
   { group: "Authorization", label: "Distributed Packages", id: "distPackages", icon: "distPackages", built: true },
   { group: "", label: "Decisions Ledger", id: "ledger", icon: "ledger", built: true },
   { group: "", label: "Deconfliction Cascade", id: "cascade", icon: "cascade", built: true },
@@ -449,6 +451,19 @@ export default function App() {
               asOf={asOf}
               spaces={rows}
               onOpenSpace={jump}
+            />
+          )}
+
+          {!error && selected && module.id === "sources" && (
+            <SourcesBoard
+              identity={DEMO_IDENTITY}
+              vesselId={selected}
+              hullLabel={hullLabel}
+              asOf={asOf}
+              onOpenModule={(id) => {
+                const target = MODULES.find((mod) => mod.id === id && mod.built);
+                if (target) setModule(target);
+              }}
             />
           )}
 

@@ -179,6 +179,12 @@ pub(crate) async fn list_activities(
     let source = state.store.schedule_source(&scope, vessel).await?;
     let schedule_edges = state.store.list_schedule_edges(&scope, vessel).await?;
     let reconciliation = reconcile(&state, &scope, vessel, &activities).await?;
+    // The location-mapping report rides on every read, not only on the import
+    // preview: the Sources panel and the register both need it, and counting
+    // the same marks twice — once per side of the wire — is how two screens
+    // learn to disagree.
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let mapping = mapping_report(&activities, &compartments);
     let rows: Vec<Value> = activities
         .into_iter()
         .map(|a| {
@@ -196,6 +202,7 @@ pub(crate) async fn list_activities(
         "as_of": at,
         "schedule_source": source,
         "reconciliation": reconciliation,
+        "mapping": mapping,
         "edges": schedule_edges,
         "activities": rows,
     })))

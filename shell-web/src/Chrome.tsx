@@ -158,6 +158,8 @@ export const ICONS: Record<string, React.ReactNode> = {
   cascade: ic("M12 3v5|M12 8l-6 5|M12 8l6 5|M6 13v5|M18 13v5"),
   // A chained record: the page, and the links down its spine.
   ledger: ic("M6 3h12v18H6z|M10 8h5|M10 12h5|M10 16h3|M8 6v0.01|M8 10v0.01|M8 14v0.01|M8 18v0.01"),
+  // A database cylinder: the documents the screens are built from.
+  sources: ic("M4 6.5c0-1.4 3.6-2.5 8-2.5s8 1.1 8 2.5S16.4 9 12 9 4 7.9 4 6.5z|M4 6.5v11c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-11|M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5"),
 };
 
 /* ------------------------------------------------------------------- topbar */

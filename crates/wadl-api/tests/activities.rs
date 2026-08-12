@@ -551,3 +551,68 @@ async fn small_routes_refuse_import_sized_bodies() {
         response.status()
     );
 }
+
+/// The schedule-alternatives endpoint proposes with the same engine the
+/// refusal came from, and the demo world pins both honest shapes at once: the
+/// coating cure (a dated hold) yields a Viable slide whose window the engine
+/// itself re-accepts, and the verification-gated bus yields no date at all —
+/// only the clearing authority, because promising a date nobody can promise
+/// is exactly what this endpoint exists to refuse.
+#[tokio::test]
+async fn alternatives_are_engine_verdicts_not_guesses() {
+    let (app, world) = app_at_anchor();
+    let (status, body) = get(
+        &app,
+        &world,
+        &format!(
+            "/api/vessels/{}/schedule-alternatives",
+            world.cvn73.as_uuid()
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = body["alternatives"].as_array().expect("alternatives array");
+    assert!(!rows.is_empty(), "the demo hull refuses some planned work");
+
+    let mut kinds: Vec<&str> = Vec::new();
+    for row in rows {
+        let alt = &row["alternative"];
+        let kind = alt["kind"].as_str().expect("typed alternative");
+        kinds.push(kind);
+        match kind {
+            "viable" => {
+                // The slide must actually move, stay inside the availability,
+                // and keep the activity's own duration.
+                let planned = &row["planned"];
+                let win = &alt["window"];
+                assert!(alt["delay_hours"].as_i64().unwrap() > 0, "{row}");
+                let dur_planned =
+                    planned["end"].as_i64().unwrap() - planned["start"].as_i64().unwrap();
+                let dur_new = win["end"].as_i64().unwrap() - win["start"].as_i64().unwrap();
+                assert_eq!(dur_planned, dur_new, "duration preserved");
+                assert!(win["end"].as_i64().unwrap() <= body["horizon"].as_i64().unwrap());
+            }
+            "verification_gated" => {
+                let authority = alt["refusal"]["clearing_authority"]
+                    .as_str()
+                    .unwrap_or_default();
+                assert!(!authority.is_empty(), "gated with nobody to clear: {row}");
+                assert!(
+                    alt["refusal"]["earliest_clear"].is_null(),
+                    "a dated hold must slide, not gate: {row}"
+                );
+            }
+            "no_window" => {}
+            other => panic!("unknown alternative kind {other}"),
+        }
+    }
+    // The demo carries both stories.
+    assert!(kinds.contains(&"viable"), "{kinds:?}");
+    assert!(kinds.contains(&"verification_gated"), "{kinds:?}");
+    // Ranked by hours at stake, worst first.
+    let hours: Vec<i64> = rows
+        .iter()
+        .map(|r| r["remaining_hours"].as_i64().unwrap())
+        .collect();
+    assert!(hours.windows(2).all(|w| w[0] >= w[1]), "{hours:?}");
+}

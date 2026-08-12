@@ -183,3 +183,97 @@ pub fn executability(
     }
     Executability::Executable
 }
+
+/// The earliest window of the same duration in which the space would permit
+/// the work — the schedule alternative this tool may honestly propose.
+///
+/// A CVN availability's business rules are the rule set itself (hot work
+/// against coating cures, energized-bus adjacency, tank certification…), so
+/// the only honest way to propose a re-sequence is to ask the same engine the
+/// refusal came from: start at the planned window; when it refuses, jump the
+/// cursor to the governing hold's own `earliest_clear` and ask again, until a
+/// window passes or the availability runs out. Three outcomes, none of them a
+/// guess:
+///
+/// * [`Alternative::Viable`] — a date-certain window the rules permit.
+/// * [`Alternative::VerificationGated`] — the governing hold clears only on a
+///   named authority's verification, so no date can be promised; the honest
+///   proposal is the action, not a date.
+/// * [`Alternative::NoWindow`] — nothing of this duration fits before the
+///   horizon.
+///
+/// This PROPOSES; re-sequencing happens in P6 and deciding happens on the
+/// space's options panel. Nothing here mutates anything.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Alternative {
+    /// A window of the same duration the rules permit, starting at the
+    /// earliest instant the governing holds allow.
+    Viable {
+        /// The proposed window.
+        window: Window,
+        /// How far the work slides, in whole hours.
+        delay_hours: i64,
+    },
+    /// The governing hold names no clearing instant — only an authority.
+    VerificationGated {
+        /// The refusal that gates the slide, with its clearing authority.
+        refusal: Refusal,
+    },
+    /// No window of this duration fits before the horizon.
+    NoWindow {
+        /// The horizon that ran out — the availability's end.
+        horizon: Timestamp,
+    },
+}
+
+/// See [`Alternative`]. `horizon` is the availability's end: proposing work
+/// after the ship has sailed would not be an alternative.
+#[must_use]
+pub fn earliest_viable_window(
+    hull: &Hull<'_>,
+    compartment: &CompartmentNo,
+    planned: Window,
+    horizon: Timestamp,
+) -> Alternative {
+    let duration = planned.end.epoch_millis() - planned.start.epoch_millis();
+    let mut cursor = planned.start;
+    // The walk is bounded by the number of distinct holds on the hull (each
+    // step consumes at least one earliest_clear); the cap only guards a
+    // malformed world from hanging the request.
+    for _ in 0..32 {
+        let candidate = Window::new(
+            cursor,
+            Timestamp::from_epoch_millis(cursor.epoch_millis() + duration),
+        );
+        if candidate.end > horizon {
+            return Alternative::NoWindow { horizon };
+        }
+        match executability(hull, Some(compartment), Some(candidate)) {
+            Executability::Executable => {
+                return Alternative::Viable {
+                    window: candidate,
+                    delay_hours: (cursor.epoch_millis() - planned.start.epoch_millis())
+                        / 3_600_000,
+                }
+            }
+            Executability::NotExecutable(refusal) => match refusal.earliest_clear {
+                // Advance to the hold's own clearing instant — and always by
+                // at least a minute, so a stale earliest_clear cannot pin the
+                // cursor in place.
+                Some(clear) => {
+                    cursor = Timestamp::from_epoch_millis(
+                        clear
+                            .epoch_millis()
+                            .max(cursor.epoch_millis() + 60_000),
+                    );
+                }
+                None => return Alternative::VerificationGated { refusal },
+            },
+            // Unreachable with a located, dated activity; answered honestly
+            // rather than unwrapped.
+            Executability::Unassessable { .. } => return Alternative::NoWindow { horizon },
+        }
+    }
+    Alternative::NoWindow { horizon }
+}

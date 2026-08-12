@@ -223,6 +223,97 @@ pub(crate) async fn list_activities(
     })))
 }
 
+/// Viable alternatives to the schedule, for every activity the engine
+/// refuses as planned.
+///
+/// Each proposal is the same engine's answer, never a heuristic: the activity
+/// slides to the earliest window of its own duration that the rules in force
+/// permit (`wadl_issues::earliest_viable_window`), or the response says
+/// honestly that the governing hold clears only on a named authority's
+/// verification (no date can be promised — the proposal is the action on the
+/// space's options panel), or that nothing fits before the availability ends.
+///
+/// A slide is priced with its knock-on: the successors, from the schedule's
+/// own dependency edges, whose planned start now falls before the proposed
+/// finish — read at finish-to-start grain, which the response says out loud.
+/// This endpoint PROPOSES. Re-sequencing happens in P6; deciding happens on
+/// the options panel; nothing here writes anything.
+pub(crate) async fn schedule_alternatives(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let hull_row = state.store.get_vessel(&scope, vessel).await?;
+    let at = as_of.resolve(&state, &hull_row)?;
+    let horizon = hull_row
+        .availability
+        .map_or_else(|| Timestamp::from_epoch_millis(i64::MAX / 2), |w| w.end);
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    let hull = wadl_issues::Hull {
+        graph: &graph,
+        rules: &rules,
+        hazards: &hazards,
+    };
+    let edges = state.store.list_schedule_edges(&scope, vessel).await?;
+    let start_of: std::collections::BTreeMap<&str, i64> = activities
+        .iter()
+        .filter_map(|a| {
+            a.planned
+                .map(|w| (a.code.as_str(), w.start.epoch_millis()))
+        })
+        .collect();
+
+    let mut rows: Vec<Value> = Vec::new();
+    for a in &activities {
+        let (Some(compartment), Some(planned)) = (a.compartment_no.as_ref(), a.planned) else {
+            continue;
+        };
+        let exec = wadl_issues::executability(&hull, Some(compartment), Some(planned));
+        let wadl_issues::Executability::NotExecutable(refusal) = exec else {
+            continue;
+        };
+        let alternative =
+            wadl_issues::earliest_viable_window(&hull, compartment, planned, horizon);
+        // The slide's knock-on: successors whose planned start would now sit
+        // before the proposed finish. Finish-to-start reading; lags ignored
+        // and said so in the response's `knock_on_basis`.
+        let pushed: Vec<&str> = match &alternative {
+            wadl_issues::Alternative::Viable { window, .. } => edges
+                .iter()
+                .filter(|e| e.pred_code == a.code)
+                .filter_map(|e| {
+                    let succ_start = start_of.get(e.succ_code.as_str())?;
+                    (*succ_start < window.end.epoch_millis()).then_some(e.succ_code.as_str())
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        rows.push(json!({
+            "activity": a.code,
+            "name": a.name,
+            "compartment": compartment,
+            "trade": a.trade,
+            "planned": planned,
+            "remaining_hours": a.remaining_hours(),
+            "refusal": refusal,
+            "alternative": alternative,
+            "pushes": pushed,
+        }));
+    }
+    rows.sort_by_key(|r| -r["remaining_hours"].as_i64().unwrap_or(0));
+    Ok(Json(json!({
+        "as_of": at,
+        "horizon": horizon,
+        "knock_on_basis": "finish-to-start, lags not applied",
+        "alternatives": rows,
+    })))
+}
+
 /// Register hours per work item versus the work items' own budgets.
 ///
 /// Only mismatches are reported — a reconciled item is silence, not a row —

@@ -1,0 +1,307 @@
+// The activity inspector: click any work item, get everything the platform
+// knows about it, in place — no jumping between screens to answer "what am I
+// looking at, why is it red, and what would we do about it".
+//
+// Four blocks, worst news first: the facts (where, when, whose, how many
+// hours); the executability verdict with its evidence; the SUGGESTED
+// ALTERNATIVE — the engine's own re-sequence proposal from the
+// schedule-alternatives endpoint, never a heuristic; and the space's
+// mitigation options from the same assessment the Deck Explorer shows, so
+// this panel and that one can never disagree. Every proposal is labelled as
+// a proposal: re-sequencing happens in P6, deciding happens on the space's
+// options panel, and the ledger remembers.
+
+import { useEffect, useState } from "react";
+import {
+  mitigations,
+  type Activity,
+  type AlternativeRow,
+  type AsOf,
+  type Assessment,
+  type Identity,
+} from "./api";
+import { actionTitle } from "./Mitigations";
+import { C, mh } from "./theme";
+
+const fmtDay = (ms: number): string =>
+  new Date(ms).toISOString().slice(5, 10).replace("-", "/");
+const fmtInstant = (ms: number): string =>
+  new Date(ms).toISOString().slice(5, 16).replace("-", "/").replace("T", " ");
+
+const label: React.CSSProperties = {
+  fontSize: 9, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase",
+  color: C.subtle,
+};
+const block: React.CSSProperties = {
+  border: `1px solid ${C.line}`, borderRadius: 7, padding: "8px 10px",
+  display: "flex", flexDirection: "column", gap: 4,
+};
+
+export function ActivityInspector({
+  a,
+  alt,
+  identity,
+  vesselId,
+  asOf,
+  onClose,
+  onOpenSpace,
+}: {
+  a: Activity;
+  /** The engine's re-sequence proposal for this activity, when it is refused. */
+  alt: AlternativeRow | undefined;
+  identity: Identity;
+  vesselId: string;
+  asOf: AsOf;
+  onClose: () => void;
+  onOpenSpace: (compartment: string) => void;
+}) {
+  const [assessment, setAssessment] = useState<Assessment | null>(null);
+
+  // The space's options, from the same endpoint the Deck Explorer reads.
+  useEffect(() => {
+    setAssessment(null);
+    const no = a.compartment_no;
+    if (!no) return undefined;
+    let stale = false;
+    mitigations(identity, vesselId, no, asOf)
+      .then((r) => {
+        if (!stale) setAssessment(r);
+      })
+      .catch(() => {
+        /* the panel simply shows no options block */
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, a.compartment_no, asOf]);
+
+  const e = a.executability;
+  const refused = e.verdict === "not_executable";
+  const dur = a.planned
+    ? Math.round((a.planned.end - a.planned.start) / 86_400_000)
+    : null;
+
+  return (
+    <aside
+      style={{
+        position: "fixed", right: 12, top: 168, bottom: 34, width: 390, zIndex: 40,
+        background: C.panel, border: `1px solid ${refused ? "rgba(239,68,68,0.5)" : C.line}`,
+        borderRadius: 10, boxShadow: "0 10px 40px rgba(0,0,0,0.55)",
+        display: "flex", flexDirection: "column",
+      }}
+    >
+      <header style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "10px 12px 8px", borderBottom: `1px solid ${C.line}` }}>
+        <b style={{ fontFamily: "monospace", color: C.accent, fontSize: 13 }}>{a.code}</b>
+        {a.is_milestone ? (
+          <span style={{ fontSize: 9.5, fontWeight: 700, color: C.accent }}>KEY EVENT</span>
+        ) : (
+          <span style={{ fontSize: 9.5, fontWeight: 700, color: a.status === "complete" ? C.ok : a.status === "in_progress" ? "#3D6BFF" : "#94a3b8" }}>
+            {a.status.replace("_", " ").toUpperCase()}
+          </span>
+        )}
+        {a.in_window && !a.is_milestone && (
+          <span style={{ fontSize: 9, color: C.ok }} title="Planned for the instant on the time control.">● in window</span>
+        )}
+        <button
+          onClick={onClose}
+          title="Close (the row stays where it was)"
+          style={{
+            marginLeft: "auto", font: "inherit", fontSize: 13, cursor: "pointer", lineHeight: 1,
+            padding: "1px 7px", borderRadius: 5, color: C.dim, background: "transparent",
+            border: `1px solid ${C.line}`,
+          }}
+        >
+          ×
+        </button>
+      </header>
+
+      <div style={{ overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 9 }}>
+        <div style={{ fontSize: 13, lineHeight: 1.35 }}>{a.name}</div>
+
+        {/* the facts */}
+        <div style={{ ...block }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5px 12px", fontSize: 11.5 }}>
+            <div>
+              <div style={label}>Space</div>
+              {a.compartment_no ? (
+                <button
+                  onClick={() => onOpenSpace(a.compartment_no ?? "")}
+                  title={
+                    a.compartment_reliability === "high"
+                      ? "Authored by the schedule. Open on the deck plan."
+                      : "Read from the task's own name — a graded guess, marked ≈. Open on the deck plan."
+                  }
+                  style={{
+                    font: "inherit", fontSize: 11, fontFamily: "monospace", cursor: "pointer",
+                    padding: "1px 6px", borderRadius: 4,
+                    color: a.compartment_reliability === "high" ? C.bright : "#fbd38d",
+                    background: "rgba(148,163,184,0.08)",
+                    border: a.compartment_reliability === "high" ? `1px solid ${C.line}` : "1px dashed rgba(245,158,11,0.6)",
+                  }}
+                >
+                  {a.compartment_reliability !== "high" && "≈ "}
+                  {a.compartment_no}
+                </button>
+              ) : (
+                <span style={{ color: C.warn }}>
+                  not located{a.wbs_area ? ` · ${a.wbs_area} per WBS` : ""}
+                </span>
+              )}
+            </div>
+            <div>
+              <div style={label}>Trade</div>
+              {a.trade}
+            </div>
+            <div>
+              <div style={label}>Planned</div>
+              <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>
+                {a.planned ? `${fmtDay(a.planned.start)} → ${fmtDay(a.planned.end)}` : "no dates"}
+              </span>
+              {dur !== null && <span style={{ color: C.dim }}> · {dur}d</span>}
+            </div>
+            <div>
+              <div style={label}>Work item</div>
+              {a.work_order_code ?? (
+                <span style={{ color: a.is_milestone ? C.dim : C.warn }}>unmapped</span>
+              )}
+            </div>
+            <div>
+              <div style={label}>Hours</div>
+              <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                {a.is_milestone ? "—" : `${a.earned_hours.toLocaleString()} / ${a.budget_hours.toLocaleString()} MH · ${mh(a.remaining_hours)} left`}
+              </span>
+            </div>
+            <div>
+              <div style={label}>Source</div>
+              <span style={{ fontFamily: "monospace", fontSize: 10, color: C.dim, wordBreak: "break-all" }}>{a.source_ref}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* the verdict, with its evidence */}
+        {a.is_milestone ? null : refused && e.verdict === "not_executable" ? (
+          <div style={{ ...block, border: "1px solid rgba(239,68,68,0.45)", background: "rgba(239,68,68,0.06)" }}>
+            <div style={{ ...label, color: C.dangerSoft }}>Not executable as planned</div>
+            <div style={{ fontSize: 11.5 }}>
+              Refused from <b style={{ fontFamily: "monospace" }}>{fmtInstant(e.at)}</b> inside the
+              planned window — rule <b style={{ fontFamily: "monospace", color: C.bright }}>{e.rule_code}</b>,{" "}
+              {e.hazard} @{" "}
+              <button
+                onClick={() => onOpenSpace(e.origin)}
+                title="Open the hold's origin space"
+                style={{
+                  font: "inherit", fontSize: 10.5, fontFamily: "monospace", cursor: "pointer",
+                  padding: "0 5px", borderRadius: 4, color: C.bright,
+                  background: "rgba(148,163,184,0.08)", border: `1px solid ${C.line}`,
+                }}
+              >
+                {e.origin}
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: e.earliest_clear ? C.warn : "#c4b5fd" }}>
+              {e.earliest_clear
+                ? `clears ${fmtInstant(e.earliest_clear)} on its own`
+                : `clears on verification by ${e.clearing_authority} — never on a clock`}
+            </div>
+          </div>
+        ) : e.verdict === "unassessable" ? (
+          <div style={{ ...block }}>
+            <div style={{ ...label }}>Executability</div>
+            <div style={{ fontSize: 11.5, color: C.dim }}>
+              {e.reason === "unlocated"
+                ? "Unknown — no compartment is mapped, so there is no space to evaluate. Unknown is never presented as fine."
+                : "Unknown — no planned dates, so there is no “as planned” to test against."}
+            </div>
+          </div>
+        ) : (
+          <div style={{ ...block }}>
+            <div style={{ ...label, color: C.ok }}>Executable as planned</div>
+            <div style={{ fontSize: 11.5, color: C.dim }}>
+              The space permits this work at every instant of the planned window, against the
+              hazards on file.
+            </div>
+          </div>
+        )}
+
+        {/* the engine's proposal */}
+        {refused && (
+          <div style={{ ...block, border: "1px solid rgba(34,197,94,0.35)" }}>
+            <div style={{ ...label, color: C.ok }}>Suggested alternative</div>
+            {!alt ? (
+              <div style={{ fontSize: 11.5, color: C.dim }}>Computing…</div>
+            ) : alt.alternative.kind === "viable" ? (
+              <>
+                <div style={{ fontSize: 11.5 }}>
+                  Slide <b style={{ color: C.ok }}>+{Math.round(alt.alternative.delay_hours / 24)}d {alt.alternative.delay_hours % 24}h</b>{" "}
+                  to{" "}
+                  <b style={{ fontFamily: "monospace" }}>
+                    {fmtDay(alt.alternative.window.start)} → {fmtDay(alt.alternative.window.end)}
+                  </b>{" "}
+                  — the first window of the same duration the rules in force permit. The engine
+                  re-accepted this window; it is not an estimate.
+                </div>
+                {alt.pushes.length > 0 && (
+                  <div style={{ fontSize: 11, color: C.warn }}>
+                    Knock-on: {alt.pushes.length} successor{alt.pushes.length === 1 ? "" : "s"} would
+                    start before the proposed finish ({alt.pushes.join(", ")}) — re-sequence
+                    together. Read finish-to-start, lags not applied.
+                  </div>
+                )}
+              </>
+            ) : alt.alternative.kind === "verification_gated" ? (
+              <div style={{ fontSize: 11.5 }}>
+                <b style={{ color: "#c4b5fd" }}>No date-certain window can be promised:</b>{" "}
+                {alt.alternative.refusal.rule_code} clears only on verification by{" "}
+                <b>{alt.alternative.refusal.clearing_authority}</b>. The honest proposal is the
+                action, not a date — see the options below.
+              </div>
+            ) : (
+              <div style={{ fontSize: 11.5, color: C.warn }}>
+                Nothing of this duration fits before the availability ends — this one needs a
+                planner, not a slide.
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* the space's options — same assessment the Deck Explorer shows */}
+        {a.compartment_no && assessment && assessment.options.length > 0 && (
+          <div style={{ ...block }}>
+            <div style={label}>Options in {a.compartment_no}</div>
+            {assessment.options.slice(0, 3).map((o, i) => (
+              <div key={i} style={{ fontSize: 11.5, display: "flex", gap: 6, alignItems: "baseline" }}>
+                <span style={{ color: C.faint }}>{i + 1}.</span>
+                <span>
+                  {actionTitle(o.action)}{" "}
+                  <span style={{ color: C.dim, fontSize: 10.5 }}>
+                    — frees {o.effect.frees.length}
+                    {o.effect.closes.length > 0 && (
+                      <b style={{ color: C.dangerSoft }}> · shuts {o.effect.closes.length}</b>
+                    )}
+                    {" · "}
+                    {o.confidence.replace(/_/g, " ")}
+                  </span>
+                </span>
+              </div>
+            ))}
+            <button
+              onClick={() => onOpenSpace(a.compartment_no ?? "")}
+              style={{
+                alignSelf: "flex-start", marginTop: 2, font: "inherit", fontSize: 11, cursor: "pointer",
+                padding: "2px 9px", borderRadius: 5, color: C.accent, background: "transparent",
+                border: `1px solid ${C.accent}55`,
+              }}
+            >
+              Open the space to decide →
+            </button>
+          </div>
+        )}
+
+        <div style={{ fontSize: 10, color: C.faint, lineHeight: 1.5 }}>
+          Proposals, not changes: re-sequencing happens in P6, deciding happens on the space&apos;s
+          options panel, and the ledger remembers what was decided.
+        </div>
+      </div>
+    </aside>
+  );
+}

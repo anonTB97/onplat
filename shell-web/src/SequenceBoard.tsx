@@ -21,14 +21,18 @@ import {
   previewSchedule,
   revertSchedule,
   listActivities,
+  scheduleAlternatives,
   type Activity,
+  type AlternativeRow,
   type AsOf,
   type DeckStateRow,
   type Identity,
   type ImportPreview,
   type ReconciliationMismatch,
   type ScheduleEdge,
+  type Window,
 } from "./api";
+import { ActivityInspector } from "./ActivityInspector";
 import { Loading } from "./Loading";
 import { LoadDigest } from "./LoadDigest";
 import { ModuleHeader } from "./ModuleHeader";
@@ -130,6 +134,9 @@ export default function SequenceBoard({
   const [notExecOnly, setNotExecOnly] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 } | null>(null);
   const [openEvidence, setOpenEvidence] = useState<string | null>(null);
+  const [alternatives, setAlternatives] = useState<AlternativeRow[]>([]);
+  /** The row under inspection — any click on an activity opens it. */
+  const [inspect, setInspect] = useState<Activity | null>(null);
 
   useEffect(() => {
     setError(null);
@@ -144,11 +151,34 @@ export default function SequenceBoard({
         setSource(r.schedule_source);
         setMismatches(r.reconciliation.mismatches);
         setEdges(r.edges);
+        // The inspector follows the register: re-point it at the fresh row so
+        // it never shows a verdict the board no longer serves.
+        setInspect((prev) =>
+          prev ? (r.activities.find((x) => x.activity_id === prev.activity_id) ?? null) : null,
+        );
       })
       .catch((e: unknown) => {
         if (stale) return;
         setActivities(null);
         setError(String(e));
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, asOf, reloadNonce]);
+
+  // The engine's re-sequence proposals for everything refused — same keying
+  // as the register, cleared up front so an old hull's proposals never draw
+  // under a new hull's bars.
+  useEffect(() => {
+    setAlternatives([]);
+    let stale = false;
+    scheduleAlternatives(identity, vesselId, asOf)
+      .then((r) => {
+        if (!stale) setAlternatives(r.alternatives);
+      })
+      .catch(() => {
+        /* the board simply shows no proposals */
       });
     return () => {
       stale = true;
@@ -168,6 +198,7 @@ export default function SequenceBoard({
     setStatus("all");
     setSort(null);
     setOpenEvidence(null);
+    setInspect(null);
   }, [vesselId]);
 
   // A new register (import, revert) can drop the selected trade or space;
@@ -261,6 +292,13 @@ export default function SequenceBoard({
     (a) => a.compartment_no !== null && a.compartment_reliability !== "high" && !a.is_milestone,
   ).length;
   const refused = activities.filter((a) => a.executability.verdict === "not_executable").length;
+  const altByCode = new Map(alternatives.map((r) => [r.activity, r]));
+  const viableWindows = new Map<string, Window>(
+    alternatives.flatMap((r) =>
+      r.alternative.kind === "viable" ? [[r.activity, r.alternative.window] as [string, Window]] : [],
+    ),
+  );
+  const gated = alternatives.filter((r) => r.alternative.kind === "verification_gated").length;
 
   const th: React.CSSProperties = { ...thStyle, position: "sticky", top: 0, background: C.panel };
   const td: React.CSSProperties = { ...tdStyle, padding: "6px 10px", fontSize: 12 };
@@ -276,7 +314,15 @@ export default function SequenceBoard({
           { value: inWindow, label: "in window now", title: "Planned for the instant on the time control. The instant marks rows, never filters them." },
           refused > 0 && {
             value: refused, label: "not executable", tone: C.danger,
-            title: "The activity's space, evaluated over its planned window, refuses work during it — a fact neither the schedule nor the engine holds alone.",
+            title: "The activity's space, evaluated over its planned window, refuses work during it — a fact neither the schedule nor the engine holds alone. Click any row or bar for the evidence and the proposal.",
+          },
+          viableWindows.size > 0 && {
+            value: viableWindows.size, label: "viable re-sequences", tone: C.ok,
+            title: "Refused work the engine found a later window for — the first window of the same duration the rules in force permit. Drawn as green ghosts on the lanes; proposals only, P6 decides.",
+          },
+          gated > 0 && {
+            value: gated, label: "need verification", tone: "#c4b5fd",
+            title: "Refused work whose governing hold clears only on a named authority's verification — no date can honestly be promised. The proposal is the action on the space's options panel.",
           },
           unlocated > 0 && {
             value: unlocated, label: "unlocated", tone: C.warn,
@@ -529,6 +575,8 @@ export default function SequenceBoard({
           edges={edges}
           asOf={asOfMs}
           grain={boardView === "spaceLanes" ? "compartment" : "zone"}
+          altWindows={viableWindows}
+          onInspect={setInspect}
           onOpenSpace={onOpenSpace}
         />
       )}
@@ -637,11 +685,19 @@ export default function SequenceBoard({
             {rows.map((a) => (
               <Fragment key={a.activity_id}>
               <tr
+                onClick={() => setInspect(a)}
+                title="Open this activity's inspector — details, evidence, and the suggested alternative"
                 style={{
                   // Marked, not filtered: out-of-window rows dim, milestones read
                   // as events rather than work.
                   opacity: a.in_window || a.is_milestone ? 1 : 0.55,
-                  background: a.is_milestone ? "rgba(61,107,255,0.05)" : undefined,
+                  background:
+                    inspect?.activity_id === a.activity_id
+                      ? "rgba(61,107,255,0.10)"
+                      : a.is_milestone
+                        ? "rgba(61,107,255,0.05)"
+                        : undefined,
+                  cursor: "pointer",
                 }}
               >
                 <td style={{ ...td, fontFamily: "monospace", color: C.accent, whiteSpace: "nowrap" }}>
@@ -669,7 +725,10 @@ export default function SequenceBoard({
                     // name wears "≈" and an amber dashed edge — a graded
                     // guess, never presented as authored.
                     <button
-                      onClick={() => onOpenSpace(a.compartment_no ?? "")}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        onOpenSpace(a.compartment_no ?? "");
+                      }}
                       title={
                         a.compartment_reliability === "high"
                           ? "Open on the deck plan"
@@ -717,7 +776,8 @@ export default function SequenceBoard({
                     <button
                       // The activity's own space when located, else the hold's
                       // origin — either way the click lands with options open.
-                      onClick={() => {
+                      onClick={(ev) => {
+                        ev.stopPropagation();
                         const e = a.executability;
                         onOpenSpace(
                           a.compartment_no ?? (e.verdict === "not_executable" ? e.origin : ""),
@@ -734,9 +794,10 @@ export default function SequenceBoard({
                       NOT EXECUTABLE
                     </button>
                     <button
-                      onClick={() =>
-                        setOpenEvidence(openEvidence === a.activity_id ? null : a.activity_id)
-                      }
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        setOpenEvidence(openEvidence === a.activity_id ? null : a.activity_id);
+                      }}
                       title="The evidence, in the open — the same facts the tooltip carries"
                       style={{
                         font: "inherit", fontSize: 9.5, cursor: "pointer", marginLeft: 4,
@@ -798,7 +859,8 @@ export default function SequenceBoard({
                       <span style={{ color: C.dim }}>
                         {a.executability.hazard} @{" "}
                         <button
-                          onClick={() => {
+                          onClick={(ev) => {
+                            ev.stopPropagation();
                             const e = a.executability;
                             if (e.verdict === "not_executable") onOpenSpace(e.origin);
                           }}
@@ -828,6 +890,18 @@ export default function SequenceBoard({
         </table>
       </div>
       </>)}
+
+      {inspect && (
+        <ActivityInspector
+          a={inspect}
+          alt={altByCode.get(inspect.code)}
+          identity={identity}
+          vesselId={vesselId}
+          asOf={asOf}
+          onClose={() => setInspect(null)}
+          onOpenSpace={onOpenSpace}
+        />
+      )}
     </div>
   );
 }

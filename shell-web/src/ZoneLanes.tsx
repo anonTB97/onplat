@@ -34,7 +34,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Activity, DeckStateRow, ScheduleEdge } from "./api";
 import { wheelFactor, windowPan, windowZoomAt, type TimeWindow } from "./camera";
-import { ACTIVITY_STATUS, C, mh, zoneColour } from "./theme";
+import { ACTIVITY_STATUS, C, mh, tradeColour, zoneColour } from "./theme";
+import type { Window } from "./api";
 
 const W = 1240;
 const GUTTER_W = 225;
@@ -89,6 +90,8 @@ export function ZoneLanes({
   edges,
   asOf,
   grain = "zone",
+  altWindows,
+  onInspect,
   onOpenSpace,
 }: {
   activities: Activity[];
@@ -99,6 +102,11 @@ export function ZoneLanes({
   asOf: number | null;
   /** The lane grain: a lane per zone, or a lane per compartment. */
   grain?: "zone" | "compartment";
+  /** Engine-accepted re-sequence windows, by activity code — drawn as ghost
+   *  bars so a proposal is visible where the plan is. */
+  altWindows?: Map<string, Window>;
+  /** When provided, clicking a bar opens the inspector instead of the deck. */
+  onInspect?: (a: Activity) => void;
   onOpenSpace: (compartment: string) => void;
 }) {
   // The time camera. `null` = the full availability; a window = zoomed in.
@@ -107,6 +115,10 @@ export function ZoneLanes({
   // spine defaults off past a threshold — but only as a DEFAULT: the reader's
   // explicit choice always wins, and inversions are never hidden.
   const [logicChoice, setLogicChoice] = useState<LogicMode | null>(null);
+  /** What the bar fill encodes: the reader's choice of colour language. */
+  const [colourBy, setColourBy] = useState<"status" | "trade" | "risk" | "grade">("status");
+  const [showKey, setShowKey] = useState(false);
+  const [showAlts, setShowAlts] = useState(true);
   const logic: LogicMode = logicChoice ?? (edges.length > 800 ? "inversions" : "all");
   const svgRef = useRef<SVGSVGElement | null>(null);
   // The wheel handler is a native non-passive listener (React's is passive, and
@@ -238,6 +250,30 @@ export function ZoneLanes({
           (e) => (logic === "all" || e.lag_hours < 0) && geom.has(e.pred_code) && geom.has(e.succ_code),
         );
   const inversions = edges.filter((e) => e.lag_hours < 0).length;
+
+  // The colour language the reader chose. Status is the default; trade paints
+  // crews; risk paints the verdicts; grade paints how sure the location is.
+  const fillOf = (a: Activity): string => {
+    switch (colourBy) {
+      case "status":
+        return STATUS_FILL[a.status];
+      case "trade":
+        return a.trade === "—" || a.trade === "" ? "rgba(148,163,184,0.35)" : tradeColour(a.trade);
+      case "risk":
+        return a.executability.verdict === "not_executable"
+          ? "rgba(220,38,38,0.75)"
+          : a.executability.verdict === "unassessable"
+            ? "rgba(148,163,184,0.35)"
+            : "rgba(34,197,94,0.45)";
+      case "grade":
+        return a.compartment_no === null
+          ? "rgba(148,163,184,0.28)"
+          : a.compartment_reliability === "high"
+            ? "rgba(93,124,183,0.7)"
+            : "rgba(245,158,11,0.6)";
+    }
+  };
+  const tradesDrawn = [...new Set(dated.map((a) => a.trade).filter((t) => t !== "—" && t !== ""))].sort();
 
   // Gridlines follow the camera: weekly across an availability, daily once the
   // window is tight enough for days to be readable columns.
@@ -403,16 +439,17 @@ export function ZoneLanes({
                     key={b.a.activity_id}
                     onClick={() => {
                       if (drag.current?.moved) return;
-                      if (located) onOpenSpace(located);
+                      if (onInspect) onInspect(b.a);
+                      else if (located) onOpenSpace(located);
                     }}
-                    style={{ cursor: located ? "pointer" : "default" }}
+                    style={{ cursor: onInspect ?? located ? "pointer" : "default" }}
                   >
                     <title>
                       {`${b.a.code} — ${b.a.name}\n${b.a.trade} · ${located ? `${located}${b.a.compartment_reliability !== "high" ? " (≈ read from the task name, not authored)" : ""}` : hinted ? `not located · in this lane per its WBS bucket (${b.a.wbs_area}) — zone grain, nothing finer` : "not located"} · ${fmtDay(b.start)} → ${fmtDay(b.end)}\n${mh(b.a.remaining_hours)} remaining${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
                     </title>
                     <rect
                       x={bx} y={by} width={bw} height={ROW_H - 4} rx={2}
-                      fill={STATUS_FILL[b.a.status]}
+                      fill={fillOf(b.a)}
                       opacity={0.92}
                       stroke={doomed ? C.danger : hinted ? C.warn : "none"}
                       strokeWidth={doomed ? 1.4 : hinted ? 1 : 0}
@@ -428,6 +465,34 @@ export function ZoneLanes({
               })}
             </g>
           ))}
+
+          {/* Engine-accepted re-sequence proposals, as ghosts: the same bar,
+              dashed, where the rules WOULD permit it — a proposal drawn where
+              the plan is, never a change. */}
+          {showAlts && altWindows && [...altWindows.entries()].map(([code, w]) => {
+            const g = geom.get(code);
+            if (!g) return null;
+            if (w.end < win.v0 || w.start > win.v1) return null;
+            const gx = x(w.start);
+            const gw = Math.max(3, x(w.end) - gx);
+            const gy = g.y - (ROW_H - 4) / 2;
+            const ox = x(g.t1);
+            return (
+              <g key={`alt-${code}`} pointerEvents="none">
+                <title>{`${code} — proposed viable window (engine-accepted): ${fmtDay(w.start)} → ${fmtDay(w.end)}`}</title>
+                {ox < gx && (
+                  <line x1={ox} y1={g.y} x2={gx} y2={g.y} stroke={C.ok} strokeWidth={0.8} strokeDasharray="2 3" opacity={0.6} />
+                )}
+                <rect
+                  x={gx} y={gy} width={gw} height={ROW_H - 4} rx={2}
+                  fill="rgba(34,197,94,0.10)"
+                  stroke={C.ok}
+                  strokeWidth={1}
+                  strokeDasharray="4 3"
+                />
+              </g>
+            );
+          })}
 
           {/* The schedule's logic, drawn over the bars it connects: each arrow
               runs predecessor-finish → successor-start. Forward arrows stay
@@ -483,10 +548,90 @@ export function ZoneLanes({
         </g>
       </svg>
 
+      {showKey && (
+        <div style={{ borderTop: `1px solid ${C.line}`, padding: "9px 12px", display: "grid", gap: "5px 22px", gridTemplateColumns: "repeat(auto-fit,minmax(330px,1fr))", fontSize: 11, color: C.text, background: "#101118" }}>
+          {[
+            [<svg key="k1" width={26} height={10}><rect x={1} y={1} width={24} height={8} rx={2} fill={STATUS_FILL.in_progress} /></svg>,
+             "A bar is one activity, in its planned window. Fill = the colour language you pick below (status, trade, risk or location grade)."],
+            [<svg key="k2" width={26} height={10}><rect x={1} y={1} width={24} height={8} rx={2} fill={STATUS_FILL.not_started} stroke={C.danger} strokeWidth={1.5} /></svg>,
+             "Red outline: NOT EXECUTABLE as planned — its space refuses work somewhere inside the window. Click the bar for evidence, the suggested alternative and the space's options."],
+            [<svg key="k3" width={26} height={10}><rect x={1} y={1} width={24} height={8} rx={2} fill={STATUS_FILL.not_started} stroke={C.warn} strokeWidth={1} strokeDasharray="3 2" /></svg>,
+             "Amber dashed: unlocated work placed by its WBS zone hint — zone grain, nothing finer."],
+            [<svg key="k4" width={26} height={10}><rect x={1} y={1} width={24} height={8} rx={2} fill="rgba(34,197,94,0.1)" stroke={C.ok} strokeWidth={1} strokeDasharray="4 3" /></svg>,
+             "Green dashed ghost: the engine's re-sequence proposal — the first window the rules would permit. A proposal, never a change."],
+            [<svg key="k5" width={26} height={10}><path d="M 1 8 C 8 8 18 2 25 2" fill="none" stroke="#5b6272" strokeWidth={1} /></svg>,
+             "Grey arrow: finish-to-start logic from the schedule's own edges — why the dates are where they are."],
+            [<svg key="k6" width={26} height={10}><path d="M 25 8 C 18 8 8 2 1 2" fill="none" stroke={C.danger} strokeWidth={1.5} /></svg>,
+             "Red arrow: a NEGATIVE lag — the successor starts before its predecessor finishes. Legitimate as an overlap; exactly where cure-window inversions hide."],
+            [<svg key="k7" width={26} height={10}><path d="M 13 0 l 5 5 l -5 5 l -5 -5 z" fill={C.accent} /></svg>,
+             "Diamond: a key event (milestone) — the dates every zone is sequenced around."],
+            [<svg key="k8" width={26} height={10}><line x1={13} y1={0} x2={13} y2={10} stroke="#f87171" strokeWidth={1.2} strokeDasharray="4 2" /></svg>,
+             "Red dashed vertical: the instant on the time control. Left of it is history, right is plan. It marks — it never filters."],
+          ].map(([glyph, text], i) => (
+            <span key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <span style={{ flexShrink: 0, paddingTop: 2 }}>{glyph}</span>
+              <span style={{ color: C.dim }}>{text}</span>
+            </span>
+          ))}
+          <span style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <span style={{ flexShrink: 0, fontSize: 10, color: C.subtle, paddingTop: 1 }}>gutter</span>
+            <span style={{ color: C.dim }}>
+              Each lane&apos;s left numbers: the coming 7 days&apos; activity count and man-hours, then refusals and spaces held right now — a zone manager&apos;s morning, in two lines.
+            </span>
+          </span>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", padding: "7px 11px", borderTop: `1px solid ${C.line}`, fontSize: 10.5, color: C.dim }}>
-        <span><span style={{ color: STATUS_FILL.in_progress }}>■</span> in progress</span>
-        <span><span style={{ color: STATUS_FILL.not_started }}>■</span> not started</span>
-        <span><span style={{ color: STATUS_FILL.complete }}>■</span> complete</span>
+        <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <span style={{ fontSize: 8.5, letterSpacing: 0.8, textTransform: "uppercase", color: C.subtle }}>Colour</span>
+          {(["status", "trade", "risk", "grade"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setColourBy(m)}
+              title={
+                m === "status" ? "Bar fill = activity status" :
+                m === "trade" ? "Bar fill = the assigned trade — who is where, when" :
+                m === "risk" ? "Bar fill = the executability verdict — the trouble map" :
+                "Bar fill = location grade — how sure the register is about where"
+              }
+              style={{
+                font: "inherit", fontSize: 10, padding: "1px 7px", borderRadius: 5, cursor: "pointer",
+                background: colourBy === m ? C.raised : "transparent",
+                color: colourBy === m ? C.text : C.dim,
+                border: `1px solid ${colourBy === m ? C.accent : C.line}`,
+              }}
+            >
+              {m}
+            </button>
+          ))}
+        </span>
+        <span style={{ width: 1, height: 14, background: C.line }} />
+        {colourBy === "status" && (
+          <>
+            <span><span style={{ color: STATUS_FILL.in_progress }}>■</span> in progress</span>
+            <span><span style={{ color: STATUS_FILL.not_started }}>■</span> not started</span>
+            <span><span style={{ color: STATUS_FILL.complete }}>■</span> complete</span>
+          </>
+        )}
+        {colourBy === "trade" && tradesDrawn.slice(0, 8).map((t) => (
+          <span key={t}><span style={{ color: tradeColour(t) }}>■</span> {t}</span>
+        ))}
+        {colourBy === "trade" && tradesDrawn.length > 8 && <span>+{tradesDrawn.length - 8} more</span>}
+        {colourBy === "risk" && (
+          <>
+            <span><span style={{ color: "rgba(34,197,94,0.7)" }}>■</span> executable as planned</span>
+            <span><span style={{ color: C.danger }}>■</span> refused in its window</span>
+            <span><span style={{ color: "rgba(148,163,184,0.6)" }}>■</span> unassessable</span>
+          </>
+        )}
+        {colourBy === "grade" && (
+          <>
+            <span><span style={{ color: "rgb(93,124,183)" }}>■</span> location authored</span>
+            <span><span style={{ color: C.warn }}>■</span> ≈ from the task name</span>
+            <span><span style={{ color: "rgba(148,163,184,0.6)" }}>■</span> unlocated</span>
+          </>
+        )}
         <span><span style={{ color: C.danger }}>▭</span> not executable as planned</span>
         {!byCompartment && (
           <span title="Unlocated work whose WBS bucket names this zone — placed at zone grain, nothing finer.">
@@ -499,6 +644,32 @@ export function ZoneLanes({
         </span>
         <span><span style={{ color: C.accent }}>◆</span> key event</span>
         <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          {altWindows && altWindows.size > 0 && (
+            <button
+              onClick={() => setShowAlts((v) => !v)}
+              title="Engine-accepted re-sequence windows, drawn as dashed ghosts beside the plan. Proposals only — P6 decides."
+              style={{
+                font: "inherit", fontSize: 10, padding: "2px 8px", borderRadius: 5, cursor: "pointer",
+                background: showAlts ? C.raised : "transparent",
+                color: showAlts ? C.ok : C.dim,
+                border: `1px solid ${showAlts ? "rgba(34,197,94,0.5)" : C.line}`,
+              }}
+            >
+              ▻ {altWindows.size} alternatives
+            </button>
+          )}
+          <button
+            onClick={() => setShowKey((v) => !v)}
+            title="What am I looking at? Every mark on this board, named."
+            style={{
+              font: "inherit", fontSize: 10, padding: "2px 8px", borderRadius: 5, cursor: "pointer",
+              background: showKey ? C.raised : "transparent",
+              color: showKey ? C.text : C.dim,
+              border: `1px solid ${showKey ? C.accent : C.line}`,
+            }}
+          >
+            ？ Key
+          </button>
           <span title="Wheel zooms the time axis around the cursor · drag pans">wheel zooms · drag pans</span>
           {([["−", 1 / 1.4, "Zoom out (or scroll on the board)"], ["+", 1.4, "Zoom in (or scroll on the board)"]] as const).map(
             ([glyph, factor, hint]) => (

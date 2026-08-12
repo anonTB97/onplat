@@ -231,3 +231,12 @@ export function zoneColour(zone: string): string {
   // sit side by side and must not share a hue.
   return `hsl(${Math.round((h * 137.508) % 360)} 60% 62%)`;
 }
+
+/** A trade's colour, same golden-angle discipline as zones but darker and
+ *  less saturated — trade fills paint whole Gantt bars, and a bar field at
+ *  62% lightness would shout down every finding drawn over it. */
+export function tradeColour(trade: string): string {
+  let h = 0;
+  for (const ch of trade) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return `hsl(${Math.round((h * 137.508) % 360)} 42% 46%)`;
+}

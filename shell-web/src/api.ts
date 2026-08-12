@@ -658,6 +658,72 @@ export interface ScheduleEdge {
   lag_hours: number;
 }
 
+/* ------------------------------------------------------ schedule alternatives */
+
+/** One refused activity's proposed re-sequence — the same engine's answer,
+ *  never a heuristic. `viable` slides to the first window the rules permit;
+ *  `verification_gated` refuses to promise a date (the hold clears only on a
+ *  named authority's word); `no_window` fits nowhere before the horizon. */
+export type ScheduleAlternative =
+  | { kind: "viable"; window: Window; delay_hours: number }
+  | {
+      kind: "verification_gated";
+      refusal: {
+        at: number;
+        state: DecisionState;
+        rule_code: string;
+        origin: string;
+        hazard: string;
+        clearing_authority: string;
+        earliest_clear: number | null;
+      };
+    }
+  | { kind: "no_window"; horizon: number };
+
+export interface AlternativeRow {
+  activity: string;
+  name: string;
+  compartment: string;
+  trade: string;
+  planned: Window;
+  remaining_hours: number;
+  refusal: {
+    at: number;
+    state: DecisionState;
+    rule_code: string;
+    origin: string;
+    hazard: string;
+    clearing_authority: string;
+    earliest_clear: number | null;
+  };
+  alternative: ScheduleAlternative;
+  /** Successors whose planned start falls before the proposed finish. */
+  pushes: string[];
+}
+
+export interface ScheduleAlternatives {
+  as_of: number;
+  horizon: number;
+  /** How the knock-on was read; served so the UI repeats it honestly. */
+  knock_on_basis: string;
+  /** Ranked by man-hours at stake, worst first. */
+  alternatives: AlternativeRow[];
+}
+
+/** Proposals for every activity the engine refuses as planned. Read-only:
+ *  re-sequencing happens in P6, deciding on the space's options panel. */
+export async function scheduleAlternatives(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<ScheduleAlternatives> {
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/schedule-alternatives`, asOf), {
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`alternatives → ${res.status}`);
+  return (await res.json()) as ScheduleAlternatives;
+}
+
 export interface ActivityRegister {
   as_of: number;
   /** null = the generated demo register; a label = the ingested export it came from. */

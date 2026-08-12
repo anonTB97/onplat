@@ -35,6 +35,7 @@ pub fn schedule_of_record(label: &str, report: &XerIngestReport) -> ScheduleOfRe
                 // the lowest trust a register can express.
                 IngestReliability::Low | IngestReliability::Theatre => Reliability::Low,
             },
+            wbs_area: a.wbs_area.clone(),
             trade: a.trade.clone(),
             planned: a.planned,
             budget_hours: a.budget_hours,

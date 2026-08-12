@@ -38,7 +38,7 @@ fn the_sample_export_ingests_whole() {
     let report = ingest_xer(SAMPLE, "CVN73-PIA26.xer");
     assert_eq!(report.project.as_deref(), Some("CVN73-PIA26"));
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
-    assert_eq!(report.activities.len(), 17, "14 tasks + 3 milestones");
+    assert_eq!(report.activities.len(), 18, "15 tasks + 3 milestones");
     assert_eq!(
         report.activities.iter().filter(|a| a.is_milestone).count(),
         3
@@ -120,6 +120,15 @@ fn location_is_graded_per_path_udf_name_or_nothing() {
     let m0100 = by_code("M0100");
     assert_eq!(m0100.compartment_no, None);
     assert_eq!(m0100.compartment_reliability, Reliability::Low);
+
+    // A2020 is the fully honest gap: no UDF, no placard in the name — but its
+    // WBS bucket sits under Z5, and the ingest carries that as the hint it is.
+    let a2020 = by_code("A2020");
+    assert_eq!(a2020.compartment_no, None);
+    assert_eq!(a2020.compartment_reliability, Reliability::Low);
+    assert_eq!(a2020.wbs_area.as_deref(), Some("Z5"));
+    // Located rows carry their bucket too — provenance, not a contradiction.
+    assert_eq!(by_code("A1010").wbs_area.as_deref(), Some("Z6"));
 }
 
 #[test]

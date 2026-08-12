@@ -1221,7 +1221,10 @@ pub(crate) async fn import_schedule(
 /// * `located_derived` — a placard was parsed out of the activity's own name
 ///   (Medium); each one is listed, because a guess a reader cannot inspect
 ///   is a guess they cannot refuse.
-/// * `unlocated` — the schedule did not say (listed by code).
+/// * `unlocated` — the schedule did not say (listed by code); each entry
+///   carries the zone its WBS bucket names when that bucket is a real zone of
+///   this hull — a hint at zone grain, never a location, but enough to put
+///   the row in the right swim lane instead of "unzoned".
 /// * `unknown_spaces` — located to a compartment the register does not
 ///   carry: mapped, and to nowhere this hull knows — the finding most worth
 ///   a look before Confirm.
@@ -1236,10 +1239,12 @@ fn mapping_report(
         .iter()
         .map(|c| c.compartment_no.as_str())
         .collect();
+    let zones: std::collections::BTreeSet<&str> =
+        compartments.iter().map(|c| c.zone.as_str()).collect();
     let work: Vec<_> = activities.iter().filter(|a| !a.is_milestone).collect();
     let mut located_authored = 0_usize;
     let mut located_derived: Vec<Value> = Vec::new();
-    let mut unlocated: Vec<&str> = Vec::new();
+    let mut unlocated: Vec<Value> = Vec::new();
     let mut unknown_spaces: Vec<Value> = Vec::new();
     for a in &work {
         match (&a.compartment_no, a.compartment_reliability) {
@@ -1255,7 +1260,10 @@ fn mapping_report(
                     unknown_spaces.push(json!({ "activity": a.code, "compartment": no }));
                 }
             }
-            (None, _) => unlocated.push(&a.code),
+            (None, _) => {
+                let hint = a.wbs_area.as_deref().filter(|area| zones.contains(area));
+                unlocated.push(json!({ "activity": a.code, "zone_hint": hint }));
+            }
         }
     }
     json!({

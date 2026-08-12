@@ -164,6 +164,11 @@ pub struct XerActivity {
     /// the task's own name — this parser guessing where, graded as the guess
     /// it is. [`Reliability::Low`] when the schedule did not say at all.
     pub compartment_reliability: Reliability,
+    /// The top-level WBS node this task sits under — `Z6`, `Z5`, `MSTN` in
+    /// the sample. A structural HINT at zone grain, never a location: yards
+    /// habitually cut the top of the WBS by zone, so an unlocated activity
+    /// often still says which zone it belongs to through where it sits.
+    pub wbs_area: Option<String>,
     /// The assigned resource's short name — the trade, where resources are
     /// modelled per trade.
     pub trade: String,
@@ -276,6 +281,56 @@ fn udf_by_task<'a>(doc: &'a XerDocument, type_name: &str) -> BTreeMap<&'a str, &
     out
 }
 
+/// Each WBS node's top-level area: the ancestor sitting directly under the
+/// project root, by short name — `Z6`, `Z5`, `MSTN` in the sample.
+///
+/// This is a HINT, not a location. Yards habitually cut the top of the WBS by
+/// zone, so an activity that names no compartment still often says which zone
+/// it belongs to through where it sits in the tree — worth carrying, graded as
+/// the structural inference it is, and never a substitute for a placard. Depth
+/// is capped so a cyclic parent link in a malformed export terminates instead
+/// of hanging the ingest.
+fn wbs_area_by_id(doc: &XerDocument) -> BTreeMap<String, String> {
+    let mut short = BTreeMap::new();
+    let mut parent = BTreeMap::new();
+    if let Some(wbs) = doc.table("PROJWBS") {
+        for (_, row) in &wbs.rows {
+            let Some(id) = wbs.get(row, "wbs_id") else {
+                continue;
+            };
+            if let Some(name) = wbs.get(row, "wbs_short_name") {
+                short.insert(id.to_owned(), name.to_owned());
+            }
+            if let Some(up) = wbs.get(row, "parent_wbs_id") {
+                if !up.is_empty() {
+                    parent.insert(id.to_owned(), up.to_owned());
+                }
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    for id in short.keys() {
+        let mut node = id.clone();
+        for _ in 0..32 {
+            match parent.get(&node) {
+                // The node whose parent has no parent sits directly under the
+                // root — that is the area.
+                Some(up) if parent.contains_key(up) => node = up.clone(),
+                Some(_) => break,
+                // The root itself names no area.
+                None => {
+                    node.clear();
+                    break;
+                }
+            }
+        }
+        if let Some(area) = short.get(&node) {
+            out.insert(id.clone(), area.clone());
+        }
+    }
+    out
+}
+
 /// The planned window: actuals override the CPM pass, field by field, per the
 /// dates section of `docs/p6-ingest-schema.md`. Returns an error string for a
 /// present-but-unparseable date, because silently dropping a malformed date
@@ -325,6 +380,7 @@ pub fn ingest_xer(input: &str, source_label: &str) -> XerIngestReport {
     let resources = resources_by_task(&doc);
     let compartments = udf_by_task(&doc, "compartment");
     let wi_numbers = udf_by_task(&doc, "wi_number");
+    let areas = wbs_area_by_id(&doc);
 
     let mut code_of_task: BTreeMap<&str, &str> = BTreeMap::new();
     if let Some(tasks) = doc.table("TASK") {
@@ -335,6 +391,7 @@ pub fn ingest_xer(input: &str, source_label: &str) -> XerIngestReport {
                 &resources,
                 &compartments,
                 &wi_numbers,
+                &areas,
                 source_label,
             ) {
                 Ok(activity) => {
@@ -361,12 +418,14 @@ pub fn ingest_xer(input: &str, source_label: &str) -> XerIngestReport {
 }
 
 /// One TASK row to an activity, or the reason it cannot be honestly accepted.
+#[allow(clippy::too_many_arguments, reason = "one lookup table per XER table")]
 fn extract_activity(
     tasks: &XerTable,
     row: &[String],
     resources: &BTreeMap<String, (i64, i64, String)>,
     compartments: &BTreeMap<&str, &str>,
     wi_numbers: &BTreeMap<&str, &str>,
+    areas: &BTreeMap<String, String>,
     source_label: &str,
 ) -> Result<XerActivity, String> {
     let code = tasks
@@ -409,6 +468,10 @@ fn extract_activity(
         earned_hours: ManHours::new(earned),
         status,
         is_milestone: tasks.get(row, "task_type") == Some("TT_Mile"),
+        wbs_area: tasks
+            .get(row, "wbs_id")
+            .and_then(|id| areas.get(id))
+            .cloned(),
         source_ref: format!("{source_label} · {code}"),
     })
 }

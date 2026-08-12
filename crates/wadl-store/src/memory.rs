@@ -497,6 +497,7 @@ impl InMemoryStore {
                     } else {
                         Reliability::High
                     },
+                    wbs_area: None,
                     trade: w.trade.to_owned(),
                     planned: Some(*window),
                     budget_hours: ManHours::new(*budget),
@@ -549,6 +550,7 @@ impl InMemoryStore {
                     work_order_code: Some(sp.package_code.to_owned()),
                     compartment_no: Some(CompartmentNo::new(sp.compartment)),
                     compartment_reliability: Reliability::High,
+                    wbs_area: None,
                     trade: self
                         .packages
                         .iter()
@@ -585,6 +587,7 @@ impl InMemoryStore {
                 // means "the schedule did not say".
                 compartment_no: None,
                 compartment_reliability: Reliability::High,
+                wbs_area: None,
                 trade: "—".to_owned(),
                 planned: Some(self.day_window(day, day + 1)),
                 budget_hours: ManHours::ZERO,

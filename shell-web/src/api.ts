@@ -505,6 +505,8 @@ export interface Activity {
   /** null with a low reliability = the schedule did not say where. */
   compartment_no: string | null;
   compartment_reliability: ActivityReliability;
+  /** The schedule's top-level WBS bucket — a zone hint at best, never a location. */
+  wbs_area: string | null;
   trade: string;
   planned: Window | null;
   budget_hours: number;
@@ -700,7 +702,9 @@ export interface MappingReport {
   work_activities: number;
   located_authored: number;
   located_derived: { activity: string; compartment: string }[];
-  unlocated: string[];
+  /** Rows the schedule never located; `zone_hint` is the WBS bucket when it
+   *  names a real zone of this hull — zone grain, never a place. */
+  unlocated: { activity: string; zone_hint: string | null }[];
   unknown_spaces: { activity: string; compartment: string }[];
   milestones: number;
 }

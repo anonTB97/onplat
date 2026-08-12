@@ -249,6 +249,12 @@ pub struct ActivitySummary {
     pub compartment_no: Option<CompartmentNo>,
     /// How much to trust the compartment mapping.
     pub compartment_reliability: Reliability,
+    /// The schedule's own top-level WBS bucket — a zone HINT at best, never a
+    /// location. Yards habitually cut the top of the WBS by zone, so an
+    /// unlocated activity often still says which zone it belongs to through
+    /// where it sits in the tree. `None` for the generated register, which
+    /// locates every row and needs no hints.
+    pub wbs_area: Option<String>,
     /// The trade doing the work.
     pub trade: String,
     /// When it is planned. `None` when the schedule of record does not say.

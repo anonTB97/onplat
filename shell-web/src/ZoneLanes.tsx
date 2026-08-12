@@ -103,10 +103,20 @@ export function ZoneLanes({
 
   const zoneOf = new Map<string, string>();
   for (const r of spaces) zoneOf.set(r.compartment.compartment_no, r.compartment.zone);
+  const hullZones = new Set(zoneOf.values());
 
   const dated = activities.filter((a) => !a.is_milestone && a.planned !== null);
+  // An unlocated activity whose WBS bucket names a real zone of this hull
+  // lands in that zone's lane — a hint at exactly this board's grain, so this
+  // is the one place it can honestly place work. The bar says it is a hint.
+  const wbsHint = (a: Activity) =>
+    a.compartment_no === null && a.wbs_area !== null && hullZones.has(a.wbs_area);
   const laneOf = (a: Activity) =>
-    (a.compartment_no !== null ? zoneOf.get(a.compartment_no) : undefined) ?? "unzoned";
+    (a.compartment_no !== null
+      ? zoneOf.get(a.compartment_no)
+      : wbsHint(a)
+        ? (a.wbs_area ?? undefined)
+        : undefined) ?? "unzoned";
 
   const milestones = activities.filter((a) => a.is_milestone && a.planned !== null);
   const allWindows = [...dated, ...milestones].map((a) => a.planned).filter((w) => w !== null);
@@ -302,6 +312,7 @@ export function ZoneLanes({
                 const bw = Math.max(3, x(b.end) - bx);
                 const by = lane.top + 7 + b.level * ROW_H;
                 const located = b.a.compartment_no;
+                const hinted = wbsHint(b.a);
                 return (
                   <g
                     key={b.a.activity_id}
@@ -312,14 +323,15 @@ export function ZoneLanes({
                     style={{ cursor: located ? "pointer" : "default" }}
                   >
                     <title>
-                      {`${b.a.code} — ${b.a.name}\n${b.a.trade} · ${located ? `${located}${b.a.compartment_reliability !== "high" ? " (≈ read from the task name, not authored)" : ""}` : "not located"} · ${fmtDay(b.start)} → ${fmtDay(b.end)}\n${mh(b.a.remaining_hours)} remaining${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
+                      {`${b.a.code} — ${b.a.name}\n${b.a.trade} · ${located ? `${located}${b.a.compartment_reliability !== "high" ? " (≈ read from the task name, not authored)" : ""}` : hinted ? `not located · in this lane per its WBS bucket (${b.a.wbs_area}) — zone grain, nothing finer` : "not located"} · ${fmtDay(b.start)} → ${fmtDay(b.end)}\n${mh(b.a.remaining_hours)} remaining${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
                     </title>
                     <rect
                       x={bx} y={by} width={bw} height={ROW_H - 4} rx={2}
                       fill={STATUS_FILL[b.a.status]}
                       opacity={0.92}
-                      stroke={doomed ? "#ef4444" : "none"}
-                      strokeWidth={doomed ? 1.4 : 0}
+                      stroke={doomed ? "#ef4444" : hinted ? "#f59e0b" : "none"}
+                      strokeWidth={doomed ? 1.4 : hinted ? 1 : 0}
+                      strokeDasharray={hinted && !doomed ? "3 2" : undefined}
                     />
                     {bw > 46 && (
                       <text x={bx + 4} y={by + ROW_H - 8} fill="#e6e9ef" fontSize={7.5} fontFamily="monospace">
@@ -391,6 +403,9 @@ export function ZoneLanes({
         <span><span style={{ color: STATUS_FILL.not_started }}>■</span> not started</span>
         <span><span style={{ color: STATUS_FILL.complete }}>■</span> complete</span>
         <span><span style={{ color: "#ef4444" }}>▭</span> not executable as planned</span>
+        <span title="Unlocated work whose WBS bucket names this zone — placed at zone grain, nothing finer.">
+          <span style={{ color: "#f59e0b" }}>▤</span> placed by WBS hint
+        </span>
         <span><span style={{ color: "#5b6272" }}>⟶</span> finish-to-start</span>
         <span title="The successor starts before its predecessor finishes — an overlap written into the schedule's own logic.">
           <span style={{ color: "#ef4444" }}>⟶</span> negative lag{inversions > 0 ? ` (${inversions})` : ""}

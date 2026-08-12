@@ -227,7 +227,7 @@ async fn an_ingested_export_replaces_the_register_without_changing_the_screen() 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["schedule_source"], "CVN73-PIA26.xer");
     let rows = body["activities"].as_array().unwrap();
-    assert_eq!(rows.len(), 17, "the export's rows, not the generator's");
+    assert_eq!(rows.len(), 18, "the export's rows, not the generator's");
     for row in rows {
         assert!(
             row["executability"]["verdict"].is_string(),
@@ -454,7 +454,7 @@ async fn the_dry_run_reports_the_location_mapping() {
     .await;
     assert_eq!(status, StatusCode::OK, "{preview}");
     let m = &preview["mapping"];
-    assert_eq!(m["work_activities"], 14, "{m}");
+    assert_eq!(m["work_activities"], 15, "{m}");
     assert_eq!(m["milestones"], 3);
     // Thirteen located by the dedicated UDF — the schedule saying where.
     assert_eq!(m["located_authored"], 13, "{m}");
@@ -464,7 +464,12 @@ async fn the_dry_run_reports_the_location_mapping() {
     assert_eq!(derived.len(), 1, "{m}");
     assert_eq!(derived[0]["activity"], "A4040");
     assert_eq!(derived[0]["compartment"], "3-185-0-L");
-    // Nothing unlocated, and every located space is one the register knows.
-    assert_eq!(m["unlocated"].as_array().unwrap().len(), 0, "{m}");
+    // One row the schedule never located — but its WBS bucket names a real
+    // zone of this hull, so it carries the hint: zone grain, never a place.
+    let unlocated = m["unlocated"].as_array().unwrap();
+    assert_eq!(unlocated.len(), 1, "{m}");
+    assert_eq!(unlocated[0]["activity"], "A2020");
+    assert_eq!(unlocated[0]["zone_hint"], "Z5");
+    // Every located space is one the register knows.
     assert_eq!(m["unknown_spaces"].as_array().unwrap().len(), 0, "{m}");
 }

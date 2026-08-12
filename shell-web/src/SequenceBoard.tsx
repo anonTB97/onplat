@@ -438,8 +438,11 @@ export default function SequenceBoard({
                 </span>
               )}
               {m.unlocated.length > 0 && (
-                <span style={{ color: C.danger, fontWeight: 700 }} title="The schedule did not say where. These rows serve as unlocated — visible on the register, undrawable on the ship.">
-                  · {m.unlocated.length} unlocated: {m.unlocated.join(", ")}
+                <span style={{ color: C.danger, fontWeight: 700 }} title="The schedule did not say where. These rows serve as unlocated — visible on the register, undrawable on the ship. A WBS zone hint places the row in its swim lane at zone grain, nothing finer.">
+                  · {m.unlocated.length} unlocated:{" "}
+                  {m.unlocated
+                    .map((u) => `${u.activity}${u.zone_hint ? ` (${u.zone_hint} per WBS)` : ""}`)
+                    .join(", ")}
                 </span>
               )}
               {m.unlocated.length === 0 && m.located_derived.length === 0 && (
@@ -613,8 +616,16 @@ export default function SequenceBoard({
                   ) : a.is_milestone ? (
                     <span style={{ color: C.dim }}>—</span>
                   ) : (
-                    <span style={{ color: "#f59e0b" }} title="The schedule did not say. Low-reliability mapping — never presented as authored.">
-                      not located
+                    <span
+                      style={{ color: "#f59e0b" }}
+                      title={
+                        "The schedule did not say. Low-reliability mapping — never presented as authored." +
+                        (a.wbs_area
+                          ? ` Its WBS bucket sits under ${a.wbs_area} — a zone hint, nothing finer.`
+                          : "")
+                      }
+                    >
+                      not located{a.wbs_area ? ` · ${a.wbs_area} per WBS` : ""}
                     </span>
                   )}
                 </td>

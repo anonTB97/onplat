@@ -96,7 +96,13 @@ export default function SourcesBoard({
               text:
                 `location: ${m.located_authored} of ${m.work_activities} authored` +
                 (m.located_derived.length > 0 ? ` · ${m.located_derived.length} read from task names` : "") +
-                (m.unlocated.length > 0 ? ` · ${m.unlocated.length} unlocated` : ""),
+                (m.unlocated.length > 0
+                  ? ` · ${m.unlocated.length} unlocated${
+                      m.unlocated.some((u) => u.zone_hint)
+                        ? ` (${m.unlocated.filter((u) => u.zone_hint).length} with a WBS zone hint)`
+                        : ""
+                    }`
+                  : ""),
               tone: m.unlocated.length > 0 ? C.danger : m.located_derived.length > 0 ? "#f59e0b" : "#22c55e",
               gloss:
                 m.located_derived.length > 0

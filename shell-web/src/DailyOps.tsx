@@ -338,7 +338,14 @@ export default function DailyOps({
                     {a.compartment_no ? (
                       <button
                         onClick={() => onOpenSpace(a.compartment_no ?? "")}
-                        title={heldNow ? "The engine refuses this space at this instant — click for why and what would open it." : "Open on the deck plan"}
+                        title={
+                          (heldNow
+                            ? "The engine refuses this space at this instant — click for why and what would open it."
+                            : "Open on the deck plan") +
+                          (a.compartment_reliability !== "high"
+                            ? " Location read from the task's own name — a graded guess, never presented as authored."
+                            : "")
+                        }
                         style={
                           heldNow
                             ? badge("#fca5a5", "rgba(239,68,68,0.12)", "rgba(239,68,68,0.45)")
@@ -349,6 +356,7 @@ export default function DailyOps({
                               }
                         }
                       >
+                        {a.compartment_reliability !== "high" && "≈ "}
                         {heldNow ? `HELD · ${a.compartment_no}` : a.compartment_no}
                       </button>
                     ) : (

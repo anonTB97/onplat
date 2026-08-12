@@ -201,6 +201,9 @@ export default function SequenceBoard({
   const remaining = rows.reduce((s, a) => s + a.remaining_hours, 0);
   const inWindow = activities.filter((a) => a.in_window && !a.is_milestone).length;
   const unlocated = activities.filter((a) => a.compartment_no === null && !a.is_milestone).length;
+  const derivedLoc = activities.filter(
+    (a) => a.compartment_no !== null && a.compartment_reliability !== "high" && !a.is_milestone,
+  ).length;
   const refused = activities.filter((a) => a.executability.verdict === "not_executable").length;
 
   const th: React.CSSProperties = {
@@ -235,6 +238,14 @@ export default function SequenceBoard({
             {" "}· <b style={{ color: "#f59e0b" }}>{unlocated}</b>{" "}
             <span title="The schedule did not say which compartment — the dominant risk of every P6 import, shown rather than hidden.">
               with no located compartment
+            </span>
+          </>
+        )}
+        {derivedLoc > 0 && (
+          <>
+            {" "}· <b style={{ color: "#f59e0b" }}>{derivedLoc}</b>{" "}
+            <span title="Located from the task's own name rather than an authored field — marked ≈ in the Space column, graded medium, never presented as authored.">
+              located from task names
             </span>
           </>
         )}
@@ -575,15 +586,28 @@ export default function SequenceBoard({
                 </td>
                 <td style={{ ...td, fontSize: 11 }}>
                   {a.compartment_no ? (
+                    // The chip carries its provenance: an authored location is
+                    // plain; a location the ingest read out of the task's own
+                    // name wears "≈" and an amber dashed edge — a graded
+                    // guess, never presented as authored.
                     <button
                       onClick={() => onOpenSpace(a.compartment_no ?? "")}
-                      title="Open on the deck plan"
+                      title={
+                        a.compartment_reliability === "high"
+                          ? "Open on the deck plan"
+                          : "Located from the task's own name — a graded guess, never presented as authored. Open on the deck plan."
+                      }
                       style={{
                         font: "inherit", fontSize: 10.5, fontFamily: "monospace", cursor: "pointer",
-                        padding: "1px 5px", borderRadius: 4, color: "#ccd1da",
-                        background: "rgba(148,163,184,0.08)", border: `1px solid ${C.line}`,
+                        padding: "1px 5px", borderRadius: 4,
+                        color: a.compartment_reliability === "high" ? "#ccd1da" : "#fbd38d",
+                        background: "rgba(148,163,184,0.08)",
+                        border: a.compartment_reliability === "high"
+                          ? `1px solid ${C.line}`
+                          : "1px dashed rgba(245,158,11,0.6)",
                       }}
                     >
+                      {a.compartment_reliability !== "high" && "≈ "}
                       {a.compartment_no}
                     </button>
                   ) : a.is_milestone ? (

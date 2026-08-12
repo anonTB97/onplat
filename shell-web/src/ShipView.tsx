@@ -501,7 +501,7 @@ export function ShipView({
                     opacity={dim}
                   >
                     <title>
-                      {`${a.code} — ${a.name}\n${a.trade} · ${p.compartment} · ${a.status.replace("_", " ")}${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
+                      {`${a.code} — ${a.name}\n${a.trade} · ${p.compartment}${a.compartment_reliability !== "high" ? " (≈ read from the task name, not authored)" : ""} · ${a.status.replace("_", " ")}${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
                     </title>
                     <line
                       x1={x} y1={y + 4 * sc} x2={x} y2={top + LANE_H - GUTTER - BOX_H * sc}

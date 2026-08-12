@@ -312,7 +312,7 @@ export function ZoneLanes({
                     style={{ cursor: located ? "pointer" : "default" }}
                   >
                     <title>
-                      {`${b.a.code} — ${b.a.name}\n${b.a.trade} · ${located ?? "not located"} · ${fmtDay(b.start)} → ${fmtDay(b.end)}\n${mh(b.a.remaining_hours)} remaining${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
+                      {`${b.a.code} — ${b.a.name}\n${b.a.trade} · ${located ? `${located}${b.a.compartment_reliability !== "high" ? " (≈ read from the task name, not authored)" : ""}` : "not located"} · ${fmtDay(b.start)} → ${fmtDay(b.end)}\n${mh(b.a.remaining_hours)} remaining${doomed ? "\nNOT EXECUTABLE AS PLANNED — click for the options" : ""}`}
                     </title>
                     <rect
                       x={bx} y={by} width={bw} height={ROW_H - 4} rx={2}

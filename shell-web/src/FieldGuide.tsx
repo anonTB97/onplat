@@ -202,6 +202,7 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
                 ["wheel", "zooms every time axis and deck plan, around the cursor"],
                 ["drag", "pans a zoomed canvas"],
                 ["column header ×3", "sort ascending → descending → back to schedule order"],
+                ["click a row or bar", "the activity inspector: details, refusal evidence, the engine's suggested alternative, and the space's options — in place"],
                 ["← →", "step a 3D walkthrough; the tilt slider re-angles it from plan to exploded"],
                 ["chips & filters", "narrow — they are your question; the time control only marks"],
                 ["the URL", "carries hull, screen, instant and space — send a colleague exactly what you see"],

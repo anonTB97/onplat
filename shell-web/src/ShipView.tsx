@@ -27,7 +27,7 @@ import type { Activity, Deck, DeckStateRow } from "./api";
 import { clampZoom, planZoomAt, wheelFactor } from "./camera";
 import { plateSlice } from "./VerticalTrace";
 import { sheetForDeck } from "./deckSheets";
-import { C, STATE_STYLE, zoneColour } from "./theme";
+import { ACTIVITY_STATUS, C, STATE_STYLE, zoneColour } from "./theme";
 import type { ZoneGeometry } from "./zones";
 
 const DIM = C.dim;
@@ -46,9 +46,9 @@ const MAX_SHIP_ZOOM = 8;
 const BOX_H = 14;
 
 const STATUS_FG: Record<Activity["status"], string> = {
-  not_started: "#94a3b8",
-  in_progress: "#3D6BFF",
-  complete: "#22c55e",
+  not_started: ACTIVITY_STATUS.not_started.fg,
+  in_progress: ACTIVITY_STATUS.in_progress.fg,
+  complete: ACTIVITY_STATUS.complete.fg,
 };
 
 interface PlacedChip {
@@ -253,7 +253,7 @@ export function ShipView({
   };
 
   return (
-    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
+    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: C.well, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, fontSize: 11, fontWeight: 600, flexWrap: "wrap" }}>
         <span>Whole ship — the work, and whether it can proceed</span>
         <span style={{ color: DIM, fontWeight: 400 }}>
@@ -288,7 +288,7 @@ export function ShipView({
             title="Dim work not planned for the instant on the time control — marked, never hidden."
           >
             <input type="checkbox" checked={windowFocus} onChange={(e) => setWindowFocus(e.target.checked)} />
-            in-window focus
+            In-window focus
           </label>
           <button onClick={() => zoomTo(zoom / 1.4)} style={navBtn} title="Zoom out (or scroll on the canvas)">−</button>
           <span style={{ fontSize: 9.5, color: DIM, fontWeight: 400, minWidth: 30, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>
@@ -347,7 +347,7 @@ export function ShipView({
               const count = (lane?.chips.length ?? 0) + (lane?.more.reduce((s, m) => s + m.codes.length, 0) ?? 0);
               return (
                 <g key={deck.code}>
-                  <rect x={0} y={top} width={W} height={LANE_H} fill={i % 2 === 0 ? "#0e0f13" : "#101118"} />
+                  <rect x={0} y={top} width={W} height={LANE_H} fill={i % 2 === 0 ? C.well : "#101118"} />
                   <rect x={LABEL_W} y={top + GUTTER} width={W - LABEL_W} height={LANE_H - GUTTER * 2} fill="#0b0c0e" />
                   {sheet?.calibration && (
                     <g clipPath={`url(#ship-lane-${deck.code})`} opacity={0.7}>
@@ -359,11 +359,11 @@ export function ShipView({
                     width={W - LABEL_W} height={LANE_H - GUTTER * 2}
                     fill="none" stroke="#2b2d36" strokeWidth={1}
                   />
-                  <rect x={0} y={top} width={LABEL_W} height={LANE_H} fill={i % 2 === 0 ? "#0e0f13" : "#101118"} />
+                  <rect x={0} y={top} width={LABEL_W} height={LANE_H} fill={i % 2 === 0 ? C.well : "#101118"} />
                   <text x={8} y={top + 15} fill={C.text} fontSize={9.5} fontWeight={600}>
                     {deck.label}
                   </text>
-                  <text x={8} y={top + 26} fill="#4b5060" fontSize={8}>
+                  <text x={8} y={top + 26} fill={C.faint} fontSize={8}>
                     {count === 0 ? "no activities" : `${count} activit${count === 1 ? "y" : "ies"}`}
                   </text>
                 </g>
@@ -403,8 +403,8 @@ export function ShipView({
                 const [ox, ow] = x1 < x2 ? [x1, x2 - x1] : [x2, x1 - x2];
                 return (
                   <g key={`${o.a}-${o.b}`} pointerEvents="none">
-                    <rect x={ox} y={0} width={ow} height={lanesH} fill="none" stroke="#f59e0b" strokeWidth={0.8} strokeDasharray="3 3" opacity={0.7} />
-                    <text x={ox + ow / 2} y={lanesH - 5} fill="#f59e0b" fontSize={8 / zoom} fontWeight={700} textAnchor="middle">
+                    <rect x={ox} y={0} width={ow} height={lanesH} fill="none" stroke={C.warn} strokeWidth={0.8} strokeDasharray="3 3" opacity={0.7} />
+                    <text x={ox + ow / 2} y={lanesH - 5} fill={C.warn} fontSize={8 / zoom} fontWeight={700} textAnchor="middle">
                       {o.a} ∩ {o.b}
                     </text>
                   </g>
@@ -454,7 +454,7 @@ export function ShipView({
                     <rect
                       x={c.x - boxHalfW - 3 * sc} y={y - 3 * sc}
                       width={boxHalfW * 2 + 6 * sc} height={BOX_H * sc + 6 * sc} rx={4 * sc}
-                      fill="none" stroke="#f59e0b"
+                      fill="none" stroke={C.warn}
                       strokeWidth={1.4 * sc} strokeDasharray={`${3 * sc} ${2 * sc}`} opacity={0.9}
                     />
                   )}
@@ -484,7 +484,7 @@ export function ShipView({
                 const top = laneTop.get(deck.code) ?? 0;
                 const doomed = a.executability.verdict === "not_executable";
                 const isSel = p.compartment === selected;
-                const fg = doomed ? "#fca5a5" : STATUS_FG[a.status];
+                const fg = doomed ? C.dangerSoft : STATUS_FG[a.status];
                 const sc = 1 / zoom;
                 const x = xOf(p.frame);
                 const y = top + (10 + p.level * 12) * sc;
@@ -510,7 +510,7 @@ export function ShipView({
                     <rect
                       x={x - 28 * sc} y={y - 5 * sc} width={56 * sc} height={11 * sc} rx={2.5 * sc}
                       fill={doomed ? "rgba(239,68,68,0.16)" : "#0b0c0eE6"}
-                      stroke={isSel ? C.accent : doomed ? "#ef4444" : fg}
+                      stroke={isSel ? C.accent : doomed ? C.danger : fg}
                       strokeWidth={(isSel ? 1.6 : doomed ? 1.2 : 0.8) * sc}
                     />
                     <text x={x} y={y + 3 * sc} fill={fg} fontSize={7 * sc} textAnchor="middle" fontFamily="monospace">
@@ -536,7 +536,7 @@ export function ShipView({
                     opacity={violationFocus && !involved.has(m.compartment) ? 0.45 : 1}
                   >
                     <title>{`${m.codes.length} more here — zoom in to spread them out\n${m.codes.join(", ")}`}</title>
-                    <rect x={x - 13 * sc} y={y - 5 * sc} width={26 * sc} height={10 * sc} rx={2.5 * sc} fill="#0b0c0eE6" stroke="#6e7480" strokeWidth={0.8 * sc} />
+                    <rect x={x - 13 * sc} y={y - 5 * sc} width={26 * sc} height={10 * sc} rx={2.5 * sc} fill="#0b0c0eE6" stroke={C.subtle} strokeWidth={0.8 * sc} />
                     <text x={x} y={y + 3 * sc} fill="#94a3b8" fontSize={6.5 * sc} textAnchor="middle" fontFamily="monospace">
                       +{m.codes.length}
                     </text>
@@ -572,17 +572,17 @@ export function ShipView({
                 for (let f = Math.ceil(fLo / step) * step; f <= fHi; f += step) ticks.push(f);
                 return ticks.map((f) => (
                   <g key={f}>
-                    <line x1={xOf(f)} y1={lanesH} x2={xOf(f)} y2={lanesH + 4} stroke="#4b5060" />
-                    <text x={xOf(f)} y={lanesH + 20} fill="#6e7480" fontSize={8.5} textAnchor="middle" fontFamily="monospace">
+                    <line x1={xOf(f)} y1={lanesH} x2={xOf(f)} y2={lanesH + 4} stroke={C.faint} />
+                    <text x={xOf(f)} y={lanesH + 20} fill={C.subtle} fontSize={8.5} textAnchor="middle" fontFamily="monospace">
                       {f}
                     </text>
                   </g>
                 ));
               })()}
-              <text x={W - 2} y={lanesH + 20} fill="#4b5060" fontSize={8} textAnchor="end">
+              <text x={W - 2} y={lanesH + 20} fill={C.faint} fontSize={8} textAnchor="end">
                 bow →
               </text>
-              <text x={LABEL_W + 2} y={lanesH + 20} fill="#4b5060" fontSize={8}>
+              <text x={LABEL_W + 2} y={lanesH + 20} fill={C.faint} fontSize={8}>
                 frame
               </text>
             </g>
@@ -593,7 +593,7 @@ export function ShipView({
       {/* Two colour languages, said out loud; and what the drawing is NOT
           showing, counted rather than hidden. */}
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", padding: "7px 11px", borderTop: `1px solid ${LINE}`, fontSize: 10.5, color: DIM }}>
-        <span style={{ color: "#6e7480", textTransform: "uppercase", fontSize: 8.5, letterSpacing: 0.8 }}>Boxes · space state</span>
+        <span style={{ color: C.subtle, textTransform: "uppercase", fontSize: 8.5, letterSpacing: 0.8 }}>Boxes · space state</span>
         {(["ALLOW", "WARN", "SUSPEND", "BLOCK"] as const).map((s) => (
           <span key={s} style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <span style={{ width: 8, height: 8, borderRadius: 2, background: STATE_STYLE[s].fg }} />
@@ -601,16 +601,16 @@ export function ShipView({
           </span>
         ))}
         <span style={{ width: 1, height: 12, background: LINE }} />
-        <span style={{ color: "#6e7480", textTransform: "uppercase", fontSize: 8.5, letterSpacing: 0.8 }}>Chips · schedule</span>
+        <span style={{ color: C.subtle, textTransform: "uppercase", fontSize: 8.5, letterSpacing: 0.8 }}>Chips · schedule</span>
         <span><span style={{ color: STATUS_FG.in_progress }}>■</span> in progress</span>
         <span><span style={{ color: STATUS_FG.not_started }}>■</span> not started</span>
         <span><span style={{ color: STATUS_FG.complete }}>■</span> complete</span>
-        <span><span style={{ color: "#ef4444" }}>■</span> not executable</span>
+        <span><span style={{ color: C.danger }}>■</span> not executable</span>
         {zonesOn && (
           <>
             <span style={{ width: 1, height: 12, background: LINE }} />
             <span
-              style={{ color: zones.overlaps.length > 0 ? "#fbbf24" : "#22c55e" }}
+              style={{ color: zones.overlaps.length > 0 ? "#fbbf24" : C.ok }}
               title="Each band is its zone's spaces' true extent, padded two frames — inferred from the register until a zones register carries authored bounds. Overlaps are reported as facts: legitimate where zones are functional rather than longitudinal, and the place to look hard where a scheme is supposed to partition."
             >
               bands inferred from the register ·{" "}
@@ -621,20 +621,20 @@ export function ShipView({
                 : "extents are disjoint — no anomalies"}
             </span>
             {zones.unplaced > 0 && (
-              <span style={{ color: "#f59e0b" }}>{zones.unplaced} spaces carry no frame (not shaded)</span>
+              <span style={{ color: C.warn }}>{zones.unplaced} spaces carry no frame (not shaded)</span>
             )}
             {zones.bandless.length > 0 && (
-              <span style={{ color: "#f59e0b" }}>no band for {zones.bandless.join(", ")}</span>
+              <span style={{ color: C.warn }}>no band for {zones.bandless.join(", ")}</span>
             )}
           </>
         )}
         {unlocated > 0 && (
-          <span style={{ color: "#f59e0b" }} title="The schedule did not say which compartment — visible on the Sequence Board, undrawable here.">
+          <span style={{ color: C.warn }} title="The schedule did not say which compartment — visible on the Sequence Board, undrawable here.">
             {unlocated} unlocated (not drawn)
           </span>
         )}
         {offRegister > 0 && (
-          <span style={{ color: "#f59e0b" }} title="Located in a compartment the register cannot place on a deck plate.">
+          <span style={{ color: C.warn }} title="Located in a compartment the register cannot place on a deck plate.">
             {offRegister} in unplaceable spaces (not drawn)
           </span>
         )}

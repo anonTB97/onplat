@@ -74,10 +74,10 @@ const MAX_SHEET_ZOOM = 14;
 const READABLE_SCALE = 0.3;
 
 // A stable colour per trade, so a trade keeps its colour across decks.
-const TRADE_COLOURS = ["#3D6BFF", "#22c55e", "#f59e0b", "#c4b5fd", "#f472b6", "#2dd4bf"];
+const TRADE_COLOURS = ["#3D6BFF", C.ok, C.warn, "#c4b5fd", "#f472b6", "#2dd4bf"];
 function tradeColour(trade: string, all: string[]): string {
   const i = all.indexOf(trade);
-  return i < 0 ? "#6e7480" : TRADE_COLOURS[i % TRADE_COLOURS.length];
+  return i < 0 ? C.subtle : TRADE_COLOURS[i % TRADE_COLOURS.length];
 }
 
 /**
@@ -455,7 +455,7 @@ export default function DeckExplorer({
             bg: `${tradeColour(t, allTrades)}22`,
             border: tradeColour(t, allTrades),
           }
-        : { fg: "#6e7480", bg: "#1a1c22", border: "#353842" };
+        : { fg: C.subtle, bg: "#1a1c22", border: "#353842" };
     }
     return STATE_STYLE[r.state];
   };
@@ -487,7 +487,7 @@ export default function DeckExplorer({
     font: "inherit" as const,
     fontSize: 11.5,
     opacity: disabled ? 0.45 : 1,
-    background: active ? "#20222b" : "transparent",
+    background: active ? C.raised : "transparent",
     color: active ? TEXT : DIM,
     border: `1px solid ${active ? C.accent : LINE}`,
   });
@@ -525,7 +525,7 @@ export default function DeckExplorer({
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>
         Where can people work — and what&rsquo;s stopping them?
       </h1>
-      <p style={{ color: DIM, fontSize: 12.5, margin: "0 0 12px", maxWidth: 820 }}>
+      <p style={{ color: DIM, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
         Authorization is computed by the rule engine and read through the API — the shell
         never derives it. {heldCount} of {rows.length} compartments have work booked that
         {/* "currently" was true until the time control existed. On a scrubbed
@@ -778,7 +778,7 @@ export default function DeckExplorer({
                       </button>
                     )}
                     {zoneMsg && (
-                      <span style={{ fontSize: 11, color: zoneMsg.startsWith("✓") ? "#22c55e" : C.danger }}>
+                      <span style={{ fontSize: 11, color: zoneMsg.startsWith("✓") ? C.ok : C.danger }}>
                         {zoneMsg}
                       </span>
                     )}
@@ -936,7 +936,7 @@ export default function DeckExplorer({
                           {z}
                         </span>
                       ))}
-                    <span style={{ color: zoneGeometry.overlaps.length > 0 ? "#fbbf24" : "#22c55e" }}>
+                    <span style={{ color: zoneGeometry.overlaps.length > 0 ? "#fbbf24" : C.ok }}>
                       {zoneGeometry.source
                         ? `bands authored by ${zoneGeometry.source}`
                         : "bands inferred from the register"}
@@ -961,7 +961,7 @@ export default function DeckExplorer({
                       </span>
                     )}
                     {(zoneChart?.audit.unbounded_zones.length ?? 0) > 0 && (
-                      <span style={{ color: "#f59e0b" }} title="Zones carrying spaces the chart does not bound — drawn inferred.">
+                      <span style={{ color: C.warn }} title="Zones carrying spaces the chart does not bound — drawn inferred.">
                         chart does not bound {zoneChart?.audit.unbounded_zones.join(", ")}
                       </span>
                     )}
@@ -1157,7 +1157,7 @@ function TracePanel({
                       )}
                       <div style={{ fontSize: 11, color: DIM, marginTop: 4 }}>{step.authority}</div>
                       <div style={{ fontSize: 11, color: DIM }}>
-                        Cleared by <b style={{ color: "#ccd1da" }}>{step.clearing_authority}</b> · earliest{" "}
+                        Cleared by <b style={{ color: C.bright }}>{step.clearing_authority}</b> · earliest{" "}
                         {fmtClear(step.earliest_clear)}
                       </div>
                       <div style={{ fontSize: 10, color: "#5a6070", marginTop: 3, fontFamily: "monospace" }}>
@@ -1222,13 +1222,13 @@ function ReadinessAltitude({
   const group = zone ? rollup.zones.find((z) => z.key === zone) : undefined;
   return (
     <div>
-      <p style={{ color: DIM, fontSize: 11.5, margin: "0 0 12px", maxWidth: 800 }}>
+      <p style={{ color: DIM, fontSize: 11.5, margin: "0 0 12px", maxWidth: 780 }}>
         {altitude === "ship"
           ? "Every space on the hull, joined to the work booked in it."
           : "Zones worst first, by the man-hours each is holding."}{" "}
-        <b style={{ color: "#ccd1da" }}>Held</b> means work is booked and the engine
+        <b style={{ color: C.bright }}>Held</b> means work is booked and the engine
         refuses it — the only category costing the availability today. A closed space
-        with nothing booked in it is <b style={{ color: "#ccd1da" }}>latent</b>, not held:
+        with nothing booked in it is <b style={{ color: C.bright }}>latent</b>, not held:
         it costs nothing now, and it is somewhere you must not plan into.
       </p>
       {altitude === "ship" ? (
@@ -1469,7 +1469,7 @@ function SheetView({
   );
 
   return (
-    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
+    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: C.well, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, fontWeight: 600 }}>{sheet.label} — general arrangement</span>
         <span style={{ fontSize: 10.5, color: DIM }}>bow right · drag to pan</span>
@@ -1519,7 +1519,7 @@ function SheetView({
           <div
             style={{
               position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
-              background: "#0e0f13", color: DIM, fontSize: 12, zIndex: 2,
+              background: C.well, color: DIM, fontSize: 12, zIndex: 2,
             }}
           >
             Loading {sheet.label} plate…
@@ -1605,11 +1605,11 @@ function SheetView({
                     />
                     <rect
                       x={cx - halfW} y={cy - halfH} width={halfW * 2} height={halfH * 2} rx={3 * u}
-                      fill="none" stroke={alert ? "#f59e0b" : colour} strokeWidth={(alert ? 2.2 : 1.2) * u}
+                      fill="none" stroke={alert ? C.warn : colour} strokeWidth={(alert ? 2.2 : 1.2) * u}
                       strokeDasharray={alert ? `${5 * u} ${3 * u}` : undefined} opacity={alert ? 1 : 0.85}
                     />
                     {alert && (
-                      <text x={cx} y={cy - halfH - 4 * u} fill="#f59e0b" fontSize={10 * u} fontWeight={700} textAnchor="middle">
+                      <text x={cx} y={cy - halfH - 4 * u} fill={C.warn} fontSize={10 * u} fontWeight={700} textAnchor="middle">
                         OUT OF {r.compartment.zone} BOUNDS
                       </text>
                     )}
@@ -1772,14 +1772,14 @@ function SheetView({
                 {OVERLAY_STYLE[overlayBucket(hoverRow)].label}
               </span>
             </div>
-            <div style={{ fontSize: 11.5, color: "#ccd1da" }}>{hoverRow.compartment.name}</div>
+            <div style={{ fontSize: 11.5, color: C.bright }}>{hoverRow.compartment.name}</div>
             <div style={{ fontSize: 10.5, color: DIM }}>
               {hoverRow.compartment.zone} · Fr {hoverRow.compartment.frame} · {hoverRow.compartment.side}
               {hoverRow.remaining_hours > 0 && ` · ${mh(hoverRow.remaining_hours)} left`}
             </div>
             {hoverRow.readiness === "held" && (
               <div style={{ fontSize: 10.5, color: DIM, marginTop: 2 }}>
-                cleared by <b style={{ color: "#ccd1da" }}>{hoverRow.clearing_authority || "unnamed authority"}</b> ·{" "}
+                cleared by <b style={{ color: C.bright }}>{hoverRow.clearing_authority || "unnamed authority"}</b> ·{" "}
                 {fmtClear(hoverRow.earliest_clear)}
               </div>
             )}
@@ -1891,7 +1891,7 @@ function PlanView({
   );
 
   return (
-    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
+    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: C.well, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, fontWeight: 600 }}>{deckLabel} — plan</span>
         {violationFocus && (
@@ -1957,16 +1957,16 @@ function PlanView({
             strokeWidth={1.5}
           />
           <line x1={W * 0.02} y1={H / 2} x2={W * 0.97} y2={H / 2} stroke="#242732" strokeDasharray="6 6" />
-          <text x={W * 0.955} y={H * 0.5 - 8} fill="#4b5060" fontSize={9} textAnchor="end">BOW</text>
-          <text x={W * 0.03} y={H * 0.5 - 8} fill="#4b5060" fontSize={9}>STERN</text>
+          <text x={W * 0.955} y={H * 0.5 - 8} fill={C.faint} fontSize={9} textAnchor="end">BOW</text>
+          <text x={W * 0.03} y={H * 0.5 - 8} fill={C.faint} fontSize={9}>STERN</text>
           {/* Port is up, starboard is down — looking forward from astern. */}
-          <text x={W * 0.5} y={H * 0.15 - 4} fill="#4b5060" fontSize={9} textAnchor="middle">PORT</text>
-          <text x={W * 0.5} y={H * 0.85 + 11} fill="#4b5060" fontSize={9} textAnchor="middle">STBD</text>
+          <text x={W * 0.5} y={H * 0.15 - 4} fill={C.faint} fontSize={9} textAnchor="middle">PORT</text>
+          <text x={W * 0.5} y={H * 0.85 + 11} fill={C.faint} fontSize={9} textAnchor="middle">STBD</text>
           {/* frame ruler */}
           {[40, 80, 120, 160, 200, 240].map((f) => (
             <g key={f}>
               <line x1={frameToX(f) * W} y1={H * 0.1} x2={frameToX(f) * W} y2={H * 0.9} stroke="#1d2029" />
-              <text x={frameToX(f) * W} y={H * 0.07} fill="#4b5060" fontSize={9} textAnchor="middle">
+              <text x={frameToX(f) * W} y={H * 0.07} fill={C.faint} fontSize={9} textAnchor="middle">
                 Fr {f}
               </text>
             </g>

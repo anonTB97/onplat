@@ -75,7 +75,7 @@ export default function DistributedPackages({
         Distributed Packages · {hullLabel}
       </div>
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>One work order, many compartments</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 760 }}>
+      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
         Authorization state is a <b>distribution over the footprint</b>, not a value. A segment
         cannot be {detail?.package.test_verb ?? "tested"} until it <i>and everything upstream of
         it</i> is complete — so one held compartment strands man-hours it does not contain.
@@ -90,7 +90,7 @@ export default function DistributedPackages({
             style={{
               padding: "6px 11px", borderRadius: 6, cursor: "pointer", font: "inherit", fontSize: 12,
               textAlign: "left",
-              background: p.code === selected ? "#20222b" : "transparent",
+              background: p.code === selected ? C.raised : "transparent",
               color: p.code === selected ? C.text : C.dim,
               border: `1px solid ${p.code === selected ? C.accent : C.line}`,
             }}
@@ -159,7 +159,7 @@ export default function DistributedPackages({
               <div style={{ fontSize: 11.5, color: C.dim, marginTop: 5 }}>
                 {g.constraint.kind === "authorization" ? (
                   <>
-                    Cleared by <b style={{ color: "#ccd1da" }}>{g.constraint.clearing_authority}</b> ·
+                    Cleared by <b style={{ color: C.bright }}>{g.constraint.clearing_authority}</b> ·
                     earliest {fmtClear(g.constraint.earliest_clear)}. Adding crew will not move this.
                   </>
                 ) : (
@@ -187,7 +187,7 @@ export default function DistributedPackages({
                       style={{
                         marginLeft: "auto", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4,
                         padding: "1px 6px", borderRadius: 4,
-                        color: s.testable ? "#22c55e" : "#f59e0b",
+                        color: s.testable ? C.ok : C.warn,
                         background: s.testable ? "rgba(34,197,94,0.12)" : "rgba(245,158,11,0.12)",
                         border: `1px solid ${s.testable ? "rgba(34,197,94,0.4)" : "rgba(245,158,11,0.45)"}`,
                       }}
@@ -207,7 +207,7 @@ export default function DistributedPackages({
                          cannot be tested, and exactly what is holding it. */
                       <>
                         {" · "}
-                        <span style={{ color: "#f59e0b" }}>
+                        <span style={{ color: C.warn }}>
                           cannot be {detail.package.test_verb} — {s.held_by.join(" and ")} upstream
                           {s.held_by.length === 1 ? " is" : " are"} not complete
                         </span>
@@ -238,7 +238,7 @@ export default function DistributedPackages({
                     <span style={{ fontFamily: "monospace", fontSize: 11.5, minWidth: 92 }}>{f.compartment_no}</span>
                     <span style={{ color: st.fg, fontSize: 9.5, fontWeight: 700, minWidth: 58 }}>{f.state}</span>
                     <span style={{ fontSize: 11, color: C.dim, minWidth: 42 }}>{f.rules_fired.join(",") || "—"}</span>
-                    <span style={{ marginLeft: "auto", fontSize: 11.5, fontVariantNumeric: "tabular-nums", color: f.complete ? "#22c55e" : C.text }}>
+                    <span style={{ marginLeft: "auto", fontSize: 11.5, fontVariantNumeric: "tabular-nums", color: f.complete ? C.ok : C.text }}>
                       {f.complete ? "complete" : `${f.remaining_hours.toLocaleString()} MH left`}
                     </span>
                   </div>

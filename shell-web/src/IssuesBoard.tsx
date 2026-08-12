@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 import { acknowledgeIssue, listIssues, type AsOf, type Identity, type Issue } from "./api";
 import { Loading } from "./Loading";
-import { C, fmtClear, mh } from "./theme";
+import { chipStyle, C, fmtClear, mh } from "./theme";
 
 /**
  * Persona-shaped cuts of the board. Each lens is the subset of kinds one job
@@ -43,13 +43,13 @@ export const KIND: Record<
 > = {
   compound_hold: {
     label: "COMPOUND HOLD",
-    fg: "#fca5a5",
+    fg: C.dangerSoft,
     bg: "rgba(239,68,68,0.12)",
     border: "rgba(239,68,68,0.45)",
   },
   held_with_crews_booked: {
     label: "HELD · CREWS BOOKED",
-    fg: "#fca5a5",
+    fg: C.dangerSoft,
     bg: "rgba(239,68,68,0.12)",
     border: "rgba(239,68,68,0.45)",
   },
@@ -190,15 +190,10 @@ export default function IssuesBoard({
   const td: React.CSSProperties = {
     padding: "8px 10px",
     fontSize: 12.5,
-    borderBottom: "1px solid #191a1f",
+    borderBottom: `1px solid ${C.hairline}`,
     verticalAlign: "top",
   };
-  const chip = (active: boolean): React.CSSProperties => ({
-    padding: "3px 9px", borderRadius: 5, cursor: "pointer", font: "inherit", fontSize: 11,
-    background: active ? "#20222b" : "transparent",
-    color: active ? C.text : C.dim,
-    border: `1px solid ${active ? C.accent : C.line}`,
-  });
+  const chip = chipStyle;
   const fmtDay = (ms: number) => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
 
   const submitAck = (key: string) => {
@@ -227,7 +222,7 @@ export default function IssuesBoard({
         ))}
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, cursor: "pointer" }}>
           <input type="checkbox" checked={openOnly} onChange={(e) => setOpenOnly(e.target.checked)} />
-          open only
+          Open only
         </label>
         <span style={{ marginLeft: "auto", fontSize: 11.5, color: C.dim }}>
           {shown.length} shown · {issues.length - answeredCount} open ·{" "}
@@ -271,14 +266,14 @@ export default function IssuesBoard({
                   <div style={{ fontWeight: 600 }}>{claim(i)}</div>
                   <div style={{ color: C.dim, fontSize: 11, marginTop: 2 }}>{evidence(i)}</div>
                   {i.decision && (
-                    <div style={{ fontSize: 10.5, marginTop: 3, color: i.decision.disposition === "accepted" ? "#22c55e" : "#f59e0b" }}>
+                    <div style={{ fontSize: 10.5, marginTop: 3, color: i.decision.disposition === "accepted" ? C.ok : C.warn }}>
                       ⚖ option {i.decision.disposition} {fmtDay(i.decision.at)}
                       {i.decision.reason ? ` — ${i.decision.reason}` : ""}
                       <span style={{ color: C.dim }}> · from the space's options panel, in the ledger</span>
                     </div>
                   )}
                   {i.acknowledged && (
-                    <div style={{ fontSize: 10.5, marginTop: 3, color: "#22c55e" }}>
+                    <div style={{ fontSize: 10.5, marginTop: 3, color: C.ok }}>
                       ✓ acknowledged {fmtDay(i.acknowledged.at)}
                       {i.acknowledged.note ? ` — ${i.acknowledged.note}` : ""}
                     </div>
@@ -319,15 +314,22 @@ export default function IssuesBoard({
                       title="Open the space with its trace and options — where a decision is recorded."
                       style={{
                         font: "inherit", fontSize: 11, cursor: "pointer", padding: "3px 9px",
-                        borderRadius: 5, color: C.text, background: "#20222b",
+                        borderRadius: 5, color: C.text, background: C.raised,
                         border: `1px solid ${C.accent}`,
                       }}
                     >
                       Route to fix →
                     </button>
                   ) : (
-                    <span style={{ color: C.dim, fontSize: 11 }} title="A schedule finding — the fix is a re-sequence in the schedule of record, not a space.">
-                      re-sequence
+                    <span
+                      title="A schedule finding — the fix is a re-sequence in the schedule of record, not a space."
+                      style={{
+                        display: "inline-block", fontSize: 11, padding: "3px 9px",
+                        borderRadius: 5, color: C.dim, background: "rgba(148,163,184,0.06)",
+                        border: `1px dashed ${C.line}`,
+                      }}
+                    >
+                      re-sequence in P6
                     </span>
                   )}
                   {!i.acknowledged && (
@@ -335,12 +337,13 @@ export default function IssuesBoard({
                       onClick={() => { setAckFor(ackFor === i.key ? null : i.key); setAckNote(""); setAckErr(null); }}
                       title="Record in the audit ledger that somebody answered for this issue. Closes and hides nothing — the row stays as long as its facts hold."
                       style={{
-                        font: "inherit", fontSize: 11, cursor: "pointer", padding: "3px 9px", marginLeft: 6,
+                        font: "inherit", fontSize: 11, cursor: "pointer", padding: "3px 4px", marginLeft: 8,
                         borderRadius: 5, color: C.dim, background: "transparent",
-                        border: `1px solid ${C.line}`,
+                        border: "1px solid transparent", textDecoration: "underline",
+                        textDecorationColor: "#3a3d49", textUnderlineOffset: 3,
                       }}
                     >
-                      Acknowledge
+                      acknowledge
                     </button>
                   )}
                 </td>

@@ -24,7 +24,7 @@ import {
   type Identity,
 } from "./api";
 import { Loading } from "./Loading";
-import { C, mh } from "./theme";
+import { chipStyle, C, mh } from "./theme";
 
 const fmtTime = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
 const fmtDay = (ms: number): string => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
@@ -39,6 +39,9 @@ const fmtSlot = (w: { start: number; end: number } | null): string => {
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
+
+/** "1 activity", "4 activities" — a count that reads as written by a person. */
+const nActs = (n: number): string => `${n} ${n === 1 ? "activity" : "activities"}`;
 
 /**
  * The board's slice. "instant" is the register's own in-window mark — what is
@@ -158,12 +161,7 @@ export default function DailyOps({
     font: "inherit", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4, cursor: "pointer",
     padding: "2px 7px", borderRadius: 4, color: fg, background: bg, border: `1px solid ${border}`,
   });
-  const chip = (active: boolean): React.CSSProperties => ({
-    padding: "3px 9px", borderRadius: 5, cursor: "pointer", font: "inherit", fontSize: 11,
-    background: active ? "#20222b" : "transparent",
-    color: active ? C.text : C.dim,
-    border: `1px solid ${active ? C.accent : C.line}`,
-  });
+  const chip = chipStyle;
 
   const sliceLabel =
     win === null
@@ -180,7 +178,7 @@ export default function DailyOps({
     const rows = byTrade
       .map(
         (g) => `
-      <h2>${esc(g.trade)} <small>${g.list.length} activities · ${g.remaining.toLocaleString()} MH remaining</small></h2>
+      <h2>${esc(g.trade)} <small>${nActs(g.list.length)} · ${g.remaining.toLocaleString()} MH remaining</small></h2>
       <table>
         <tr><th>Activity</th><th>Name</th><th>Slot</th><th>Space</th><th style="text-align:right">MH left</th><th>Warnings</th></tr>
         ${g.list
@@ -220,7 +218,7 @@ export default function DailyOps({
         footer { margin-top: 18px; font-size: 10px; color: #555; }
       </style></head><body>
       <h1>Shift board — ${esc(hullLabel)}</h1>
-      <p>${esc(sliceLabel)} · ${onShift.length} activities · ${remaining.toLocaleString()} MH remaining
+      <p>${esc(sliceLabel)} · ${nActs(onShift.length)} · ${remaining.toLocaleString()} MH remaining
       ${heldCount > 0 ? ` · ${heldCount} in a space the engine refuses now` : ""}
       ${doomedCount > 0 ? ` · ${doomedCount} not executable as planned` : ""}</p>
       ${eventRows}${rows}
@@ -242,10 +240,11 @@ export default function DailyOps({
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>The shift board</h1>
       <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 780 }}>
         Every activity {win === null ? "planned" : "touching"}{" "}
-        <b style={{ color: "#ccd1da" }}>{sliceLabel}</b>
+        <b style={{ color: C.bright }}>{sliceLabel}</b>
         {win === null && " on the time control"}, by trade —{" "}
-        <b style={{ color: "#ccd1da" }}>{onShift.length}</b> activities,{" "}
-        <b style={{ color: "#ccd1da" }}>{mh(remaining)}</b> remaining in them
+        <b style={{ color: C.bright }}>{onShift.length}</b>{" "}
+        {onShift.length === 1 ? "activity" : "activities"},{" "}
+        <b style={{ color: C.bright }}>{mh(remaining)}</b> remaining in them
         {heldCount > 0 && (
           <>
             {" "}· <b style={{ color: C.danger }}>{heldCount}</b> in a space the engine refuses
@@ -254,7 +253,7 @@ export default function DailyOps({
         )}
         {doomedCount > 0 && (
           <>
-            {" "}· <b style={{ color: "#f59e0b" }}>{doomedCount}</b> not executable as planned
+            {" "}· <b style={{ color: C.warn }}>{doomedCount}</b> not executable as planned
           </>
         )}
         . Scrub the clock and the shift moves with it; the full register is on the
@@ -308,7 +307,7 @@ export default function DailyOps({
             <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "8px 12px", borderBottom: `1px solid ${C.line}` }}>
               <b style={{ fontSize: 13 }}>{g.trade}</b>
               <span style={{ fontSize: 11, color: C.dim }}>
-                {g.list.length} activities · {mh(g.remaining)} remaining
+                {nActs(g.list.length)} · {mh(g.remaining)} remaining
               </span>
             </header>
             <div>
@@ -318,15 +317,15 @@ export default function DailyOps({
                 return (
                   <div
                     key={a.activity_id}
-                    style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "6px 12px", borderBottom: "1px solid #191a1f", fontSize: 12 }}
+                    style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "6px 12px", borderBottom: `1px solid ${C.hairline}`, fontSize: 12 }}
                   >
                     <span style={{ fontFamily: "monospace", color: C.accent, whiteSpace: "nowrap" }}>{a.code}</span>
                     <span style={{ flex: 1, minWidth: 120 }}>
                       {a.name}
-                      <span style={{ color: C.dim, marginLeft: 8, fontFamily: "monospace", fontSize: 10 }}>
+                      <span style={{ color: C.dim, marginLeft: 8, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>
                         {fmtSlot(a.planned)}
                         {a.planned === null && (
-                          <span title="No dates in the schedule of record — counted into every shift rather than hidden from all of them." style={{ color: "#f59e0b" }}>
+                          <span title="No dates in the schedule of record — counted into every shift rather than hidden from all of them." style={{ color: C.warn }}>
                             {" "}⚠
                           </span>
                         )}
@@ -348,10 +347,10 @@ export default function DailyOps({
                         }
                         style={
                           heldNow
-                            ? badge("#fca5a5", "rgba(239,68,68,0.12)", "rgba(239,68,68,0.45)")
+                            ? badge(C.dangerSoft, "rgba(239,68,68,0.12)", "rgba(239,68,68,0.45)")
                             : {
                                 font: "inherit", fontSize: 10, fontFamily: "monospace", cursor: "pointer",
-                                padding: "1px 5px", borderRadius: 4, color: "#ccd1da",
+                                padding: "1px 5px", borderRadius: 4, color: C.bright,
                                 background: "rgba(148,163,184,0.08)", border: `1px solid ${C.line}`,
                               }
                         }
@@ -360,7 +359,7 @@ export default function DailyOps({
                         {heldNow ? `HELD · ${a.compartment_no}` : a.compartment_no}
                       </button>
                     ) : (
-                      <span style={{ fontSize: 10, color: "#f59e0b" }} title="The schedule did not say where.">
+                      <span style={{ fontSize: 10, color: C.warn }} title="The schedule did not say where.">
                         not located
                       </span>
                     )}

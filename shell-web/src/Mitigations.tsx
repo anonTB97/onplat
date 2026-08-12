@@ -208,7 +208,7 @@ export default function Mitigations({
             Work may proceed here. {advisories.length} condition
             {advisories.length === 1 ? " is" : "s are"} flagged, not holding:
             {advisories.map((h) => (
-              <div key={`${h.rule_code}-${h.origin}`} style={{ color: "#ccd1da", marginTop: 3 }}>
+              <div key={`${h.rule_code}-${h.origin}`} style={{ color: C.bright, marginTop: 3 }}>
                 <span style={{ fontFamily: "monospace", color: STATE_STYLE.WARN.fg }}>
                   {h.rule_code}
                 </span>{" "}
@@ -256,7 +256,7 @@ export default function Mitigations({
             .map((h) => (
             <div
               key={`${h.rule_code}-${h.origin}-${h.hazard}`}
-              style={{ fontSize: 11.5, color: "#ccd1da", padding: "3px 0" }}
+              style={{ fontSize: 11.5, color: C.bright, padding: "3px 0" }}
             >
               <span style={{ fontFamily: "monospace", color: C.dim }}>{h.rule_code}</span>{" "}
               {h.hazard} <span style={{ color: C.dim }}>at {h.origin}</span>
@@ -297,7 +297,7 @@ export default function Mitigations({
 
             {/* Benefit and harm at the same weight, side by side. */}
             <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
-              <span style={chip("#22c55e", "rgba(34,197,94,0.12)", "rgba(34,197,94,0.4)")}>
+              <span style={chip(C.ok, "rgba(34,197,94,0.12)", "rgba(34,197,94,0.4)")}>
                 +{mh(o.effect.freed_hours)} · {o.effect.frees.length} space
                 {o.effect.frees.length === 1 ? "" : "s"}
               </span>
@@ -378,13 +378,13 @@ export default function Mitigations({
             Cheapest plan — all {data.combined.actions.length} together
           </div>
           {data.combined.actions.map((a, i) => (
-            <div key={`${a.kind}-${i}`} style={{ fontSize: 11.5, color: "#ccd1da", marginTop: 3 }}>
+            <div key={`${a.kind}-${i}`} style={{ fontSize: 11.5, color: C.bright, marginTop: 3 }}>
               {i + 1}. {actionTitle(a)}{" "}
               <span style={{ color: C.dim }}>({actionActor(a)})</span>
             </div>
           ))}
           <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <span style={chip("#22c55e", "rgba(34,197,94,0.12)", "rgba(34,197,94,0.4)")}>
+            <span style={chip(C.ok, "rgba(34,197,94,0.12)", "rgba(34,197,94,0.4)")}>
               +{mh(data.combined.effect.freed_hours)} · {data.combined.effect.frees.length} space
               {data.combined.effect.frees.length === 1 ? "" : "s"}
             </span>
@@ -417,7 +417,7 @@ export default function Mitigations({
           </div>
           {redeploy.map((r) => (
             <div key={r.trade} style={{ fontSize: 11.5, marginTop: 5 }}>
-              <span style={{ color: "#ccd1da", fontWeight: 600 }}>{r.trade}</span>
+              <span style={{ color: C.bright, fontWeight: 600 }}>{r.trade}</span>
               <span style={{ color: C.dim }}> — {mh(r.hours)} open to them elsewhere</span>
               <div style={{ marginTop: 2 }}>
                 {r.spaces.map((sp) => (
@@ -428,7 +428,7 @@ export default function Mitigations({
                     style={{
                       font: "inherit", fontSize: 10.5, fontFamily: "monospace",
                       margin: "0 4px 3px 0", padding: "1px 5px", borderRadius: 4, cursor: "pointer",
-                      color: "#22c55e", background: "rgba(34,197,94,0.10)",
+                      color: C.ok, background: "rgba(34,197,94,0.10)",
                       border: "1px solid rgba(34,197,94,0.35)",
                     }}
                   >
@@ -460,15 +460,15 @@ export default function Mitigations({
               // itself worth seeing.
             }
             return (
-              <div key={d.entry_hash} style={{ fontSize: 11, padding: "4px 0", borderBottom: "1px solid #191a1f" }}>
+              <div key={d.entry_hash} style={{ fontSize: 11, padding: "4px 0", borderBottom: `1px solid ${C.hairline}` }}>
                 <span style={chip(
-                  accepted ? "#22c55e" : C.dim,
+                  accepted ? C.ok : C.dim,
                   accepted ? "rgba(34,197,94,0.12)" : "rgba(110,116,128,0.12)",
                   accepted ? "rgba(34,197,94,0.4)" : "rgba(110,116,128,0.35)",
                 )}>
                   {accepted ? "ACCEPTED" : "REJECTED"}
                 </span>{" "}
-                <span style={{ color: "#ccd1da" }}>
+                <span style={{ color: C.bright }}>
                   {parsed.option?.action ? actionTitle(parsed.option.action) : "an option"}
                 </span>
                 {parsed.reason ? <span style={{ color: C.dim }}> — {parsed.reason}</span> : null}

@@ -118,7 +118,7 @@ export default function LeverageBoard({
   const td: React.CSSProperties = {
     padding: "8px 10px",
     fontSize: 12.5,
-    borderBottom: "1px solid #191a1f",
+    borderBottom: `1px solid ${C.hairline}`,
     verticalAlign: "top",
   };
 
@@ -162,7 +162,7 @@ export default function LeverageBoard({
             style={{
               font: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer",
               padding: "5px 14px", borderRadius: 6,
-              background: tab === id ? "#20222b" : "transparent",
+              background: tab === id ? C.raised : "transparent",
               color: tab === id ? C.text : C.dim,
               border: `1px solid ${tab === id ? C.accent : C.line}`,
             }}
@@ -198,7 +198,7 @@ export default function LeverageBoard({
         <>
           <p style={{ fontSize: 12.5, margin: "0 0 10px" }}>
             <b>{actions.length}</b> action{actions.length === 1 ? "" : "s"} available ·{" "}
-            <b style={{ color: "#22c55e" }}>{mh(recoverable)}</b> recoverable in total.
+            <b style={{ color: C.ok }}>{mh(recoverable)}</b> recoverable in total.
             {/* Deliberately not called "recoverable if you do everything": the sets
                 overlap, so the actions are alternatives as often as they are
                 additions and summing them would double-count. */}
@@ -235,7 +235,7 @@ export default function LeverageBoard({
                         {i + 1}
                       </td>
                       <td style={{ ...td, fontWeight: 600 }}>{actionTitle(m.action)}</td>
-                      <td style={{ ...td, color: m.action.kind === "wait" ? "#22c55e" : "#ccd1da" }}>
+                      <td style={{ ...td, color: m.action.kind === "wait" ? C.ok : C.bright }}>
                         {actor(m.action)}
                       </td>
                       <td style={{ ...td, fontFamily: "monospace", fontSize: 11 }}>
@@ -247,7 +247,7 @@ export default function LeverageBoard({
                           textAlign: "right",
                           fontVariantNumeric: "tabular-nums",
                           fontWeight: 700,
-                          color: net > 0 ? "#22c55e" : C.dim,
+                          color: net > 0 ? C.ok : C.dim,
                         }}
                       >
                         {mh(net)}
@@ -273,7 +273,7 @@ export default function LeverageBoard({
                               padding: "1px 5px",
                               borderRadius: 4,
                               cursor: "pointer",
-                              color: "#22c55e",
+                              color: C.ok,
                               background: "rgba(34,197,94,0.10)",
                               border: "1px solid rgba(34,197,94,0.35)",
                             }}

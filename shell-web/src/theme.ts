@@ -106,12 +106,106 @@ export function overlayBucket(row: {
 export const C = {
   bg: "#0b0c0e",
   panel: "#121316",
+  /** Inset canvases — the wells drawings and boards sit in. */
+  well: "#0e0f13",
+  /** Active-control fill: a chip that is ON, a row that is OPEN. */
+  raised: "#20222b",
   line: "#2b2d36",
+  /** Row separators inside tables — quieter than a panel border. */
+  hairline: "#191a1f",
   rail: "linear-gradient(180deg,#0f2238 0%,#0b1830 100%)",
   text: "#f2f3f6",
+  /** Emphasised secondary text — the bold half of a stat sentence. */
+  bright: "#ccd1da",
   dim: "#94a3b8",
+  /** De-emphasised annotations: rulers, provenance, counts of nothing. */
+  subtle: "#6e7480",
+  /** The faintest legible text — watermark-grade labels. */
+  faint: "#4b5060",
   accent: "#3D6BFF",
+  ok: "#22c55e",
+  warn: "#f59e0b",
   danger: "#f87171",
+  /** Danger's soft foreground — badge text on a translucent red fill. */
+  dangerSoft: "#fca5a5",
+};
+
+/* --------------------------------------------------------------- primitives */
+// The controls a user touches on every board, defined once. A chip that
+// changes padding, radius or font size as the reader moves between adjacent
+// modules reads as a different product per screen — these exist so
+// consistency is the default rather than a copy-paste discipline.
+
+/** A selectable filter/toggle chip. One geometry, one active treatment. */
+export const chipStyle = (active: boolean): React.CSSProperties => ({
+  padding: "3px 9px",
+  borderRadius: 5,
+  cursor: "pointer",
+  font: "inherit",
+  fontSize: 11,
+  background: active ? C.raised : "transparent",
+  color: active ? C.text : C.dim,
+  border: `1px solid ${active ? C.accent : C.line}`,
+});
+
+/** A static state badge — ALL-CAPS, coloured by what it claims. */
+export const badgeStyle = (tone: { fg: string; bg: string; border: string }): React.CSSProperties => ({
+  fontSize: 9.5,
+  fontWeight: 700,
+  letterSpacing: 0.4,
+  padding: "2px 7px",
+  borderRadius: 4,
+  color: tone.fg,
+  background: tone.bg,
+  border: `1px solid ${tone.border}`,
+});
+
+/** A square icon button — zoom, reset, close. */
+export const iconBtnStyle: React.CSSProperties = {
+  width: 24,
+  height: 20,
+  borderRadius: 5,
+  cursor: "pointer",
+  background: "transparent",
+  color: C.dim,
+  border: `1px solid ${C.line}`,
+  font: "inherit",
+  fontSize: 9,
+  lineHeight: 1,
+  padding: 0,
+};
+
+/** Table header cell, shared by every board. */
+export const thStyle: React.CSSProperties = {
+  textAlign: "left",
+  padding: "6px 10px",
+  fontSize: 10,
+  letterSpacing: 0.6,
+  textTransform: "uppercase",
+  color: C.dim,
+  borderBottom: `1px solid ${C.line}`,
+  whiteSpace: "nowrap",
+};
+
+/** Table data cell, shared by every board. */
+export const tdStyle: React.CSSProperties = {
+  padding: "7px 10px",
+  fontSize: 12.5,
+  borderBottom: `1px solid ${C.hairline}`,
+  verticalAlign: "top",
+};
+
+/**
+ * Activity status, one palette for every surface: `fg` for text and chips,
+ * `fill` for solid shapes like Gantt bars — linked here so they cannot drift.
+ */
+export const ACTIVITY_STATUS: Record<
+  "not_started" | "in_progress" | "complete",
+  { fg: string; fill: string }
+> = {
+  not_started: { fg: "#94a3b8", fill: "#475569" },
+  in_progress: { fg: "#3D6BFF", fill: "#3D6BFF" },
+  complete: { fg: "#22c55e", fill: "#1f7a44" },
 };
 
 /** Man-hours, grouped — these numbers are read aloud in a production meeting. */

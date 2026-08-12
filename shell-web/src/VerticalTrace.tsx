@@ -211,7 +211,7 @@ export function VerticalTrace({
   }
 
   return (
-    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
+    <div style={{ border: `1px solid ${LINE}`, borderRadius: 8, background: C.well, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderBottom: `1px solid ${LINE}`, fontSize: 11, fontWeight: 600, flexWrap: "wrap" }}>
         {/* Not "deck above, selected, below" unconditionally: at either end of the
             register the window slides, so the selected deck is the top or bottom
@@ -282,7 +282,7 @@ export function VerticalTrace({
                 style={{
                   display: "flex", alignItems: "center", gap: 5, width: "100%", textAlign: "left",
                   font: "inherit", fontSize: 10, cursor: "pointer", padding: "3px 8px",
-                  background: isCentre ? "#20222b" : "transparent",
+                  background: isCentre ? C.raised : "transparent",
                   color: onScreen ? C.text : "#5a6070",
                   border: "none",
                   borderLeft: `3px solid ${isCentre ? C.accent : onScreen ? "#353842" : "transparent"}`,
@@ -348,7 +348,7 @@ export function VerticalTrace({
             const levels = laneLevels(lane.rows, fSpan / zoom);
             return (
               <g key={lane.deck.code}>
-                <rect x={0} y={lane.top} width={W} height={LANE_H} fill={isCentre ? "#141720" : "#0e0f13"} />
+                <rect x={0} y={lane.top} width={W} height={LANE_H} fill={isCentre ? "#141720" : C.well} />
                 {/* The deck's own band of substrate, so the gutter reads as a
                     separation rather than as part of the drawing. */}
                 <rect
@@ -378,11 +378,11 @@ export function VerticalTrace({
                   fill="none" stroke={isCentre ? C.accent : "#3d4253"} strokeWidth={isCentre ? 1.6 : 1}
                   opacity={isCentre ? 0.85 : 1}
                 />
-                <rect x={0} y={lane.top} width={LABEL_W} height={LANE_H} fill={isCentre ? "#141720" : "#0e0f13"} />
+                <rect x={0} y={lane.top} width={LABEL_W} height={LANE_H} fill={isCentre ? "#141720" : C.well} />
                 <text x={8} y={lane.top + 15} fill={isCentre ? C.text : DIM} fontSize={10.5} fontWeight={600}>
                   {lane.deck.label}
                 </text>
-                <text x={8} y={lane.top + 27} fill="#4b5060" fontSize={8.5}>
+                <text x={8} y={lane.top + 27} fill={C.faint} fontSize={8.5}>
                   {lane.rows.length === 0 ? "no spaces" : `${lane.rows.length} space${lane.rows.length === 1 ? "" : "s"}`}
                 </text>
 
@@ -464,16 +464,16 @@ export function VerticalTrace({
             <line x1={LABEL_W} y1={lanes.length * LANE_H} x2={W} y2={lanes.length * LANE_H} stroke="#2b2d36" />
             {frameTicks(fLo, fHi).map((f) => (
               <g key={f}>
-                <line x1={xOf(f)} y1={lanes.length * LANE_H} x2={xOf(f)} y2={lanes.length * LANE_H + 4} stroke="#4b5060" />
-                <text x={xOf(f)} y={lanes.length * LANE_H + 20} fill="#6e7480" fontSize={8.5} textAnchor="middle" fontFamily="monospace">
+                <line x1={xOf(f)} y1={lanes.length * LANE_H} x2={xOf(f)} y2={lanes.length * LANE_H + 4} stroke={C.faint} />
+                <text x={xOf(f)} y={lanes.length * LANE_H + 20} fill={C.subtle} fontSize={8.5} textAnchor="middle" fontFamily="monospace">
                   {f}
                 </text>
               </g>
             ))}
-            <text x={W - 2} y={lanes.length * LANE_H + 20} fill="#4b5060" fontSize={8} textAnchor="end">
+            <text x={W - 2} y={lanes.length * LANE_H + 20} fill={C.faint} fontSize={8} textAnchor="end">
               bow →
             </text>
-            <text x={LABEL_W + 2} y={lanes.length * LANE_H + 20} fill="#4b5060" fontSize={8}>
+            <text x={LABEL_W + 2} y={lanes.length * LANE_H + 20} fill={C.faint} fontSize={8}>
               frame
             </text>
           </g>

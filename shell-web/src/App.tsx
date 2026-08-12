@@ -269,7 +269,7 @@ export default function App() {
       )}
 
       {/* breadcrumb */}
-      <div style={{ display: "flex", gap: 9, alignItems: "center", padding: "7px 16px", borderBottom: "1px solid #191a1f", fontSize: 11.5, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 9, alignItems: "center", padding: "7px 16px", borderBottom: `1px solid ${C.hairline}`, fontSize: 11.5, flexWrap: "wrap" }}>
         {outOfScope && (
           <span style={{ padding: "2px 9px", borderRadius: 4, border: "1px solid rgba(220,38,38,0.45)", background: "rgba(220,38,38,0.14)", color: C.danger, fontFamily: "monospace", fontWeight: 700 }}>
             OUT OF SCOPE — not assigned to you
@@ -282,7 +282,7 @@ export default function App() {
           Portfolio
         </button>
         <span style={{ color: "#424656" }}>▸</span>
-        <span style={{ color: "#ccd1da" }}>{hullLabel}</span>
+        <span style={{ color: C.bright }}>{hullLabel}</span>
         <span style={{ color: "#424656" }}>▸</span>
         <span style={{ color: C.accent, fontWeight: 600 }}>{module.label}</span>
 
@@ -300,7 +300,7 @@ export default function App() {
                 ? "Every state on screen was evaluated by the engine AT this instant — a real decision with a real trace, not an interpolation of the live one."
                 : "Authorization is evaluated per request against the hull's live hazards; nothing here is cached"
             }
-            style={{ color: projecting ? "#f59e0b" : undefined }}
+            style={{ color: projecting ? C.warn : undefined }}
           >
             engine · {projecting && frame ? `as of ${fmtInstant(asOf ?? frame.now, horizon)}` : "evaluated live"}
           </span>
@@ -308,7 +308,7 @@ export default function App() {
           <button
             onClick={() => setWall(!wall)}
             title="POD-board presentation — larger type for a ship wall display or 10-ft viewing"
-            style={{ background: wall ? "#20222b" : "transparent", border: `1px solid ${wall ? C.accent : C.line}`, borderRadius: 5, padding: "2px 8px", font: "inherit", fontSize: 11, color: wall ? C.text : C.dim, cursor: "pointer" }}
+            style={{ background: wall ? C.raised : "transparent", border: `1px solid ${wall ? C.accent : C.line}`, borderRadius: 5, padding: "2px 8px", font: "inherit", fontSize: 11, color: wall ? C.text : C.dim, cursor: "pointer" }}
           >
             ⛶ {wall ? "Wall display on" : "Wall display"}
           </button>
@@ -361,7 +361,7 @@ export default function App() {
               style={{
                 position: "sticky", top: MARKING_H + 6, zIndex: 30, marginBottom: 8,
                 font: "inherit", fontSize: 12, cursor: "pointer", padding: "5px 12px",
-                borderRadius: 6, background: "#20222b", color: C.text,
+                borderRadius: 6, background: C.raised, color: C.text,
                 border: `1px solid ${C.accent}`, boxShadow: "0 6px 18px rgba(0,0,0,0.4)",
               }}
             >

@@ -262,7 +262,7 @@ export function TimeControl({
   };
 
   const chip = (active: boolean): React.CSSProperties => ({
-    background: active ? "#20222b" : "transparent",
+    background: active ? C.raised : "transparent",
     border: `1px solid ${active ? C.accent : C.line}`,
     borderRadius: 5,
     padding: "3px 9px",
@@ -334,10 +334,10 @@ export function TimeControl({
               onPlaying(false);
               onAsOf(snap(Number(e.target.value), w, def.step));
             }}
-            style={{ flex: 1, minWidth: 180, accentColor: projecting ? "#f59e0b" : C.accent }}
+            style={{ flex: 1, minWidth: 180, accentColor: projecting ? C.warn : C.accent }}
           />
 
-          <span style={{ fontFamily: "monospace", color: projecting ? "#f59e0b" : "#ccd1da" }}>
+          <span style={{ fontFamily: "monospace", color: projecting ? C.warn : C.bright }}>
             {fmtInstant(at, horizon)}
           </span>
           <span style={{ fontFamily: "monospace", color: C.dim, minWidth: 42 }}>
@@ -361,7 +361,7 @@ export function TimeControl({
                 borderRadius: 4,
                 border: "1px solid rgba(245,158,11,0.55)",
                 background: "rgba(245,158,11,0.13)",
-                color: "#f59e0b",
+                color: C.warn,
                 fontFamily: "monospace",
                 fontWeight: 700,
                 fontSize: 10.5,

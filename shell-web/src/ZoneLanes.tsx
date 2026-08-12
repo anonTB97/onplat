@@ -28,7 +28,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Activity, DeckStateRow, ScheduleEdge } from "./api";
 import { wheelFactor, windowPan, windowZoomAt, type TimeWindow } from "./camera";
-import { C, mh, zoneColour } from "./theme";
+import { ACTIVITY_STATUS, C, mh, zoneColour } from "./theme";
 
 const W = 1240;
 const GUTTER_W = 225;
@@ -41,9 +41,9 @@ const DAY = 86_400_000;
 const MIN_SPAN = DAY;
 
 const STATUS_FILL: Record<Activity["status"], string> = {
-  not_started: "#475569",
-  in_progress: "#3D6BFF",
-  complete: "#1f7a44",
+  not_started: ACTIVITY_STATUS.not_started.fill,
+  in_progress: ACTIVITY_STATUS.in_progress.fill,
+  complete: ACTIVITY_STATUS.complete.fill,
 };
 
 /** How much of the logic to draw. Inversions never hide behind "off"‑by‑default. */
@@ -178,7 +178,9 @@ export function ZoneLanes({
     top += lane.h;
     return lane;
   });
-  const H = top + 6;
+  // A bottom strip: the last lane must not clip at the panel edge, and the
+  // as-of label needs ground of its own instead of overlapping lane content.
+  const H = top + 22;
 
   // Where each coded thing sits, for the logic arrows: bars mid-height, key
   // events at their diamond. Held in time units and mapped through x() at
@@ -209,7 +211,7 @@ export function ZoneLanes({
   const fmtDay = (ms: number) => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
 
   return (
-    <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: "#0e0f13", overflowX: "auto" }}>
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.well, overflowX: "auto" }}>
       <ZoomWheel svgRef={svgRef} winRef={winRef} fullRef={fullRef} setView={setView} />
       <svg
         ref={svgRef}
@@ -244,15 +246,15 @@ export function ZoneLanes({
             <path d="M 0 0.5 L 8 4 L 0 7.5 z" fill="#5b6272" />
           </marker>
           <marker id="dep-arrow-neg" viewBox="0 0 8 8" refX={7} refY={4} markerWidth={6} markerHeight={6} orient="auto-start-reverse">
-            <path d="M 0 0.5 L 8 4 L 0 7.5 z" fill="#ef4444" />
+            <path d="M 0 0.5 L 8 4 L 0 7.5 z" fill={C.danger} />
           </marker>
         </defs>
 
         {/* Lane backgrounds first — they span the gutter too. */}
         {lanes.map((lane, i) => (
           <g key={lane.zone}>
-            <rect x={0} y={lane.top} width={W} height={lane.h} fill={i % 2 === 0 ? "#101118" : "#0e0f13"} />
-            <rect x={0} y={lane.top} width={5} height={lane.h} fill={lane.zone === "unzoned" ? "#4b5060" : zoneColour(lane.zone)} opacity={0.85} />
+            <rect x={0} y={lane.top} width={W} height={lane.h} fill={i % 2 === 0 ? "#101118" : C.well} />
+            <rect x={0} y={lane.top} width={5} height={lane.h} fill={lane.zone === "unzoned" ? C.faint : zoneColour(lane.zone)} opacity={0.85} />
             {/* The zone manager's gutter: this week, in numbers. */}
             <text x={12} y={lane.top + 14} fill={C.text} fontSize={10.5} fontWeight={700}>
               {lane.zone === "unzoned" ? "No zone (unlocated)" : lane.zone}
@@ -260,7 +262,7 @@ export function ZoneLanes({
             <text x={12} y={lane.top + 26} fill="#8b93a2" fontSize={8.5}>
               {`next 7d: ${lane.weekCount} act · ${mh(lane.weekHours)}`}
             </text>
-            <text x={12} y={lane.top + 37} fill={lane.refused > 0 || lane.heldSpaces > 0 ? "#f87171" : "#4b5060"} fontSize={8.5}>
+            <text x={12} y={lane.top + 37} fill={lane.refused > 0 || lane.heldSpaces > 0 ? "#f87171" : C.faint} fontSize={8.5}>
               {`${lane.refused} not executable · ${lane.heldSpaces} spaces held now`}
             </text>
           </g>
@@ -277,7 +279,7 @@ export function ZoneLanes({
           {ticks.map((t) => (
             <g key={t}>
               <line x1={x(t)} y1={AXIS_H - 8} x2={x(t)} y2={H} stroke="#1d1f28" />
-              <text x={x(t) + 3} y={AXIS_H - 12} fill="#6e7480" fontSize={8.5} fontFamily="monospace">
+              <text x={x(t) + 3} y={AXIS_H - 12} fill={C.subtle} fontSize={8.5} fontFamily="monospace">
                 {fmtDay(t)}
               </text>
             </g>
@@ -329,7 +331,7 @@ export function ZoneLanes({
                       x={bx} y={by} width={bw} height={ROW_H - 4} rx={2}
                       fill={STATUS_FILL[b.a.status]}
                       opacity={0.92}
-                      stroke={doomed ? "#ef4444" : hinted ? "#f59e0b" : "none"}
+                      stroke={doomed ? C.danger : hinted ? C.warn : "none"}
                       strokeWidth={doomed ? 1.4 : hinted ? 1 : 0}
                       strokeDasharray={hinted && !doomed ? "3 2" : undefined}
                     />
@@ -364,7 +366,7 @@ export function ZoneLanes({
                 <path
                   d={`M ${px} ${p.y} C ${px + reach} ${p.y}, ${sx - reach} ${s.y}, ${sx} ${s.y}`}
                   fill="none"
-                  stroke={neg ? "#ef4444" : "#5b6272"}
+                  stroke={neg ? C.danger : "#5b6272"}
                   strokeWidth={neg ? 1.5 : 0.8}
                   opacity={neg ? 0.95 : 0.4}
                   markerEnd={neg ? "url(#dep-arrow-neg)" : "url(#dep-arrow)"}
@@ -373,7 +375,7 @@ export function ZoneLanes({
                   <text
                     x={(px + sx) / 2}
                     y={(p.y + s.y) / 2 - 4}
-                    fill="#ef4444"
+                    fill={C.danger}
                     fontSize={8.5}
                     fontWeight={700}
                     fontFamily="monospace"
@@ -402,13 +404,13 @@ export function ZoneLanes({
         <span><span style={{ color: STATUS_FILL.in_progress }}>■</span> in progress</span>
         <span><span style={{ color: STATUS_FILL.not_started }}>■</span> not started</span>
         <span><span style={{ color: STATUS_FILL.complete }}>■</span> complete</span>
-        <span><span style={{ color: "#ef4444" }}>▭</span> not executable as planned</span>
+        <span><span style={{ color: C.danger }}>▭</span> not executable as planned</span>
         <span title="Unlocated work whose WBS bucket names this zone — placed at zone grain, nothing finer.">
-          <span style={{ color: "#f59e0b" }}>▤</span> placed by WBS hint
+          <span style={{ color: C.warn }}>▤</span> placed by WBS hint
         </span>
         <span><span style={{ color: "#5b6272" }}>⟶</span> finish-to-start</span>
         <span title="The successor starts before its predecessor finishes — an overlap written into the schedule's own logic.">
-          <span style={{ color: "#ef4444" }}>⟶</span> negative lag{inversions > 0 ? ` (${inversions})` : ""}
+          <span style={{ color: C.danger }}>⟶</span> negative lag{inversions > 0 ? ` (${inversions})` : ""}
         </span>
         <span><span style={{ color: C.accent }}>◆</span> key event</span>
         <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
@@ -441,12 +443,12 @@ export function ZoneLanes({
               }
               style={{
                 font: "inherit", fontSize: 10, padding: "2px 8px", borderRadius: 5, cursor: "pointer",
-                background: logic === m ? "#20222b" : "transparent",
+                background: logic === m ? C.raised : "transparent",
                 color: logic === m ? C.text : C.dim,
                 border: `1px solid ${logic === m ? C.accent : C.line}`,
               }}
             >
-              {m === "all" ? "logic: all" : m === "inversions" ? "inversions" : "logic off"}
+              {m === "all" ? "Logic: all" : m === "inversions" ? "Inversions only" : "Logic off"}
             </button>
           ))}
           {view !== null && (

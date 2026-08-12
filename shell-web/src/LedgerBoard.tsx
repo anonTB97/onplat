@@ -20,13 +20,13 @@ import { C } from "./theme";
 const ACTION_STYLE: Record<string, { label: string; fg: string; bg: string; border: string }> = {
   MITIGATION_ACCEPTED: {
     label: "OPTION ACCEPTED",
-    fg: "#22c55e",
+    fg: C.ok,
     bg: "rgba(34,197,94,0.10)",
     border: "rgba(34,197,94,0.45)",
   },
   MITIGATION_REJECTED: {
     label: "OPTION REJECTED",
-    fg: "#f59e0b",
+    fg: C.warn,
     bg: "rgba(245,158,11,0.10)",
     border: "rgba(245,158,11,0.4)",
   },
@@ -107,7 +107,7 @@ export default function LedgerBoard({
   const td: React.CSSProperties = {
     padding: "7px 10px",
     fontSize: 12,
-    borderBottom: "1px solid #191a1f",
+    borderBottom: `1px solid ${C.hairline}`,
     verticalAlign: "top",
   };
 
@@ -126,7 +126,7 @@ export default function LedgerBoard({
 
       {/* The verdict, before the entries. */}
       {report.verified ? (
-        <div style={{ display: "inline-flex", gap: 8, alignItems: "center", padding: "6px 12px", marginBottom: 12, borderRadius: 7, fontSize: 12, color: "#22c55e", background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.4)" }}>
+        <div style={{ display: "inline-flex", gap: 8, alignItems: "center", padding: "6px 12px", marginBottom: 12, borderRadius: 7, fontSize: 12, color: C.ok, background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.4)" }}>
           ✓ chain verifies — {report.entries.length}{" "}
           {report.entries.length === 1 ? "entry" : "entries"}, re-hashed end to end on this read
         </div>
@@ -181,7 +181,7 @@ export default function LedgerBoard({
                             title="Open the space this record is about"
                             style={{
                               font: "inherit", fontSize: 10.5, fontFamily: "monospace", cursor: "pointer",
-                              padding: "1px 6px", borderRadius: 4, color: "#ccd1da",
+                              padding: "1px 6px", borderRadius: 4, color: C.bright,
                               background: "rgba(148,163,184,0.08)", border: `1px solid ${C.line}`,
                             }}
                           >
@@ -191,9 +191,9 @@ export default function LedgerBoard({
                           <span style={{ color: C.dim }}>{e.subject_ref ?? "—"}</span>
                         )}
                       </td>
-                      <td style={{ ...td, minWidth: 240, color: "#ccd1da" }}>{summarise(e)}</td>
+                      <td style={{ ...td, minWidth: 240, color: C.bright }}>{summarise(e)}</td>
                       <td
-                        style={{ ...td, whiteSpace: "nowrap", fontFamily: "monospace", fontSize: 10, color: "#4b5060", width: 110 }}
+                        style={{ ...td, whiteSpace: "nowrap", fontFamily: "monospace", fontSize: 10, color: C.faint, width: 110 }}
                         title={`entry ${e.entry_hash}\nprev  ${e.prev_hash ?? "genesis"}`}
                       >
                         {e.entry_hash.slice(0, 10)}…

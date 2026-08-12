@@ -62,7 +62,7 @@ function Row({
         color: C.text,
         cursor: "pointer",
         padding: "7px 11px",
-        background: selected ? "#20222b" : "transparent",
+        background: selected ? C.raised : "transparent",
         border: "none",
         // The accent is a left edge rather than a full border: it reads as "you
         // are here" down a long list without boxing every row.

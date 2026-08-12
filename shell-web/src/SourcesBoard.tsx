@@ -76,7 +76,7 @@ export default function SourcesBoard({
         Data Sources · {hullLabel}
       </div>
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>What this hull is built from</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 800 }}>
+      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 780 }}>
         Every document behind the screens, with how much of it landed and how much
         of what landed is authored versus guessed. Each card reads the same
         endpoint its home screen reads, so this panel cannot disagree with the
@@ -104,7 +104,7 @@ export default function SourcesBoard({
                         : ""
                     }`
                   : ""),
-              tone: m.unlocated.length > 0 ? C.danger : m.located_derived.length > 0 ? "#f59e0b" : "#22c55e",
+              tone: m.unlocated.length > 0 ? C.danger : m.located_derived.length > 0 ? C.warn : C.ok,
               gloss:
                 m.located_derived.length > 0
                   ? `Read from task names: ${m.located_derived.map((d) => `${d.activity} → ${d.compartment}`).join(", ")} — graded guesses, marked ≈ wherever they appear.`
@@ -120,7 +120,7 @@ export default function SourcesBoard({
               text: mismatches.length > 0
                 ? `hours do not reconcile: ${mismatches.map((x) => x.code).join(", ")}`
                 : "hours reconcile with the work items",
-              tone: mismatches.length > 0 ? "#f59e0b" : "#22c55e",
+              tone: mismatches.length > 0 ? C.warn : C.ok,
               gloss: register.schedule_source
                 ? "For an ingested schedule this is a report, not a property — the honest account of what the export covers."
                 : "True by construction for the generated register; a test pins it.",
@@ -160,11 +160,11 @@ export default function SourcesBoard({
                     text: oob.length > 0
                       ? `register disagrees: ${oob.map((o) => `${o.compartment} (Fr ${o.frame} vs ${o.zone} ${o.lo_frame}–${o.hi_frame})`).join(" · ")}`
                       : "register agrees with the chart",
-                    tone: oob.length > 0 ? C.danger : "#22c55e",
+                    tone: oob.length > 0 ? C.danger : C.ok,
                     gloss: "One of the two documents is wrong; the tool's job is to say so, not to pick.",
                   },
                   ...(zones.audit.unbounded_zones.length > 0
-                    ? [{ text: `chart does not bound ${zones.audit.unbounded_zones.join(", ")}`, tone: "#f59e0b" }]
+                    ? [{ text: `chart does not bound ${zones.audit.unbounded_zones.join(", ")}`, tone: C.warn }]
                     : []),
                 ]
               : []),
@@ -198,7 +198,7 @@ export default function SourcesBoard({
               text: mismatches.length > 0
                 ? `register disagrees on: ${mismatches.map((x) => x.code).join(", ")}`
                 : "register agrees",
-              tone: mismatches.length > 0 ? "#f59e0b" : "#22c55e",
+              tone: mismatches.length > 0 ? C.warn : C.ok,
             },
           ]}
           importHint="Import a budget CSV on Work Orders"
@@ -232,7 +232,7 @@ export default function SourcesBoard({
       </div>
 
       {msg && (
-        <p style={{ fontSize: 11.5, marginTop: 10, color: msg.startsWith("✓") ? "#22c55e" : C.danger }}>{msg}</p>
+        <p style={{ fontSize: 11.5, marginTop: 10, color: msg.startsWith("✓") ? C.ok : C.danger }}>{msg}</p>
       )}
     </div>
   );
@@ -283,7 +283,7 @@ function SourceCard({
         )}
       </header>
       <div style={{ padding: "9px 12px", display: "flex", flexDirection: "column", gap: 5 }}>
-        <div style={{ fontSize: 12, color: "#ccd1da", fontFamily: "monospace", wordBreak: "break-all" }}>{name}</div>
+        <div style={{ fontSize: 12, color: C.bright, fontFamily: "monospace", wordBreak: "break-all" }}>{name}</div>
         {lines.map((l) => (
           <div key={l.text} style={{ fontSize: 11.5, color: l.tone ?? C.dim }} title={l.gloss}>
             {l.text}

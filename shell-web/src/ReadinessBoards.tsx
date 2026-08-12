@@ -81,7 +81,7 @@ function Holders({ group }: { group: ReadinessGroup }) {
           <span style={{ fontVariantNumeric: "tabular-nums", color: READINESS_STYLE.held.fg, fontWeight: 700, minWidth: 82 }}>
             {mh(h.hours)}
           </span>
-          <span>waiting on <b style={{ color: "#ccd1da" }}>{h.authority || "unnamed authority"}</b></span>
+          <span>waiting on <b style={{ color: C.bright }}>{h.authority || "unnamed authority"}</b></span>
           <span style={{ color: DIM }}>
             ({h.spaces} {h.spaces === 1 ? "space" : "spaces"})
           </span>
@@ -127,7 +127,7 @@ function WorstSpaces({ spaces, onDrill }: { spaces: HeldSpace[]; onDrill: (d: Dr
           </div>
           <div style={{ fontSize: 11, color: DIM, marginTop: 2 }}>
             {s.trades.join(" · ") || "no trade recorded"} — cleared by{" "}
-            <b style={{ color: "#ccd1da" }}>{s.clearing_authority || "unnamed authority"}</b>
+            <b style={{ color: C.bright }}>{s.clearing_authority || "unnamed authority"}</b>
           </div>
         </button>
       ))}

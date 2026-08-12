@@ -11,6 +11,7 @@ import {
   type ReconciliationMismatch,
   type WorkOrder,
 } from "./api";
+import { Loading } from "./Loading";
 import { C, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
 
 type SortKey = "code" | "remaining" | "compartment" | "start";
@@ -46,7 +47,7 @@ export default function WorkOrders({
   /** The instant the list is read at; `null` is live. */
   asOf: AsOf;
 }) {
-  const [orders, setOrders] = useState<WorkOrder[]>([]);
+  const [orders, setOrders] = useState<WorkOrder[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("remaining");
   const [unverifiedOnly, setUnverifiedOnly] = useState(false);
@@ -71,7 +72,7 @@ export default function WorkOrders({
     listWorkOrders(identity, vesselId, asOf)
       .then(setOrders)
       .catch((e: unknown) => {
-        setOrders([]);
+        setOrders(null);
         setError(String(e));
       });
     listActivities(identity, vesselId, asOf)
@@ -82,7 +83,7 @@ export default function WorkOrders({
   const remaining = (w: WorkOrder) => Math.max(0, w.budget_hours - w.earned_hours);
 
   const rows = useMemo(() => {
-    const filtered = unverifiedOnly ? orders.filter((w) => !w.source_verified) : orders;
+    const filtered = unverifiedOnly ? (orders ?? []).filter((w) => !w.source_verified) : (orders ?? []);
     const sorted = [...filtered];
     sorted.sort((a, b) => {
       if (sort === "remaining") return remaining(b) - remaining(a);
@@ -99,11 +100,12 @@ export default function WorkOrders({
   }, [orders, sort, unverifiedOnly]);
 
   const totalRemaining = rows.reduce((a, w) => a + remaining(w), 0);
-  const unverified = orders.filter((w) => !w.source_verified).length;
+  const unverified = (orders ?? []).filter((w) => !w.source_verified).length;
 
   if (error) {
     return <p style={{ color: C.danger }}>This hull is out of scope for you ({error}).</p>;
   }
+  if (!orders) return <Loading label="Reading the work orders…" />;
 
   const th: React.CSSProperties = {
     textAlign: "left",
@@ -118,7 +120,7 @@ export default function WorkOrders({
   const td: React.CSSProperties = {
     padding: "7px 10px",
     fontSize: 12.5,
-    borderBottom: "1px solid #191a1f",
+    borderBottom: `1px solid ${C.hairline}`,
   };
 
   return (
@@ -127,7 +129,7 @@ export default function WorkOrders({
         Work Orders · {hullLabel}
       </div>
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>Work on this availability</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 720 }}>
+      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
         {rows.length} orders · {mh(totalRemaining)} remaining ·{" "}
         {rows.filter((w) => w.in_window).length} in progress at the instant on the time control.
         Every row carries the document it came from;{" "}
@@ -135,14 +137,14 @@ export default function WorkOrders({
         {recon && (
           <>
             {" "}Hours answer to{" "}
-            <b style={{ color: "#ccd1da" }}>
+            <b style={{ color: C.bright }}>
               {recon.source ?? "the seeded work items"}
             </b>{" "}
             ({recon.items} items)
             {recon.mismatches.length > 0 && (
               <>
                 {" "}—{" "}
-                <b style={{ color: "#f59e0b" }}>
+                <b style={{ color: C.warn }}>
                   {recon.mismatches.length} do{recon.mismatches.length === 1 ? "es" : ""} not
                   reconcile
                 </b>{" "}
@@ -171,7 +173,7 @@ export default function WorkOrders({
             onClick={() => setSort(k)}
             style={{
               padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit", fontSize: 11.5,
-              background: sort === k ? "#20222b" : "transparent",
+              background: sort === k ? C.raised : "transparent",
               color: sort === k ? C.text : C.dim,
               border: `1px solid ${sort === k ? C.accent : C.line}`,
             }}
@@ -195,7 +197,7 @@ export default function WorkOrders({
         </label>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           {bookMsg && (
-            <span style={{ fontSize: 11, color: bookMsg.startsWith("✓") ? "#22c55e" : C.danger }}>
+            <span style={{ fontSize: 11, color: bookMsg.startsWith("✓") ? C.ok : C.danger }}>
               {bookMsg}
             </span>
           )}
@@ -282,7 +284,7 @@ export default function WorkOrders({
             <button
               style={{
                 padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit",
-                fontSize: 11.5, color: C.text, background: "#20222b", border: `1px solid ${C.accent}`,
+                fontSize: 11.5, color: C.text, background: C.raised, border: `1px solid ${C.accent}`,
               }}
               onClick={() => {
                 const staged = pendingBook;
@@ -349,7 +351,7 @@ export default function WorkOrders({
                     planner looking at next week still needs to see the order that
                     closed last week, so it is dimmed, not dropped. */}
                 <td style={{ ...td, fontSize: 11, whiteSpace: "nowrap" }}>
-                  <span style={{ fontFamily: "monospace", color: w.planned ? C.dim : "#f59e0b" }}>
+                  <span style={{ fontFamily: "monospace", color: w.planned ? C.dim : C.warn }}>
                     {fmtWindow(w.planned)}
                   </span>
                   {w.planned && (
@@ -365,7 +367,7 @@ export default function WorkOrders({
                         borderRadius: 4,
                         fontSize: 9.5,
                         fontWeight: 700,
-                        color: w.in_window ? "#22c55e" : C.dim,
+                        color: w.in_window ? C.ok : C.dim,
                         background: w.in_window ? "rgba(34,197,94,0.12)" : "rgba(110,116,128,0.12)",
                         border: `1px solid ${w.in_window ? "rgba(34,197,94,0.4)" : "rgba(110,116,128,0.35)"}`,
                       }}
@@ -408,13 +410,15 @@ export default function WorkOrders({
                   })()}
                 </td>
                 <td style={{ ...td, fontSize: 11 }}>
-                  <span style={{ fontFamily: "monospace" }}>{w.source_ref}</span>
-                  {/* Provenance is stated, never assumed: an unconfirmed row says so. */}
+                  {/* The reference never wraps mid-id; the badge takes its own
+                      line beneath. Provenance is stated, never assumed. */}
+                  <div style={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>{w.source_ref}</div>
                   <span
                     title={w.source_verified ? "Planner-confirmed" : "Ingested, not yet confirmed by a planner"}
                     style={{
-                      marginLeft: 7, padding: "1px 6px", borderRadius: 4, fontSize: 9.5, fontWeight: 700,
-                      color: w.source_verified ? "#22c55e" : "#f59e0b",
+                      display: "inline-block", marginTop: 3, padding: "1px 6px", borderRadius: 4,
+                      fontSize: 9.5, fontWeight: 700,
+                      color: w.source_verified ? C.ok : C.warn,
                       background: w.source_verified ? "rgba(34,197,94,0.12)" : "rgba(245,158,11,0.12)",
                       border: `1px solid ${w.source_verified ? "rgba(34,197,94,0.4)" : "rgba(245,158,11,0.45)"}`,
                     }}

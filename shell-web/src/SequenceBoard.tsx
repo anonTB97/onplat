@@ -31,7 +31,7 @@ import {
 } from "./api";
 import { Loading } from "./Loading";
 import { ZoneLanes } from "./ZoneLanes";
-import { C, mh } from "./theme";
+import { tdStyle, thStyle, chipStyle, C, mh } from "./theme";
 
 type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
 
@@ -50,7 +50,7 @@ const EXEC_RANK: Record<string, number> = {
 const STATUS_LABEL: Record<Exclude<StatusFilter, "all">, { label: string; fg: string }> = {
   not_started: { label: "NOT STARTED", fg: "#94a3b8" },
   in_progress: { label: "IN PROGRESS", fg: "#3D6BFF" },
-  complete: { label: "COMPLETE", fg: "#22c55e" },
+  complete: { label: "COMPLETE", fg: C.ok },
 };
 
 /** A planned window at day resolution — the resolution a schedule carries. */
@@ -206,20 +206,9 @@ export default function SequenceBoard({
   ).length;
   const refused = activities.filter((a) => a.executability.verdict === "not_executable").length;
 
-  const th: React.CSSProperties = {
-    textAlign: "left", padding: "6px 10px", fontSize: 10, letterSpacing: 0.6,
-    textTransform: "uppercase", color: C.dim, borderBottom: `1px solid ${C.line}`,
-    whiteSpace: "nowrap", position: "sticky", top: 0, background: "#121316",
-  };
-  const td: React.CSSProperties = {
-    padding: "6px 10px", fontSize: 12, borderBottom: "1px solid #191a1f", verticalAlign: "top",
-  };
-  const chip = (active: boolean): React.CSSProperties => ({
-    padding: "3px 9px", borderRadius: 5, cursor: "pointer", font: "inherit", fontSize: 11,
-    background: active ? "#20222b" : "transparent",
-    color: active ? C.text : C.dim,
-    border: `1px solid ${active ? C.accent : C.line}`,
-  });
+  const th: React.CSSProperties = { ...thStyle, position: "sticky", top: 0, background: C.panel };
+  const td: React.CSSProperties = { ...tdStyle, padding: "6px 10px", fontSize: 12 };
+  const chip = chipStyle;
 
   return (
     <div>
@@ -230,12 +219,12 @@ export default function SequenceBoard({
       <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
         Every scheduled activity at the grain a crew is handed — the accounting view
         of this work is the six rows on Work Orders; this is what those rows are made
-        of. <b style={{ color: "#ccd1da" }}>{activities.length}</b> activities ·{" "}
-        <b style={{ color: "#ccd1da" }}>{inWindow}</b> planned for the instant on the
+        of. <b style={{ color: C.bright }}>{activities.length}</b> activities ·{" "}
+        <b style={{ color: C.bright }}>{inWindow}</b> planned for the instant on the
         time control
         {unlocated > 0 && (
           <>
-            {" "}· <b style={{ color: "#f59e0b" }}>{unlocated}</b>{" "}
+            {" "}· <b style={{ color: C.warn }}>{unlocated}</b>{" "}
             <span title="The schedule did not say which compartment — the dominant risk of every P6 import, shown rather than hidden.">
               with no located compartment
             </span>
@@ -243,7 +232,7 @@ export default function SequenceBoard({
         )}
         {derivedLoc > 0 && (
           <>
-            {" "}· <b style={{ color: "#f59e0b" }}>{derivedLoc}</b>{" "}
+            {" "}· <b style={{ color: C.warn }}>{derivedLoc}</b>{" "}
             <span title="Located from the task's own name rather than an authored field — marked ≈ in the Space column, graded medium, never presented as authored.">
               located from task names
             </span>
@@ -260,7 +249,7 @@ export default function SequenceBoard({
         .{" "}
         {source ? (
           <>
-            Schedule of record: <b style={{ color: "#ccd1da" }}>{source}</b> — served
+            Schedule of record: <b style={{ color: C.bright }}>{source}</b> — served
             as ingested, graded, never smoothed over.
           </>
         ) : (
@@ -273,7 +262,7 @@ export default function SequenceBoard({
         {mismatches.length > 0 && (
           <>
             {" "}
-            <b style={{ color: "#f59e0b" }}>⚠ {mismatches.length}</b>{" "}
+            <b style={{ color: C.warn }}>⚠ {mismatches.length}</b>{" "}
             <span
               title={mismatches
                 .map(
@@ -306,7 +295,7 @@ export default function SequenceBoard({
           Zone lanes
         </button>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-          {importMsg && <span style={{ fontSize: 11, color: importMsg.startsWith("✓") ? "#22c55e" : C.danger }}>{importMsg}</span>}
+          {importMsg && <span style={{ fontSize: 11, color: importMsg.startsWith("✓") ? C.ok : C.danger }}>{importMsg}</span>}
           <label style={{ ...chip(false), display: "inline-flex", alignItems: "center", gap: 5 }} title="Import a Primavera P6 XER export as this hull's schedule of record. All-or-nothing: one rejected line refuses the file.">
             ⭱ Import XER
             <input
@@ -425,12 +414,12 @@ export default function SequenceBoard({
             </div>
             <div style={line}>
               <span style={tag}>Location</span>
-              <span style={{ color: "#ccd1da" }}>
+              <span style={{ color: C.bright }}>
                 {m.located_authored} of {m.work_activities} authored by the schedule
               </span>
               {m.located_derived.length > 0 && (
                 <span
-                  style={{ color: "#f59e0b" }}
+                  style={{ color: C.warn }}
                   title="A placard parsed out of the task's own name — the parser's guess, graded medium and listed so it can be inspected and refused."
                 >
                   · {m.located_derived.length} read from task names:{" "}
@@ -446,7 +435,7 @@ export default function SequenceBoard({
                 </span>
               )}
               {m.unlocated.length === 0 && m.located_derived.length === 0 && (
-                <span style={{ color: "#22c55e" }}>· every location authored</span>
+                <span style={{ color: C.ok }}>· every location authored</span>
               )}
             </div>
             {m.unknown_spaces.length > 0 && (
@@ -460,9 +449,9 @@ export default function SequenceBoard({
             <div style={line}>
               <span style={tag}>Hours</span>
               {codes ? (
-                <span style={{ color: "#f59e0b" }}>does not reconcile: {codes}</span>
+                <span style={{ color: C.warn }}>does not reconcile: {codes}</span>
               ) : (
-                <span style={{ color: "#22c55e" }}>reconciles with the work items</span>
+                <span style={{ color: C.ok }}>reconciles with the work items</span>
               )}
               {p.reconciliation.unmapped_budget_hours > 0 && (
                 <span style={{ color: C.dim }}>
@@ -582,7 +571,7 @@ export default function SequenceBoard({
                 </td>
                 <td style={{ ...td, fontFamily: "monospace", fontSize: 11 }}>
                   {a.work_order_code ?? (
-                    <span style={{ color: a.is_milestone ? C.dim : "#f59e0b" }} title="Scheduled work nobody has mapped to a work item — a gap, not an omission.">
+                    <span style={{ color: a.is_milestone ? C.dim : C.warn }} title="Scheduled work nobody has mapped to a work item — a gap, not an omission.">
                       unmapped
                     </span>
                   )}
@@ -603,7 +592,7 @@ export default function SequenceBoard({
                       style={{
                         font: "inherit", fontSize: 10.5, fontFamily: "monospace", cursor: "pointer",
                         padding: "1px 5px", borderRadius: 4,
-                        color: a.compartment_reliability === "high" ? "#ccd1da" : "#fbd38d",
+                        color: a.compartment_reliability === "high" ? C.bright : "#fbd38d",
                         background: "rgba(148,163,184,0.08)",
                         border: a.compartment_reliability === "high"
                           ? `1px solid ${C.line}`
@@ -617,7 +606,7 @@ export default function SequenceBoard({
                     <span style={{ color: C.dim }}>—</span>
                   ) : (
                     <span
-                      style={{ color: "#f59e0b" }}
+                      style={{ color: C.warn }}
                       title={
                         "The schedule did not say. Low-reliability mapping — never presented as authored." +
                         (a.wbs_area
@@ -633,7 +622,7 @@ export default function SequenceBoard({
                 <td style={{ ...td, fontFamily: "monospace", fontSize: 10.5, whiteSpace: "nowrap", color: C.dim }}>
                   {fmtWindow(a.planned)}
                   {a.in_window && !a.is_milestone && (
-                    <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#22c55e" }}>●</span>
+                    <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: C.ok }}>●</span>
                   )}
                 </td>
                 <td style={{ ...td, fontSize: 10, whiteSpace: "nowrap" }}>
@@ -652,7 +641,7 @@ export default function SequenceBoard({
                       style={{
                         font: "inherit", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4,
                         cursor: "pointer", padding: "2px 7px", borderRadius: 4,
-                        color: "#fca5a5", background: "rgba(239,68,68,0.12)",
+                        color: C.dangerSoft, background: "rgba(239,68,68,0.12)",
                         border: "1px solid rgba(239,68,68,0.45)",
                       }}
                     >
@@ -714,11 +703,11 @@ export default function SequenceBoard({
                     <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center", fontSize: 11 }}>
                       <span style={{ color: C.dim }}>
                         refused from{" "}
-                        <b style={{ color: "#fca5a5", fontFamily: "monospace" }}>{fmtInstant(a.executability.at)}</b>{" "}
+                        <b style={{ color: C.dangerSoft, fontFamily: "monospace" }}>{fmtInstant(a.executability.at)}</b>{" "}
                         inside {fmtWindow(a.planned)}
                       </span>
                       <span style={{ color: C.dim }}>
-                        rule <b style={{ color: "#ccd1da", fontFamily: "monospace" }}>{a.executability.rule_code}</b>
+                        rule <b style={{ color: C.bright, fontFamily: "monospace" }}>{a.executability.rule_code}</b>
                       </span>
                       <span style={{ color: C.dim }}>
                         {a.executability.hazard} @{" "}
@@ -730,14 +719,14 @@ export default function SequenceBoard({
                           title="Open the hold's origin space"
                           style={{
                             font: "inherit", fontSize: 10.5, fontFamily: "monospace", cursor: "pointer",
-                            padding: "1px 5px", borderRadius: 4, color: "#ccd1da",
+                            padding: "1px 5px", borderRadius: 4, color: C.bright,
                             background: "rgba(148,163,184,0.08)", border: `1px solid ${C.line}`,
                           }}
                         >
                           {a.executability.origin}
                         </button>
                       </span>
-                      <span style={{ color: a.executability.earliest_clear ? "#f59e0b" : "#c4b5fd" }}>
+                      <span style={{ color: a.executability.earliest_clear ? C.warn : "#c4b5fd" }}>
                         {a.executability.earliest_clear
                           ? `clears ${fmtInstant(a.executability.earliest_clear)} on its own`
                           : `clears on verification by ${a.executability.clearing_authority} — never on a clock`}

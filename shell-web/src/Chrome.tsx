@@ -64,7 +64,7 @@ export function ClassificationBanner({ edge }: { edge: "top" | "bottom" }) {
     >
       {MARKINGS.map((m, i) => (
         <span key={m} style={{ display: "flex", gap: 8 }}>
-          {i > 0 && <span style={{ color: "#4b5060" }}>|</span>}
+          {i > 0 && <span style={{ color: C.faint }}>|</span>}
           {m}
         </span>
       ))}
@@ -336,8 +336,8 @@ export function TopBar({
 
       {/* global search */}
       <div style={{ position: "relative", flex: "1 1 320px", maxWidth: 520 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, background: "#0e0f13", border: `1px solid ${LINE}`, borderRadius: 7, padding: "0 9px", height: 32 }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6e7480" strokeWidth={1.8}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, background: C.well, border: `1px solid ${LINE}`, borderRadius: 7, padding: "0 9px", height: 32 }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.subtle} strokeWidth={1.8}>
             <circle cx="11" cy="11" r="7" />
             <line x1="21" y1="21" x2="16.5" y2="16.5" strokeLinecap="round" />
           </svg>
@@ -378,7 +378,7 @@ export function TopBar({
                   <span style={{ fontSize: 11, color: DIM }}>{h.deck} · {h.zone}</span>
                   <span style={{ marginLeft: "auto", fontSize: 10.5, color: DIM }}>{h.detail}</span>
                 </div>
-                <div style={{ fontSize: 11, color: "#ccd1da" }}>{h.name}</div>
+                <div style={{ fontSize: 11, color: C.bright }}>{h.name}</div>
               </button>
             ))}
           </div>
@@ -419,7 +419,7 @@ export function TopBar({
                   }}
                   style={{
                     display: "block", width: "100%", textAlign: "left", padding: "8px 12px",
-                    background: isSel ? "#20222b" : "transparent",
+                    background: isSel ? C.raised : "transparent",
                     border: "none", borderBottom: `1px solid ${LINE}`,
                     borderLeft: `3px solid ${isSel ? C.accent : v ? "transparent" : C.danger}`,
                     cursor: "pointer", font: "inherit", color: C.text,
@@ -449,7 +449,7 @@ export function TopBar({
       {/* persona — sets the altitude the Deck Explorer opens at */}
       <div style={{ position: "relative" }}>
         <button onClick={() => setMenu(menu === "persona" ? null : "persona")} style={clusterBtn} aria-expanded={menu === "persona"}>
-          <span style={{ width: 26, height: 26, borderRadius: 13, background: "#20222b", color: C.accent, fontSize: 10.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <span style={{ width: 26, height: 26, borderRadius: 13, background: C.raised, color: C.accent, fontSize: 10.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>
             {initialsOf(persona.name)}
           </span>
           <span style={{ textAlign: "left" }}>
@@ -473,13 +473,13 @@ export function TopBar({
                 style={{
                   display: "flex", gap: 9, alignItems: "center", width: "100%", textAlign: "left",
                   padding: "7px 12px",
-                  background: p.name === persona.name ? "#20222b" : "transparent",
+                  background: p.name === persona.name ? C.raised : "transparent",
                   border: "none", borderBottom: `1px solid ${LINE}`,
                   borderLeft: `3px solid ${p.name === persona.name ? C.accent : "transparent"}`,
                   cursor: "pointer", font: "inherit", color: C.text,
                 }}
               >
-                <span style={{ width: 24, height: 24, borderRadius: 12, background: "#0e0f13", color: p.name === persona.name ? C.accent : DIM, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+                <span style={{ width: 24, height: 24, borderRadius: 12, background: C.well, color: p.name === persona.name ? C.accent : DIM, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
                   {initialsOf(p.name)}
                 </span>
                 <span>
@@ -544,7 +544,7 @@ export function TopBar({
                       {mh(issue.hours_at_risk)}
                     </span>
                   </div>
-                  <div style={{ fontSize: 11, color: "#ccd1da", marginTop: 3 }}>{claim(issue)}</div>
+                  <div style={{ fontSize: 11, color: C.bright, marginTop: 3 }}>{claim(issue)}</div>
                 </button>
               );
             })}
@@ -676,7 +676,7 @@ export function ModuleRail({
                 (collapsed ? (
                   <div style={{ height: 1, background: "#1d2a3f", margin: "8px 12px 6px" }} />
                 ) : (
-                  <div style={{ padding: "11px 15px 4px", fontSize: 8.5, letterSpacing: 1.3, textTransform: "uppercase", color: "#4b5060" }}>
+                  <div style={{ padding: "11px 15px 4px", fontSize: 8.5, letterSpacing: 1.3, textTransform: "uppercase", color: C.faint }}>
                     {m.group}
                   </div>
                 ))}
@@ -704,7 +704,7 @@ export function ModuleRail({
                     : "transparent",
                 }}
               >
-                <span style={{ display: "flex", color: active ? C.accent : "#6e7480", flex: "none" }}>
+                <span style={{ display: "flex", color: active ? C.accent : C.subtle, flex: "none" }}>
                   {ICONS[m.icon] ?? ICONS.portfolio}
                 </span>
                 {!collapsed && (
@@ -734,7 +734,7 @@ export function ModuleRail({
       </div>
       {!collapsed && (
         <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 15px", borderTop: "1px solid #1d2a3f", fontSize: 10.5, color: "#7d8494" }}>
-          <span style={{ width: 6, height: 6, borderRadius: 3, background: "#22c55e" }} />
+          <span style={{ width: 6, height: 6, borderRadius: 3, background: C.ok }} />
           Sovereign node · synced
         </div>
       )}

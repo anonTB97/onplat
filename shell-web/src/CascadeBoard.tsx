@@ -27,7 +27,7 @@ import { C, mh } from "./theme";
 
 const W = 1000;
 const LABEL_W = 105;
-const LANE_H = 34;
+const LANE_H = 44;
 const PAD_FRAMES = 8;
 
 const CONFIDENCE_GLOSS: Record<Confidence, string> = {
@@ -114,19 +114,35 @@ export default function CascadeBoard({
     (r) => !r.permits_work && !freed.has(r.compartment.compartment_no),
   ).length;
 
+  // Same-frame neighbours must not print on top of each other: within a
+  // lane, dots closer than one dot-width alternate between two sub-rows.
+  const rowOf = new Map<string, number>();
+  for (const deck of lanes) {
+    const mine = spaces
+      .filter((r) => r.compartment.deck_code === deck.code && r.compartment.frame !== null)
+      .sort((a, b) => (b.compartment.frame ?? 0) - (a.compartment.frame ?? 0));
+    const lastX = [-Infinity, -Infinity];
+    for (const r of mine) {
+      const x = xOf(r.compartment.frame ?? 0);
+      const level = x - (lastX[0] ?? -Infinity) >= 18 ? 0 : 1;
+      lastX[level] = x;
+      rowOf.set(r.compartment.compartment_no, level);
+    }
+  }
+
   return (
     <div>
       <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
         Deconfliction Cascade · {hullLabel}
       </div>
       <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>If we do it, what happens everywhere else?</h1>
-      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 800 }}>
+      <p style={{ color: C.dim, fontSize: 12.5, margin: "0 0 14px", maxWidth: 780 }}>
         Pick an action; the hull becomes its consequence map. Every effect is a
         counterfactual engine verdict — the world rebuilt with the action taken and
         re-evaluated
         {asOfMs !== null && (
           <>
-            {" "}as of <b style={{ color: "#ccd1da" }}>{fmtInstant(asOfMs)}Z</b>
+            {" "}as of <b style={{ color: C.bright }}>{fmtInstant(asOfMs)}Z</b>
           </>
         )}
         . Decision support, not automation: this proposes, a planner decides on the
@@ -149,10 +165,10 @@ export default function CascadeBoard({
 
           {/* The consequence map. */}
           <div style={{ flex: "1 1 560px", minWidth: 480 }}>
-            <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: "#0e0f13", overflow: "hidden" }}>
+            <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.well, overflow: "hidden" }}>
               <div style={{ display: "flex", gap: 14, alignItems: "center", padding: "7px 11px", borderBottom: `1px solid ${C.line}`, fontSize: 11, flexWrap: "wrap" }}>
                 <b>{chosen ? actionTitle(chosen.action) : ""}</b>
-                <span style={{ color: "#22c55e" }}>
+                <span style={{ color: C.ok }}>
                   frees {freed.size} space{freed.size === 1 ? "" : "s"} · +{mh(chosen?.effect.freed_hours ?? 0)}
                 </span>
                 {closed.size > 0 && (
@@ -166,12 +182,16 @@ export default function CascadeBoard({
               <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block", background: "#0b0c0e" }}>
                 {lanes.map((deck, i) => (
                   <g key={deck.code}>
-                    <rect x={0} y={i * LANE_H} width={W} height={LANE_H} fill={i % 2 === 0 ? "#0e0f13" : "#101118"} />
+                    <rect x={0} y={i * LANE_H} width={W} height={LANE_H} fill={i % 2 === 0 ? C.well : "#101118"} />
                     <text x={8} y={i * LANE_H + LANE_H / 2 + 3} fill={C.dim} fontSize={9} fontWeight={600}>
                       {deck.code}
                     </text>
                   </g>
                 ))}
+                {/* Every space is a state dot; only the spaces this action
+                    TOUCHES earn a printed placard. Twenty-four labels was a
+                    collision field — the consequence is the point, and the
+                    tooltip still names everything. */}
                 {spaces.map((r) => {
                   const frame = r.compartment.frame;
                   const top = laneTop.get(r.compartment.deck_code);
@@ -184,20 +204,23 @@ export default function CascadeBoard({
                   // harm, dim red ring = held before and after, grey = open
                   // and untouched.
                   const fill = isClosed
-                    ? "rgba(220,38,38,0.55)"
+                    ? "rgba(220,38,38,0.6)"
                     : isFreed
-                      ? "rgba(34,197,94,0.5)"
-                      : "rgba(148,163,184,0.10)";
+                      ? "rgba(34,197,94,0.55)"
+                      : heldNow
+                        ? "rgba(220,38,38,0.14)"
+                        : "rgba(148,163,184,0.12)";
                   const stroke = isClosed
-                    ? "#f87171"
+                    ? C.danger
                     : isFreed
-                      ? "#22c55e"
+                      ? C.ok
                       : heldNow
                         ? "rgba(220,38,38,0.55)"
                         : "rgba(148,163,184,0.3)";
                   const affected = isFreed || isClosed;
                   const x = xOf(frame);
-                  const y = top + LANE_H / 2;
+                  const sub = rowOf.get(no) === 1 ? 8 : -4;
+                  const y = top + LANE_H / 2 + sub;
                   return (
                     <g key={no} onClick={() => onOpenSpace(no)} style={{ cursor: "pointer" }}>
                       <title>
@@ -212,15 +235,16 @@ export default function CascadeBoard({
                           `\n${mh(r.remaining_hours)} booked`}
                       </title>
                       <rect
-                        x={x - 26} y={y - 8} width={52} height={16} rx={2.5}
-                        fill={fill} stroke={stroke} strokeWidth={affected ? 1.6 : 0.8}
+                        x={x - 6} y={y - 6} width={12} height={12} rx={3}
+                        fill={fill} stroke={stroke} strokeWidth={affected ? 1.6 : 0.9}
                       />
-                      <text x={x} y={y + 3.5} fill={affected ? "#f2f3f6" : "#6e7480"} fontSize={6.2} textAnchor="middle" fontFamily="monospace">
-                        {no}
-                      </text>
-                      {isClosed && (
-                        <text x={x} y={y - 11} fill="#f87171" fontSize={7.5} fontWeight={700} textAnchor="middle">
-                          SHUTS
+                      {affected && (
+                        <text
+                          x={x} y={sub < 0 ? y - 11 : y + 18}
+                          fill={isClosed ? C.danger : C.ok}
+                          fontSize={8} fontWeight={700} textAnchor="middle" fontFamily="monospace"
+                        >
+                          {isClosed ? `SHUTS ${no}` : no}
                         </text>
                       )}
                     </g>
@@ -229,12 +253,12 @@ export default function CascadeBoard({
               </svg>
 
               <div style={{ display: "flex", gap: 14, flexWrap: "wrap", padding: "7px 11px", borderTop: `1px solid ${C.line}`, fontSize: 10.5, color: C.dim }}>
-                <span><span style={{ color: "#22c55e" }}>■</span> freed by this action</span>
-                <span><span style={{ color: "#f87171" }}>■</span> shut by this action — the cost, never elided</span>
+                <span><span style={{ color: C.ok }}>■</span> freed by this action</span>
+                <span><span style={{ color: C.danger }}>■</span> shut by this action — the cost, never elided</span>
                 <span><span style={{ color: "rgba(220,38,38,0.55)" }}>▭</span> held before and after</span>
                 <span><span style={{ color: "rgba(148,163,184,0.4)" }}>▭</span> open, unaffected</span>
                 {undrawable.length > 0 && (
-                  <span style={{ color: "#f59e0b" }} title="Affected spaces the register cannot place on a deck lane.">
+                  <span style={{ color: C.warn }} title="Affected spaces the register cannot place on a deck lane.">
                     affected but unplaceable: {undrawable.join(", ")}
                   </span>
                 )}
@@ -269,7 +293,7 @@ function ActionCard({
     >
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
         <b style={{ fontSize: 12.5 }}>{actionTitle(a.action)}</b>
-        <span style={{ fontSize: 11.5, fontVariantNumeric: "tabular-nums", color: net > 0 ? "#22c55e" : C.danger, whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: 11.5, fontVariantNumeric: "tabular-nums", color: net > 0 ? C.ok : C.danger, whiteSpace: "nowrap" }}>
           {net >= 0 ? "+" : ""}{mh(net)} net
         </span>
       </div>

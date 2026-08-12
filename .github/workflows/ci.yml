@@ -143,7 +143,9 @@ jobs:
           cache-dependency-path: shell-web/package-lock.json
       - run: npm ci
       - name: typecheck
-        run: npx tsc --noEmit
+        # -b follows the project references, so vite.config.ts (the node
+        # project) is checked with the same command `npm run build` uses.
+        run: npx tsc -b
       # The camera invariants (cursor-fixed wheel zoom, both views) used to be
       # guarded by one-off browser scripts; a browser script proves the build it
       # ran against, these prove every build after it too.

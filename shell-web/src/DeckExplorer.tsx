@@ -37,6 +37,7 @@ import {
   type DeckSheet,
 } from "./deckSheets";
 import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE, zoneColour } from "./theme";
+import { parseZoneCsv } from "./ingest";
 import { zoneBands, type ZoneGeometry } from "./zones";
 
 const DIM = C.dim;
@@ -728,17 +729,7 @@ export default function DeckExplorer({
                           e.target.value = "";
                           if (!file) return;
                           void file.text().then((text) => {
-                            const bounds: ZoneBound[] = [];
-                            for (const line of text.split("\n")) {
-                              const t = line.trim();
-                              if (!t || t.startsWith("#")) continue;
-                              const [zone, lo, hi] = t.split(",").map((p) => p.trim());
-                              bounds.push({
-                                zone: zone ?? "",
-                                lo_frame: Number(lo),
-                                hi_frame: Number(hi),
-                              });
-                            }
+                            const bounds = parseZoneCsv(text);
                             importZoneChart(identity, vesselId, file.name, bounds, true)
                               .then((r) => {
                                 const oob = r.audit.out_of_bounds;

@@ -473,3 +473,40 @@ async fn the_dry_run_reports_the_location_mapping() {
     // Every located space is one the register knows.
     assert_eq!(m["unknown_spaces"].as_array().unwrap().len(), 0, "{m}");
 }
+
+/// A real P6 export for a carrier availability runs tens of megabytes; axum's
+/// 2 MB default body ceiling refused such a file at the door with a 413
+/// before the ingest ever saw a line of it. The router now raises the limit
+/// (`wadl_api::MAX_IMPORT_BYTES`), and this pins a body several times the old
+/// ceiling all the way through the dry run.
+#[tokio::test]
+async fn the_schedule_door_accepts_a_real_sized_export() {
+    let (app, world) = app_at_anchor();
+    let base = include_str!("../../../reference/p6-sample/CVN73-PIA26.xer");
+    let mut xer = String::with_capacity(6 << 20);
+    xer.push_str(base);
+    if !xer.ends_with('\n') {
+        xer.push('\n');
+    }
+    // Pad with a table the extraction does not read: the size is the point,
+    // and the padding must still be a well-formed XER section.
+    xer.push_str("%T\tNOTEBOOK\n%F\tnote_id\tnote_text\n");
+    let filler = "x".repeat(1000);
+    for i in 0..6000 {
+        xer.push_str(&format!("%R\t{i}\t{filler}\n"));
+    }
+    assert!(xer.len() > 4 * 1024 * 1024, "padding failed: {}", xer.len());
+
+    let (status, body) = post(
+        &app,
+        &world,
+        &format!(
+            "/api/vessels/{}/schedule-of-record?dry_run=true",
+            world.cvn73.as_uuid()
+        ),
+        serde_json::json!({ "label": "big-export.xer", "xer": xer }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["activities"], 18, "{body}");
+}

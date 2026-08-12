@@ -11,6 +11,7 @@ import {
   type ReconciliationMismatch,
   type WorkOrder,
 } from "./api";
+import { parseBudgetCsv } from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { C, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
@@ -208,19 +209,7 @@ export default function WorkOrders({
                 e.target.value = "";
                 if (!file) return;
                 void file.text().then((text) => {
-                  const items: BudgetItem[] = [];
-                  for (const line of text.split("\n")) {
-                    const t = line.trim();
-                    if (!t || t.startsWith("#")) continue;
-                    const [code, title, trade, budget, earned] = t.split(",").map((x) => x.trim());
-                    items.push({
-                      code: code ?? "",
-                      title: title ?? "",
-                      trade: trade ?? "",
-                      budget_hours: Number(budget),
-                      earned_hours: Number(earned),
-                    });
-                  }
+                  const items = parseBudgetCsv(text);
                   importBudgetBook(identity, vesselId, file.name, items, true)
                     .then((r) => {
                       const codes = r.reconciliation.mismatches.map((m) => m.code).join(", ");

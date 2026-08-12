@@ -16,7 +16,11 @@
 import { useEffect, useState } from "react";
 import {
   getZoneChart,
+  importBudgetBook,
+  importSchedule,
+  importZoneChart,
   listActivities,
+  previewSchedule,
   revertBudgetBook,
   revertSchedule,
   revertZoneChart,
@@ -26,9 +30,19 @@ import {
   type ZoneChart,
 } from "./api";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
+import { fmtBytes, parseBudgetCsv, parseZoneCsv } from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { C, mh } from "./theme";
+
+/** A staged document: previewed by the server, nothing stored, Confirm or walk away. */
+interface Staged {
+  kind: string;
+  label: string;
+  sizeBytes: number;
+  summary: string;
+  commit: () => Promise<string>;
+}
 
 export default function SourcesBoard({
   identity,
@@ -49,6 +63,131 @@ export default function SourcesBoard({
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const [staged, setStaged] = useState<Staged | null>(null);
+  /** What the door is doing right now — a P6 export is megabytes, and reading
+   *  or ingesting one deserves a visible verb rather than a frozen screen. */
+  const [busy, setBusy] = useState<string | null>(null);
+
+  // The three doors. Each stages a server-side dry run: everything the import
+  // would say, nothing it would do. Confirm commits; Cancel costs nothing.
+  const stageSchedule = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name} (${fmtBytes(file.size)})…`);
+    file
+      .text()
+      .then((xer) =>
+        previewSchedule(identity, vesselId, file.name, xer).then((p) => {
+        setBusy(null);
+        const m = p.mapping;
+        setStaged({
+          kind: "Schedule of record",
+          label: file.name,
+          sizeBytes: file.size,
+          summary:
+            `${p.activities} activities · ${p.edges} edges · ${m.milestones} key events · ` +
+            `location: ${m.located_authored} authored` +
+            (m.located_derived.length > 0 ? ` / ${m.located_derived.length} from task names` : "") +
+            (m.unlocated.length > 0 ? ` / ${m.unlocated.length} unlocated` : "") +
+            (p.reconciliation.mismatches.length > 0
+              ? ` · hours disagree on ${p.reconciliation.mismatches.map((x) => x.code).join(", ")}`
+              : " · hours reconcile"),
+          commit: () =>
+            importSchedule(identity, vesselId, file.name, xer).then(
+              (r) => `✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`,
+            ),
+        });
+        }),
+      )
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
+
+  const stageZones = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const bounds = parseZoneCsv(text);
+        return importZoneChart(identity, vesselId, file.name, bounds, true).then((r) => {
+          setBusy(null);
+          const oob = r.audit.out_of_bounds;
+          setStaged({
+            kind: "Zone chart",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              `${r.zones} zones bounded` +
+              (oob.length > 0
+                ? ` · would put ${oob.length} space${oob.length === 1 ? "" : "s"} out of bounds: ${oob.map((o) => o.compartment).join(", ")}`
+                : " · register agrees with the chart") +
+              (r.audit.unbounded_zones.length > 0
+                ? ` · does not bound ${r.audit.unbounded_zones.join(", ")}`
+                : ""),
+            commit: () =>
+              importZoneChart(identity, vesselId, file.name, bounds, false).then(
+                (x) => `✓ ${x.label}: ${x.zones} zones authored`,
+              ),
+          });
+        });
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
+
+  const stageBudgets = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const items = parseBudgetCsv(text);
+        return importBudgetBook(identity, vesselId, file.name, items, true).then((r) => {
+          setBusy(null);
+          const codes = r.reconciliation.mismatches.map((x) => x.code).join(", ");
+          setStaged({
+            kind: "Budget book",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              `${r.items} items` +
+              (codes ? ` · register disagrees on: ${codes}` : " · register agrees with the book") +
+              (r.reconciliation.unmapped_budget_hours > 0
+                ? ` · ${mh(r.reconciliation.unmapped_budget_hours)} in the register map to no item`
+                : ""),
+            commit: () =>
+              importBudgetBook(identity, vesselId, file.name, items, false).then(
+                (x) => `✓ ${x.label}: hours now answer to the book (${x.items} items)`,
+              ),
+          });
+        });
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
+
+  const confirmStaged = () => {
+    const p = staged;
+    if (!p) return;
+    setStaged(null);
+    setBusy(`ingesting ${p.label} (${fmtBytes(p.sizeBytes)})…`);
+    p.commit()
+      .then((done) => {
+        setBusy(null);
+        setMsg(done);
+        setNonce((n) => n + 1);
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
 
   useEffect(() => {
     setError(null);
@@ -81,8 +220,42 @@ export default function SourcesBoard({
           { value: zones.source ? "authored" : "inferred", label: "zone chart" },
           { value: register.reconciliation.source ? "ingested" : "seeded", label: "budget book" },
         ]}
-        note="Every document behind the screens, with how much of it landed and how much of what landed is authored versus guessed. Each card reads the same endpoint its home screen reads, so this panel cannot disagree with the screens it summarises."
+        note="Every document behind the screens, with how much of it landed and how much of what landed is authored versus guessed. Each card is also that document's door: pick a file or drop it on the card — the server previews everything the import would claim before anything is stored."
       />
+
+      {busy && (
+        <p style={{ fontSize: 11.5, margin: "0 0 10px", color: C.warn }}>⏳ {busy}</p>
+      )}
+      {staged && (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10, padding: "9px 12px", border: "1px solid #f59e0b66", borderRadius: 8, background: "rgba(245,158,11,0.06)" }}>
+          <b style={{ fontSize: 12.5 }}>{staged.label}</b>
+          <span style={{ fontSize: 10.5, color: C.dim }}>
+            {staged.kind} · {fmtBytes(staged.sizeBytes)}
+          </span>
+          <span style={{ fontSize: 11.5, color: C.bright }}>{staged.summary}</span>
+          <span style={{ fontSize: 10.5, color: C.dim }}>— previewed, nothing stored</span>
+          <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button
+              onClick={confirmStaged}
+              style={{
+                font: "inherit", fontSize: 11.5, cursor: "pointer", padding: "3px 10px",
+                borderRadius: 6, color: C.text, background: C.raised, border: `1px solid ${C.accent}`,
+              }}
+            >
+              Confirm import
+            </button>
+            <button
+              onClick={() => setStaged(null)}
+              style={{
+                font: "inherit", fontSize: 11.5, cursor: "pointer", padding: "3px 10px",
+                borderRadius: 6, color: C.dim, background: "transparent", border: `1px solid ${C.line}`,
+              }}
+            >
+              Cancel
+            </button>
+          </span>
+        </div>
+      )}
 
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(400px,1fr))", alignItems: "start" }}>
         <SourceCard
@@ -129,7 +302,14 @@ export default function SourcesBoard({
               ? [{ text: `${mh(register.reconciliation.unmapped_budget_hours)} mapped to no work item`, tone: C.dim }]
               : []),
           ]}
-          importHint="Import a P6 XER export on the Sequence Board"
+          upload={{
+            label: "⭱ Upload P6 XER",
+            accept: ".xer,text/plain",
+            title:
+              "Ingest a Primavera P6 XER export as this hull's schedule of record — full multi-year exports included; the door takes files in the hundreds of megabytes. All-or-nothing: one rejected line refuses the file, with every reason listed.",
+            onFile: stageSchedule,
+          }}
+          importHint="Also on the Sequence Board"
           onOpenHome={() => onOpenModule("sequenceBoard")}
           onRevert={
             register.schedule_source
@@ -169,7 +349,14 @@ export default function SourcesBoard({
                 ]
               : []),
           ]}
-          importHint="Import a chart from Deck Explorer → Zones & compartments"
+          upload={{
+            label: "⭱ Upload zone CSV",
+            accept: ".csv,text/csv,text/plain",
+            title:
+              "Ingest the yard's zone chart (CSV: zone,lo_frame,hi_frame). All-or-nothing; the audit is previewed before anything is stored.",
+            onFile: stageZones,
+          }}
+          importHint="Also on Deck Explorer"
           onOpenHome={() => onOpenModule("deckExplorer")}
           onRevert={
             zones.source
@@ -201,7 +388,14 @@ export default function SourcesBoard({
               tone: mismatches.length > 0 ? C.warn : C.ok,
             },
           ]}
-          importHint="Import a budget CSV on Work Orders"
+          upload={{
+            label: "⭱ Upload budget CSV",
+            accept: ".csv,text/csv,text/plain",
+            title:
+              "Ingest the yard's budget book (CSV: code,title,trade,budget_mh,earned_mh). From then on the register's hours answer to the book. All-or-nothing; previews before storing.",
+            onFile: stageBudgets,
+          }}
+          importHint="Also on Work Orders"
           onOpenHome={() => onOpenModule("workOrders")}
           onRevert={
             register.reconciliation.source
@@ -238,12 +432,13 @@ export default function SourcesBoard({
   );
 }
 
-/** One document's card: what it is, what landed, and the way out. */
+/** One document's card: what it is, what landed, the door in, and the way out. */
 function SourceCard({
   kind,
   status,
   name,
   lines,
+  upload,
   importHint,
   onOpenHome,
   onRevert,
@@ -252,12 +447,40 @@ function SourceCard({
   status: { label: string; tone: string };
   name: string;
   lines: { text: string; tone?: string; gloss?: string }[];
+  /** The document's own door: a picker, and the whole card as a drop target. */
+  upload?: { label: string; accept: string; title: string; onFile: (f: File) => void };
   importHint?: string;
   onOpenHome?: () => void;
   onRevert?: () => void;
 }) {
+  const [dragOver, setDragOver] = useState(false);
   return (
-    <section style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.panel }}>
+    <section
+      onDragOver={
+        upload
+          ? (e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }
+          : undefined
+      }
+      onDragLeave={upload ? () => setDragOver(false) : undefined}
+      onDrop={
+        upload
+          ? (e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const f = e.dataTransfer.files[0];
+              if (f) upload.onFile(f);
+            }
+          : undefined
+      }
+      style={{
+        border: `1px ${dragOver ? "dashed" : "solid"} ${dragOver ? C.accent : C.line}`,
+        borderRadius: 8,
+        background: dragOver ? "rgba(61,107,255,0.05)" : C.panel,
+      }}
+    >
       <header style={{ display: "flex", gap: 8, alignItems: "center", padding: "9px 12px", borderBottom: `1px solid ${C.line}` }}>
         <b style={{ fontSize: 12.5 }}>{kind}</b>
         <span
@@ -268,19 +491,43 @@ function SourceCard({
         >
           {status.label}
         </span>
-        {onRevert && (
-          <button
-            onClick={onRevert}
-            title="Discard this document — the screens return to what the tool can honestly serve without it."
-            style={{
-              marginLeft: "auto", font: "inherit", fontSize: 10.5, cursor: "pointer",
-              padding: "2px 8px", borderRadius: 5, color: C.dim, background: "transparent",
-              border: `1px solid ${C.line}`,
-            }}
-          >
-            ⟲ Revert
-          </button>
-        )}
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          {upload && (
+            <label
+              title={upload.title}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 5, font: "inherit",
+                fontSize: 10.5, cursor: "pointer", padding: "2px 8px", borderRadius: 5,
+                color: C.accent, border: `1px solid ${C.accent}55`, background: "transparent",
+              }}
+            >
+              {upload.label}
+              <input
+                type="file"
+                accept={upload.accept}
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (f) upload.onFile(f);
+                }}
+              />
+            </label>
+          )}
+          {onRevert && (
+            <button
+              onClick={onRevert}
+              title="Discard this document — the screens return to what the tool can honestly serve without it."
+              style={{
+                font: "inherit", fontSize: 10.5, cursor: "pointer",
+                padding: "2px 8px", borderRadius: 5, color: C.dim, background: "transparent",
+                border: `1px solid ${C.line}`,
+              }}
+            >
+              ⟲ Revert
+            </button>
+          )}
+        </span>
       </header>
       <div style={{ padding: "9px 12px", display: "flex", flexDirection: "column", gap: 5 }}>
         <div style={{ fontSize: 12, color: C.bright, fontFamily: "monospace", wordBreak: "break-all" }}>{name}</div>
@@ -289,6 +536,9 @@ function SourceCard({
             {l.text}
           </div>
         ))}
+        {upload && (
+          <div style={{ fontSize: 10, color: C.faint }}>…or drop the file anywhere on this card</div>
+        )}
         {importHint && onOpenHome && (
           <button
             onClick={onOpenHome}

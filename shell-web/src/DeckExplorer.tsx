@@ -38,6 +38,8 @@ import {
 } from "./deckSheets";
 import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE, zoneColour } from "./theme";
 import { parseZoneCsv } from "./ingest";
+import { HORIZONS, type Horizon } from "./TimeControl";
+import { windowLoadBySpace, windowLoadTotal, type SpaceLoad } from "./windowLoad";
 import { DiscardButton } from "./DiscardButton";
 import { zoneBands, type ZoneGeometry } from "./zones";
 
@@ -110,6 +112,8 @@ export default function DeckExplorer({
   onFocused,
   onSpaceChange,
   asOf,
+  horizon,
+  now,
 }: {
   identity: Identity;
   vesselId: string;
@@ -131,6 +135,12 @@ export default function DeckExplorer({
    * that forgets it.
    */
   asOf: AsOf;
+  /** The reading window the time control claims: this screen answers for
+   *  [instant, instant + horizon) — a shift, a week, a month — not just the
+   *  instant itself. */
+  horizon: Horizon;
+  /** The server's now, for the live (asOf = null) case. */
+  now: number | null;
 }) {
   const [decks, setDecks] = useState<Deck[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
@@ -274,6 +284,28 @@ export default function DeckExplorer({
       .then((r) => setActivities(r.activities))
       .catch(() => setActivities([]));
   }, [identity, vesselId, asOf]);
+
+  // The reading window: from the instant, one horizon forward. This is what
+  // makes Shift / Week / Month change what this screen SAYS, not merely how
+  // far the scrubber reaches — the schedule's reality for the chosen window,
+  // pro-rated per space by the same rule as the Load digest.
+  const winStart = asOf ?? now ?? 0;
+  const horizonSpan = HORIZONS[horizon].span;
+  const winEnd =
+    horizonSpan !== null
+      ? winStart + horizonSpan
+      : Math.max(winStart + 1, ...activities.map((a) => a.planned?.end ?? 0));
+  const spaceLoad = useMemo(
+    () => (winStart > 0 ? windowLoadBySpace(activities, winStart, winEnd) : new Map()),
+    [activities, winStart, winEnd],
+  );
+  const loadTotal = useMemo(
+    () =>
+      winStart > 0
+        ? windowLoadTotal(activities, winStart, winEnd)
+        : { hours: 0, count: 0, refused: 0, unlocated: 0 },
+    [activities, winStart, winEnd],
+  );
 
   // Selecting a compartment fetches its full trace from the engine-backed
   // endpoint. The client never derives a state itself.
@@ -552,6 +584,31 @@ export default function DeckExplorer({
           {altBtn("ship", "Ship", "Leadership board")}
           {altBtn("zone", "Zone", "Section · superintendent")}
           {altBtn("compartment", "Compartment", "Foreman · deck plan")}
+          {/* The reading window's reality: what the schedule actually puts on
+              this hull between the instant and one horizon out. This is what
+              the Shift / Week / Month chips CLAIM, answered — scrub the clock
+              or change the horizon and these numbers move with the plan. */}
+          {winStart > 0 && (
+            <span
+              title={`The schedule inside the reading window: ${new Date(winStart).toISOString().slice(0, 10)} + one ${HORIZONS[horizon].label.toLowerCase()}. Budget is pro-rated by each activity's overlap with the window — the Load digest's rule. Unlocated rows cannot land on a space and are counted, never hidden.`}
+              style={{
+                marginLeft: "auto", alignSelf: "center", fontSize: 11, color: DIM,
+                display: "flex", gap: 10, alignItems: "baseline", whiteSpace: "nowrap",
+              }}
+            >
+              <span style={{ fontSize: 9, letterSpacing: 0.7, textTransform: "uppercase", color: C.subtle }}>
+                this {HORIZONS[horizon].label.toLowerCase()}
+              </span>
+              <b style={{ color: C.bright }}>{loadTotal.count} activities</b>
+              <b style={{ color: C.bright }}>{mh(Math.round(loadTotal.hours))}</b>
+              {loadTotal.refused > 0 && (
+                <b style={{ color: C.danger }}>{loadTotal.refused} refused</b>
+              )}
+              {loadTotal.unlocated > 0 && (
+                <span style={{ color: C.warn }}>{loadTotal.unlocated} unlocated</span>
+              )}
+            </span>
+          )}
         </div>
 
         <div style={{ display: "flex", gap: 6, alignItems: "center", paddingTop: 3 }}>
@@ -597,6 +654,8 @@ export default function DeckExplorer({
             rollup={rollup}
             selectedDeck={selectedDeck}
             zoneFilter={zoneFilter}
+            load={spaceLoad}
+            horizonLabel={HORIZONS[horizon].label.toLowerCase()}
             onDeck={(code) => {
               setSelectedDeck(code);
               onAltitude("compartment");
@@ -905,6 +964,8 @@ export default function DeckExplorer({
                   setHoverFrame={setHoverFrame}
                   deckLabel={deckLabel}
                   cascadeEdges={cascadeEdges}
+                  load={spaceLoad}
+                  horizonLabel={HORIZONS[horizon].label.toLowerCase()}
                 />
               )}
 
@@ -1005,6 +1066,8 @@ export default function DeckExplorer({
               rows={rows}
               onOpenSpace={openSpace}
               reveal={revealNonce}
+              spaceLoad={spaceLoad}
+              horizonLabel={HORIZONS[horizon].label.toLowerCase()}
             />
           </aside>
         )}
@@ -1051,6 +1114,8 @@ export default function DeckExplorer({
               rows={rows}
               onOpenSpace={openSpace}
               reveal={revealNonce}
+              spaceLoad={spaceLoad}
+              horizonLabel={HORIZONS[horizon].label.toLowerCase()}
             />
           </div>
         )}
@@ -1070,6 +1135,7 @@ export default function DeckExplorer({
  */
 function TracePanel({
   row, decision, asOf, identity, vesselId, rows, onOpenSpace, reveal,
+  spaceLoad, horizonLabel,
 }: {
   row: DeckStateRow | null;
   decision: Decision | null;
@@ -1079,6 +1145,9 @@ function TracePanel({
   rows: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
   reveal: number;
+  /** Scheduled load per space inside the reading window. */
+  spaceLoad: Map<string, SpaceLoad>;
+  horizonLabel: string;
 }) {
   return (
     <>
@@ -1122,6 +1191,30 @@ function TracePanel({
                     <div style={{ fontSize: 11, color: DIM }}>
                       {row.trades.join(" · ")} — {row.remaining_hours.toLocaleString()} MH remaining
                     </div>
+                    {(() => {
+                      const l = spaceLoad.get(row.compartment.compartment_no);
+                      const label = horizonLabel;
+                      return (
+                        <div style={{ fontSize: 11, marginTop: 3, color: l ? C.bright : DIM }}>
+                          {l ? (
+                            <>
+                              this {label}: {l.count} activit{l.count === 1 ? "y" : "ies"} ·{" "}
+                              {Math.round(l.hours).toLocaleString()} MH
+                              {l.refused > 0 && (
+                                <b style={{ color: C.danger }}> · {l.refused} refused</b>
+                              )}
+                              {l.next && (
+                                <span style={{ color: DIM }}>
+                                  {" "}· next {l.next.code} on {new Date(l.next.start).toISOString().slice(5, 10).replace("-", "/")}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>nothing scheduled here this {label}</>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -1802,7 +1895,7 @@ const presetBtn: React.CSSProperties = {
 /** The deck plan: compartments placed by frame and side, pannable and zoomable. */
 function PlanView({
   rows, selected, onSelect, toneOf, zoom, setZoom, pan, setPan, dragging,
-  hoverFrame, setHoverFrame, deckLabel, cascadeEdges,
+  hoverFrame, setHoverFrame, deckLabel, cascadeEdges, load, horizonLabel,
 }: {
   rows: DeckStateRow[];
   selected: string | null;
@@ -1817,10 +1910,15 @@ function PlanView({
   setHoverFrame: (f: number | null) => void;
   deckLabel: string;
   cascadeEdges: [string, string][];
+  /** Scheduled man-hours per space inside the reading window. */
+  load: Map<string, SpaceLoad>;
+  /** "shift" | "week" | "month" | "availability", for the tooltips. */
+  horizonLabel: string;
 }) {
   const W = 1000;
   const MARKER_W = 92;
   const MARKER_H = 26;
+  const maxLoad = Math.max(0, ...rows.map((r) => load.get(r.compartment.compartment_no)?.hours ?? 0));
   // A lane is a marker plus enough gap that two stacked labels stay legible.
   const LANE_H = 34;
 
@@ -2016,6 +2114,28 @@ function PlanView({
                 <text x={x} y={y + 4} fill={tone.fg} fontSize={10} textAnchor="middle" fontFamily="monospace">
                   {r.compartment.compartment_no}
                 </text>
+                {/* The window's load, worn on the marker: an underline scaled
+                    to the busiest space on this deck. A space with nothing in
+                    the window wears nothing — a legible difference at a
+                    glance, which is what makes the horizon real here. */}
+                {(() => {
+                  const l = load.get(no);
+                  if (!l || l.hours < 1 || maxLoad < 1) return null;
+                  const w = Math.max(6, (MARKER_W - 10) * Math.min(1, l.hours / maxLoad));
+                  return (
+                    <g pointerEvents="none">
+                      <rect
+                        x={x - MARKER_W / 2 + 5} y={y + MARKER_H / 2 - 4}
+                        width={w} height={2.5} rx={1}
+                        fill={l.refused > 0 ? C.danger : C.accent}
+                        opacity={0.9}
+                      />
+                      <title>
+                        {`${no} this ${horizonLabel}: ${l.count} activit${l.count === 1 ? "y" : "ies"} · ${Math.round(l.hours).toLocaleString()} MH${l.refused > 0 ? ` · ${l.refused} refused` : ""}`}
+                      </title>
+                    </g>
+                  );
+                })()}
                 {r.rules_fired.length > 0 && (
                   <circle cx={x + MARKER_W / 2 - 6} cy={y - MARKER_H / 2 + 3} r={5} fill={tone.fg} />
                 )}

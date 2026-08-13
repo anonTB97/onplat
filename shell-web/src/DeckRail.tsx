@@ -106,6 +106,8 @@ export function SelectorRail({
   zoneFilter,
   onDeck,
   onZone,
+  load,
+  horizonLabel,
 }: {
   altitude: "ship" | "zone" | "compartment";
   decks: Deck[];
@@ -115,6 +117,10 @@ export function SelectorRail({
   zoneFilter: string | null;
   onDeck: (code: string) => void;
   onZone: (zone: string) => void;
+  /** Scheduled man-hours per space inside the reading window, when the
+   *  caller wants the rail to answer for the horizon too. */
+  load?: Map<string, { hours: number; count: number; refused: number }>;
+  horizonLabel?: string;
 }) {
   const shell: React.CSSProperties = {
     flex: `0 0 ${RAIL_W}px`,
@@ -134,6 +140,22 @@ export function SelectorRail({
           const onThis = rows.filter((r) => r.compartment.deck_code === d.code);
           const held = onThis.filter((r) => r.readiness === "held").length;
           const restricted = onThis.filter((r) => r.state !== "ALLOW").length;
+          // The horizon's answer per deck: what the schedule actually puts
+          // here inside the reading window.
+          const deckLoad = load
+            ? onThis.reduce(
+                (acc, r) => {
+                  const l = load.get(r.compartment.compartment_no);
+                  if (l) {
+                    acc.hours += l.hours;
+                    acc.count += l.count;
+                    acc.refused += l.refused;
+                  }
+                  return acc;
+                },
+                { hours: 0, count: 0, refused: 0 },
+              )
+            : null;
           return (
             <Row
               key={d.code}
@@ -154,6 +176,15 @@ export function SelectorRail({
                   <>
                     {d.compartment_count} space{d.compartment_count === 1 ? "" : "s"}
                     {restricted > 0 && ` · ${restricted} restricted`}
+                    {deckLoad && deckLoad.count > 0 && (
+                      <div
+                        title={`Scheduled on this deck inside the reading window (this ${horizonLabel ?? "window"})`}
+                        style={{ color: deckLoad.refused > 0 ? READINESS_STYLE.held.fg : "#8b93a2" }}
+                      >
+                        this {horizonLabel}: {deckLoad.count} act · {Math.round(deckLoad.hours).toLocaleString()} MH
+                        {deckLoad.refused > 0 && ` · ${deckLoad.refused} refused`}
+                      </div>
+                    )}
                   </>
                 )}
               </div>

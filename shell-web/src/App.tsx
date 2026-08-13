@@ -396,6 +396,8 @@ export default function App() {
               onFocused={() => setFocus(null)}
               onSpaceChange={setSharedSpace}
               asOf={asOf}
+              horizon={horizon}
+              now={frame?.now ?? null}
             />
           )}
 

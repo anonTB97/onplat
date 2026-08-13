@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { Activity } from "./api";
-import { windowLoadBySpace, windowLoadTotal } from "./windowLoad";
+import { activityWindowHours, refusalOverlaps, windowLoadBySpace, windowLoadTotal } from "./windowLoad";
 
 const DAY = 86_400_000;
 
@@ -94,5 +94,40 @@ describe("windowLoadTotal", () => {
   it("an empty or inverted window answers zero, not garbage", () => {
     const t = windowLoadTotal([act({})], 5 * DAY, 0);
     expect(t).toEqual({ hours: 0, count: 0, refused: 0, unlocated: 0 });
+  });
+});
+
+describe("activityWindowHours", () => {
+  it("pro-rates and zeroes the degenerate cases", () => {
+    expect(activityWindowHours(act({}), 0, 5 * DAY)).toBeCloseTo(50);
+    expect(activityWindowHours(act({ is_milestone: true }), 0, 5 * DAY)).toBe(0);
+    expect(activityWindowHours(act({ planned: null }), 0, 5 * DAY)).toBe(0);
+    expect(activityWindowHours(act({}), 5 * DAY, 0)).toBe(0);
+  });
+});
+
+describe("refusalOverlaps", () => {
+  const refusedAt = (at: number, earliest_clear: number | null) =>
+    act({
+      executability: {
+        verdict: "not_executable",
+        at, state: "BLOCK", rule_code: "R1", origin: "3-100-0-Q",
+        hazard: "h", clearing_authority: "x", earliest_clear,
+      } as never,
+    });
+  it("a hold that clears before the window opens does not flag it", () => {
+    expect(refusalOverlaps(refusedAt(0, DAY), 2 * DAY, 3 * DAY)).toBe(false);
+  });
+  it("a hold biting inside the window flags it", () => {
+    expect(refusalOverlaps(refusedAt(0, 2.5 * DAY), 2 * DAY, 3 * DAY)).toBe(true);
+  });
+  it("a refusal that only begins after the window does not flag it", () => {
+    expect(refusalOverlaps(refusedAt(5 * DAY, null), 2 * DAY, 3 * DAY)).toBe(false);
+  });
+  it("an unclocked (verification-gated) hold is open-ended", () => {
+    expect(refusalOverlaps(refusedAt(0, null), 2 * DAY, 3 * DAY)).toBe(true);
+  });
+  it("an executable activity never flags", () => {
+    expect(refusalOverlaps(act({}), 0, DAY)).toBe(false);
   });
 });

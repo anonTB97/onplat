@@ -76,3 +76,27 @@ export function windowLoadTotal(
   }
   return { hours, count, refused, unlocated };
 }
+
+/** One activity's scheduled man-hours inside [t0, t1) — budget pro-rated by
+ *  overlap, zero for milestones, undated rows and empty windows. The same
+ *  rule as everywhere: a long job contributes to a shift only what the shift
+ *  actually holds of it. */
+export function activityWindowHours(a: Activity, t0: number, t1: number): number {
+  if (a.is_milestone || a.planned === null || !(t1 > t0)) return 0;
+  const w = a.planned;
+  const overlap = Math.min(w.end, t1) - Math.max(w.start, t0);
+  if (overlap <= 0) return 0;
+  return (a.budget_hours * overlap) / Math.max(1, w.end - w.start);
+}
+
+/** Whether the activity's REFUSAL interval overlaps [t0, t1) — from the
+ *  served evidence alone: the first refusing instant, and the hold's own
+ *  earliest clear (an unclocked, verification-gated hold is open-ended).
+ *  This is what lets a shift board say "refused during THIS shift" instead
+ *  of amber-flagging tonight for a hold that only bites next month. */
+export function refusalOverlaps(a: Activity, t0: number, t1: number): boolean {
+  const e = a.executability;
+  if (e.verdict !== "not_executable") return false;
+  if (e.at >= t1) return false;
+  return e.earliest_clear === null || e.earliest_clear > t0;
+}

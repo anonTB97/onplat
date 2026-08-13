@@ -26,6 +26,7 @@ import {
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { chipStyle, C, mh } from "./theme";
+import { activityWindowHours, refusalOverlaps } from "./windowLoad";
 
 const fmtTime = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
 const fmtDay = (ms: number): string => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
@@ -133,8 +134,22 @@ export default function DailyOps({
     [activities, inSlice],
   );
 
-  // Per trade, heaviest remaining first — the order a superintendent walks the
-  // morning meeting in.
+  // What the SLICE actually holds of an activity: pro-rated by overlap when a
+  // shift window is chosen, so a three-month job contributes to tonight only
+  // what tonight holds of it. This is what stops every shift reading the same.
+  const sliceHours = useMemo(() => {
+    return (a: Activity): number =>
+      win === null ? a.remaining_hours : activityWindowHours(a, win.start, win.end);
+  }, [win]);
+  // A refusal DURING the slice, from the served evidence — distinct from the
+  // plan-level verdict, which may bite a month from tonight.
+  const refusedInSlice = useMemo(() => {
+    return (a: Activity): boolean =>
+      win !== null && refusalOverlaps(a, win.start, win.end);
+  }, [win]);
+
+  // Per trade, heaviest slice first — the order a superintendent walks the
+  // morning meeting in. In shift mode the weight is the shift's own hours.
   const byTrade = useMemo(() => {
     const groups = new Map<string, Activity[]>();
     for (const a of onShift) {
@@ -145,18 +160,22 @@ export default function DailyOps({
     return [...groups.entries()]
       .map(([trade, list]) => ({
         trade,
-        list: list.sort((x, y) => y.remaining_hours - x.remaining_hours),
+        list: list.sort((x, y) => sliceHours(y) - sliceHours(x)),
         remaining: list.reduce((s, a) => s + a.remaining_hours, 0),
+        slice: list.reduce((s, a) => s + sliceHours(a), 0),
       }))
-      .sort((x, y) => y.remaining - x.remaining);
-  }, [onShift]);
+      .sort((x, y) => y.slice - x.slice);
+  }, [onShift, sliceHours]);
 
   if (error) return <p style={{ color: C.danger }}>Register unavailable ({error}).</p>;
   if (!activities) return <Loading label="Assembling the morning…" />;
 
   const heldCount = onShift.filter((a) => a.compartment_no && refused.has(a.compartment_no)).length;
   const doomedCount = onShift.filter((a) => a.executability.verdict === "not_executable").length;
+  const refusedNowCount = onShift.filter(refusedInSlice).length;
   const remaining = onShift.reduce((s, a) => s + a.remaining_hours, 0);
+  const sliceTotal = onShift.reduce((s, a) => s + sliceHours(a), 0);
+  const undatedCount = onShift.filter((a) => a.planned === null).length;
 
   const badge = (fg: string, bg: string, border: string): React.CSSProperties => ({
     font: "inherit", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4, cursor: "pointer",
@@ -179,23 +198,27 @@ export default function DailyOps({
     const rows = byTrade
       .map(
         (g) => `
-      <h2>${esc(g.trade)} <small>${nActs(g.list.length)} · ${g.remaining.toLocaleString()} MH remaining</small></h2>
+      <h2>${esc(g.trade)} <small>${nActs(g.list.length)}${win !== null ? ` · ${Math.round(g.slice).toLocaleString()} MH this shift` : ""} · ${g.remaining.toLocaleString()} MH open total</small></h2>
       <table>
-        <tr><th>Activity</th><th>Name</th><th>Slot</th><th>Space</th><th style="text-align:right">MH left</th><th>Warnings</th></tr>
+        <tr><th>Activity</th><th>Name</th><th>Slot</th><th>Space</th><th style="text-align:right">${win !== null ? "MH shift / total" : "MH left"}</th><th>Warnings</th></tr>
         ${g.list
           .map((a) => {
             const heldNow = a.compartment_no !== null && refused.has(a.compartment_no);
             const doomed = a.executability.verdict === "not_executable";
             const warns = [
               heldNow ? "HELD NOW" : "",
-              doomed ? "NOT EXECUTABLE AS PLANNED" : "",
+              doomed && refusedInSlice(a)
+                ? "REFUSED THIS SHIFT"
+                : doomed
+                  ? "NOT EXECUTABLE AS PLANNED"
+                  : "",
               a.planned === null ? "UNDATED" : "",
             ].filter(Boolean).join(" · ");
             return `<tr${warns ? ' class="warn"' : ""}>
               <td class="mono">${esc(a.code)}</td><td>${esc(a.name)}</td>
               <td class="mono">${esc(fmtSlot(a.planned))}</td>
               <td class="mono">${esc(a.compartment_no ?? "not located")}</td>
-              <td style="text-align:right">${a.remaining_hours.toLocaleString()}</td>
+              <td style="text-align:right">${win !== null && a.planned !== null ? `${Math.round(sliceHours(a)).toLocaleString()} / ` : ""}${a.remaining_hours.toLocaleString()}</td>
               <td class="mono">${warns || "—"}</td>
             </tr>`;
           })
@@ -219,7 +242,7 @@ export default function DailyOps({
         footer { margin-top: 18px; font-size: 10px; color: #555; }
       </style></head><body>
       <h1>Shift board — ${esc(hullLabel)}</h1>
-      <p>${esc(sliceLabel)} · ${nActs(onShift.length)} · ${remaining.toLocaleString()} MH remaining
+      <p>${esc(sliceLabel)} · ${nActs(onShift.length)} · ${win !== null ? `${Math.round(sliceTotal).toLocaleString()} MH scheduled this shift · ` : ""}${remaining.toLocaleString()} MH open total
       ${heldCount > 0 ? ` · ${heldCount} in a space the engine refuses now` : ""}
       ${doomedCount > 0 ? ` · ${doomedCount} not executable as planned` : ""}</p>
       ${eventRows}${rows}
@@ -240,14 +263,27 @@ export default function DailyOps({
         title="The shift board"
         stats={[
           { value: onShift.length, label: onShift.length === 1 ? "activity" : "activities", title: `Planned for ${sliceLabel}` },
-          { value: mh(remaining), label: "remaining in them" },
+          win !== null
+            ? {
+                value: mh(Math.round(sliceTotal)), label: "scheduled this shift",
+                title: `Budget pro-rated by each activity's overlap with the shift window — a long job contributes only what this shift holds of it. Total open on these activities: ${mh(remaining)}. Undated rows carry no window and no shift hours.`,
+              }
+            : { value: mh(remaining), label: "remaining in them" },
+          win !== null && refusedNowCount > 0 && {
+            value: refusedNowCount, label: "refused during this shift", tone: C.danger,
+            title: "The governing hold's own interval — from its first refusing instant to its earliest clear — overlaps this shift. This crew cannot go tonight.",
+          },
           heldCount > 0 && {
             value: heldCount, label: "in refused spaces", tone: C.danger,
             title: "Booked into a space the engine refuses at this instant — live fact, moves with the clock.",
           },
           doomedCount > 0 && {
-            value: doomedCount, label: "not executable", tone: C.warn,
-            title: "The space refuses work somewhere inside the activity's own planned window — a property of the plan.",
+            value: doomedCount, label: win !== null ? "not executable (plan)" : "not executable", tone: C.warn,
+            title: "The space refuses work somewhere inside the activity's own planned window — a property of the plan, not necessarily during this shift.",
+          },
+          win !== null && undatedCount > 0 && {
+            value: undatedCount, label: "undated ride every shift", tone: C.warn,
+            title: "No dates in the schedule of record — shown on every shift rather than hidden from all of them, but carrying no shift hours.",
           },
         ]}
         note={
@@ -305,7 +341,13 @@ export default function DailyOps({
             <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "8px 12px", borderBottom: `1px solid ${C.line}` }}>
               <b style={{ fontSize: 13 }}>{g.trade}</b>
               <span style={{ fontSize: 11, color: C.dim }}>
-                {nActs(g.list.length)} · {mh(g.remaining)} remaining
+                {win !== null ? (
+                  <span title={`This shift's share, pro-rated by overlap. Total open on these activities: ${mh(g.remaining)}.`}>
+                    {nActs(g.list.length)} · <b style={{ color: C.bright }}>{mh(Math.round(g.slice))} this shift</b> · {mh(g.remaining)} total left
+                  </span>
+                ) : (
+                  <>{nActs(g.list.length)} · {mh(g.remaining)} remaining</>
+                )}
               </span>
             </header>
             <div>
@@ -329,8 +371,13 @@ export default function DailyOps({
                         )}
                       </span>
                     </span>
-                    <span style={{ fontSize: 10.5, color: C.dim, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
-                      {mh(a.remaining_hours)}
+                    <span
+                      title={win !== null && a.planned !== null ? `${mh(Math.round(sliceHours(a)))} falls inside this shift · ${mh(a.remaining_hours)} open in total` : undefined}
+                      style={{ fontSize: 10.5, color: C.dim, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {win !== null && a.planned !== null
+                        ? `${Math.round(sliceHours(a)).toLocaleString()} / ${a.remaining_hours.toLocaleString()} MH`
+                        : mh(a.remaining_hours)}
                     </span>
                     {a.compartment_no ? (
                       <button
@@ -361,15 +408,23 @@ export default function DailyOps({
                         not located
                       </span>
                     )}
-                    {doomed && (
+                    {doomed && refusedInSlice(a) ? (
                       <button
                         onClick={() => onOpenSpace(a.compartment_no ?? "")}
-                        title="The space refuses work somewhere inside this activity's planned window — the plan, not the moment. Click for the options."
+                        title="The governing hold's interval overlaps THIS shift — this crew cannot go during it. Click for the evidence and the options."
+                        style={badge(C.dangerSoft, "rgba(239,68,68,0.12)", "rgba(239,68,68,0.45)")}
+                      >
+                        REFUSED THIS SHIFT
+                      </button>
+                    ) : doomed ? (
+                      <button
+                        onClick={() => onOpenSpace(a.compartment_no ?? "")}
+                        title="The space refuses work somewhere inside this activity's planned window — the plan's problem, not necessarily this shift's. Click for the options."
                         style={badge("#fbbf24", "rgba(245,158,11,0.10)", "rgba(245,158,11,0.4)")}
                       >
                         NOT EXECUTABLE
                       </button>
-                    )}
+                    ) : null}
                   </div>
                 );
               })}

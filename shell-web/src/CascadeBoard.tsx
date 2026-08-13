@@ -353,7 +353,20 @@ export default function CascadeBoard({
                   const sub = rowOf.get(no) === 1 ? 8 : -4;
                   const y = top + LANE_H / 2 + sub;
                   return (
-                    <g key={no} onClick={() => onOpenSpace(no)} style={{ cursor: "pointer" }}>
+                    <g
+                      key={no}
+                      onClick={() => onOpenSpace(no)}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`${no} — ${r.compartment.name}. ${isClosed ? "Shut by this action." : isFreed ? "Freed by this action." : heldNow ? "Held now." : "Open."} Press Enter to open on the deck plan.`}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onOpenSpace(no);
+                        }
+                      }}
+                      style={{ cursor: "pointer" }}
+                    >
                       <title>
                         {`${no} — ${r.compartment.name}\n` +
                           (isClosed

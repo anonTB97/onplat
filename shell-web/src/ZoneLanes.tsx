@@ -118,6 +118,10 @@ export function ZoneLanes({
   /** What the bar fill encodes: the reader's choice of colour language. */
   const [colourBy, setColourBy] = useState<"status" | "trade" | "risk" | "grade">("status");
   const [showKey, setShowKey] = useState(false);
+  /** The keyboard cursor over the bars: arrows move it, Enter inspects,
+   *  Escape clears. One tab stop for a thousand bars — a canvas this dense
+   *  cannot be a tab sequence. */
+  const [kbIdx, setKbIdx] = useState<number | null>(null);
   useEffect(() => {
     if (!showKey) return undefined;
     const onKey = (e: KeyboardEvent) => {
@@ -249,6 +253,33 @@ export function ZoneLanes({
   // as-of label needs ground of its own instead of overlapping lane content.
   const H = top + 22;
 
+  // The keyboard cursor's world: bars in lane-then-start order, and a camera
+  // that follows it — a focused bar outside the window would be an invisible
+  // selection.
+  const kbBars = lanes.flatMap((l) => l.bars);
+  const kbBar = kbIdx === null ? undefined : kbBars[Math.min(kbIdx, kbBars.length - 1)];
+  const moveKb = (delta: number) => {
+    setKbIdx((i) => {
+      const next = Math.max(0, Math.min(kbBars.length - 1, (i ?? -1) + delta));
+      const b = kbBars[next];
+      if (b && (b.start < win.v0 || b.end > win.v1)) {
+        const mid = (b.start + b.end) / 2;
+        let v0 = mid - span / 2;
+        let v1 = mid + span / 2;
+        if (v0 < full.v0) {
+          v1 += full.v0 - v0;
+          v0 = full.v0;
+        }
+        if (v1 > full.v1) {
+          v0 -= v1 - full.v1;
+          v1 = full.v1;
+        }
+        setView(v0 <= full.v0 && v1 >= full.v1 ? null : { v0, v1 });
+      }
+      return next;
+    });
+  };
+
   // Where each coded thing sits, for the logic arrows: bars mid-height, key
   // events at their diamond. Held in time units and mapped through x() at
   // draw, so the same geometry survives every camera move.
@@ -304,9 +335,36 @@ export function ZoneLanes({
   return (
     <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.well, overflowX: "auto" }}>
       <ZoomWheel svgRef={svgRef} winRef={winRef} fullRef={fullRef} setView={setView} />
+      {/* What the keyboard cursor rests on, for assistive tech. */}
+      <div
+        aria-live="polite"
+        style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clipPath: "inset(50%)" }}
+      >
+        {kbBar
+          ? `${kbBar.a.code} — ${kbBar.a.name}. ${kbBar.a.executability.verdict === "not_executable" ? "Not executable as planned. " : ""}Press Enter to open.`
+          : ""}
+      </div>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
+        tabIndex={0}
+        role="application"
+        aria-label="Gantt board. Left and right arrow keys walk the bars, Enter opens the focused activity, Escape clears."
+        onKeyDown={(e) => {
+          if (e.key === "ArrowRight") {
+            e.preventDefault();
+            moveKb(1);
+          } else if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            moveKb(-1);
+          } else if (e.key === "Enter" && kbBar) {
+            if (onInspect) onInspect(kbBar.a);
+            else if (kbBar.a.compartment_no) onOpenSpace(kbBar.a.compartment_no);
+          } else if (e.key === "Escape") {
+            setKbIdx(null);
+          }
+        }}
+        onBlur={() => setKbIdx(null)}
         style={{ width: "100%", minWidth: 900, display: "block", touchAction: "none", cursor: drag.current ? "grabbing" : undefined }}
         onPointerDown={(e) => {
           if (e.button !== 0) return;
@@ -372,6 +430,15 @@ export function ZoneLanes({
                   fontSize={9.5} fontWeight={700} fontFamily="monospace"
                   onClick={() => {
                     if (lane.zone !== NOWHERE && !drag.current?.moved) onOpenSpace(lane.zone);
+                  }}
+                  tabIndex={lane.zone === NOWHERE ? undefined : 0}
+                  role={lane.zone === NOWHERE ? undefined : "button"}
+                  aria-label={lane.zone === NOWHERE ? undefined : `Open ${lane.zone} on the deck plan`}
+                  onKeyDown={(e) => {
+                    if ((e.key === "Enter" || e.key === " ") && lane.zone !== NOWHERE) {
+                      e.preventDefault();
+                      onOpenSpace(lane.zone);
+                    }
                   }}
                   style={lane.zone === NOWHERE ? undefined : { cursor: "pointer" }}
                 >
@@ -492,6 +559,22 @@ export function ZoneLanes({
               })}
             </g>
           ))}
+
+          {/* The keyboard cursor: where Enter will land. */}
+          {kbBar && kbBar.end >= win.v0 && kbBar.start <= win.v1 && (() => {
+            const lane = lanes.find((l) => l.bars.includes(kbBar));
+            if (!lane) return null;
+            const bx = x(kbBar.start);
+            const bw = Math.max(3, x(kbBar.end) - bx);
+            const by = lane.top + 7 + kbBar.level * ROW_H;
+            return (
+              <rect
+                x={bx - 2.5} y={by - 2.5} width={bw + 5} height={ROW_H - 4 + 5} rx={4}
+                fill="none" stroke={C.accent} strokeWidth={1.6} strokeDasharray="4 3"
+                pointerEvents="none"
+              />
+            );
+          })()}
 
           {/* Engine-accepted re-sequence proposals, as ghosts: the same bar,
               dashed, where the rules WOULD permit it — a proposal drawn where

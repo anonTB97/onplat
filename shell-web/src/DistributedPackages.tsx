@@ -11,6 +11,7 @@ import {
   type PackageSummary,
 } from "./api";
 import { IsoWalk, type WalkStep, type WalkTone } from "./IsoWalk";
+import { ScheduleTrace } from "./ScheduleTrace";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { C, fmtClear, mh, STATE_STYLE } from "./theme";
@@ -309,6 +310,17 @@ export default function DistributedPackages({
 
           {/* the waits-on map: what cannot move until what completes */}
           <SegmentFlow detail={detail} g={g} />
+
+          {/* the receipts: which schedule rows this package is made of */}
+          <ScheduleTrace
+            identity={identity}
+            vesselId={vesselId}
+            asOf={asOf}
+            packageCode={detail.package.code}
+            packageBudget={detail.package.budget_hours}
+            footprintSpaces={detail.footprint.map((f) => f.compartment_no)}
+            onOpenSpace={onOpenSpace}
+          />
 
           {/* the footprint in three dimensions, stepped */}
           <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: C.dim, marginBottom: 7 }}>

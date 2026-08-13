@@ -211,6 +211,15 @@ export function IsoWalk({
       <g
         key={no}
         onClick={() => onOpenSpace(no)}
+        tabIndex={0}
+        role="button"
+        aria-label={`${no} — ${g.row.compartment.name}. ${heldNow ? "Held now." : "Permits work."} Press Enter to open on the deck plan.`}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpenSpace(no);
+          }
+        }}
         style={{ cursor: "pointer" }}
         opacity={dimmer}
       >

@@ -38,6 +38,7 @@ import {
 } from "./deckSheets";
 import { C, fmtClear, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE, zoneColour } from "./theme";
 import { parseZoneCsv } from "./ingest";
+import { DiscardButton } from "./DiscardButton";
 import { zoneBands, type ZoneGeometry } from "./zones";
 
 const DIM = C.dim;
@@ -728,6 +729,7 @@ export default function DeckExplorer({
                           const file = e.target.files?.[0];
                           e.target.value = "";
                           if (!file) return;
+                          setZoneMsg(`⏳ reading ${file.name}…`);
                           void file.text().then((text) => {
                             const bounds = parseZoneCsv(text);
                             importZoneChart(identity, vesselId, file.name, bounds, true)
@@ -753,10 +755,11 @@ export default function DeckExplorer({
                       />
                     </label>
                     {zoneChart?.source && (
-                      <button
-                        style={seg(false)}
-                        title="Discard the ingested chart — bands return to inferred."
-                        onClick={() => {
+                      <DiscardButton
+                        what="the zone chart"
+                        title="Throw the ingested chart away — zone bands return to this tool's own inference, and say so."
+                        onDiscard={() => {
+                          setZoneMsg("⏳ discarding the zone chart…");
                           void revertZoneChart(identity, vesselId)
                             .then(() => {
                               setZoneMsg("✓ back to inferred bands");
@@ -764,9 +767,7 @@ export default function DeckExplorer({
                             })
                             .catch((err: unknown) => setZoneMsg(String(err)));
                         }}
-                      >
-                        ⟲ Inferred
-                      </button>
+                      />
                     )}
                     {zoneMsg && (
                       <span style={{ fontSize: 11, color: zoneMsg.startsWith("✓") ? C.ok : C.danger }}>

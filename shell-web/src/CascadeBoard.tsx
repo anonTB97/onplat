@@ -419,6 +419,7 @@ function ActionCard({
   return (
     <button
       onClick={onPick}
+      title="Pick this action — the map and the walkthrough repaint with its consequence: every space it frees, every space it shuts."
       style={{
         textAlign: "left", font: "inherit", cursor: "pointer", padding: "9px 12px",
         borderRadius: 8, background: active ? "#171a22" : C.panel, color: C.text,

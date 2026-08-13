@@ -14,7 +14,8 @@ import {
 import { parseBudgetCsv } from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
-import { C, mh, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
+import { commitBtnStyle, C, errText, mh, msgColor, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
+import { DiscardButton } from "./DiscardButton";
 
 type SortKey = "code" | "remaining" | "compartment" | "start";
 
@@ -161,6 +162,15 @@ export default function WorkOrders({
           <button
             key={k}
             onClick={() => setSort(k)}
+            title={
+              k === "remaining"
+                ? "Largest open man-hours first — where the money is stuck"
+                : k === "code"
+                  ? "By work-item number"
+                  : k === "compartment"
+                    ? "By compartment, so a space's orders sit together"
+                    : "Earliest planned start first"
+            }
             style={{
               padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit", fontSize: 11.5,
               background: sort === k ? C.raised : "transparent",
@@ -177,7 +187,8 @@ export default function WorkOrders({
                   : "Planned start"}
           </button>
         ))}
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, marginLeft: 6, cursor: "pointer" }}>
+        <label
+          title="Only rows whose source document no planner has confirmed — the trust gap to close" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, marginLeft: 6, cursor: "pointer" }}>
           <input
             type="checkbox"
             checked={unverifiedOnly}
@@ -187,7 +198,7 @@ export default function WorkOrders({
         </label>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           {bookMsg && (
-            <span style={{ fontSize: 11, color: bookMsg.startsWith("✓") ? C.ok : C.danger }}>
+            <span style={{ fontSize: 11, color: msgColor(bookMsg) }}>
               {bookMsg}
             </span>
           )}
@@ -208,6 +219,7 @@ export default function WorkOrders({
                 const file = e.target.files?.[0];
                 e.target.value = "";
                 if (!file) return;
+                setBookMsg(`⏳ reading ${file.name}…`);
                 void file.text().then((text) => {
                   const items = parseBudgetCsv(text);
                   importBudgetBook(identity, vesselId, file.name, items, true)
@@ -225,29 +237,25 @@ export default function WorkOrders({
                       });
                       setBookMsg(null);
                     })
-                    .catch((err: unknown) => setBookMsg(String(err)));
+                    .catch((err: unknown) => setBookMsg(errText(err)));
                 });
               }}
             />
           </label>
           {recon?.source && (
-            <button
-              style={{
-                padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit",
-                fontSize: 11.5, color: C.dim, background: "transparent", border: `1px solid ${C.line}`,
-              }}
-              title="Discard the book — hours answer to the seeded work items again."
-              onClick={() => {
+            <DiscardButton
+              what="the budget book"
+              title="Throw the ingested book away — hours answer to the seeded work items again."
+              onDiscard={() => {
+                setBookMsg("⏳ discarding the budget book…");
                 void revertBudgetBook(identity, vesselId)
                   .then(() => {
                     setBookMsg("✓ back to the seeded budgets");
                     setBookNonce((n) => n + 1);
                   })
-                  .catch((err: unknown) => setBookMsg(String(err)));
+                  .catch((err: unknown) => setBookMsg(errText(err)));
               }}
-            >
-              ⟲ Seeded budgets
-            </button>
+            />
           )}
         </span>
       </div>
@@ -260,25 +268,25 @@ export default function WorkOrders({
           <span style={{ color: C.dim }}>{pendingBook.summary}</span>
           <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <button
-              style={{
-                padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit",
-                fontSize: 11.5, color: C.text, background: C.raised, border: `1px solid ${C.accent}`,
-              }}
+              style={commitBtnStyle}
+              title="Store the book: from then on the register's hours answer to it. Reversible with Discard."
               onClick={() => {
                 const staged = pendingBook;
                 setPendingBook(null);
                 if (!staged) return;
+                setBookMsg(`⏳ ingesting ${staged.label}…`);
                 void importBudgetBook(identity, vesselId, staged.label, staged.items, false)
                   .then((r) => {
                     setBookMsg(`✓ ${r.label}: hours now answer to ${r.items} book items`);
                     setBookNonce((n) => n + 1);
                   })
-                  .catch((err: unknown) => setBookMsg(String(err)));
+                  .catch((err: unknown) => setBookMsg(errText(err)));
               }}
             >
               Confirm book
             </button>
             <button
+              title="Walk away — the preview cost nothing and nothing was stored."
               style={{
                 padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit",
                 fontSize: 11.5, color: C.dim, background: "transparent", border: `1px solid ${C.line}`,
@@ -299,14 +307,14 @@ export default function WorkOrders({
               <th style={th}>Title</th>
               <th style={th}>Trade</th>
               <th style={th}>Compartment</th>
-              <th style={{ ...th, textAlign: "right" }}>Budget</th>
-              <th style={{ ...th, textAlign: "right" }}>Earned</th>
-              <th style={{ ...th, textAlign: "right" }}>Remaining</th>
+              <th style={{ ...th, textAlign: "right" }} title="Budgeted man-hours (MH)">Budget</th>
+              <th style={{ ...th, textAlign: "right" }} title="Man-hours of work completed so far (earned value)">Earned</th>
+              <th style={{ ...th, textAlign: "right" }} title="Budget minus earned — the man-hours still to work">Remaining</th>
               <th style={th} title="The planned window, and whether it covers the instant this list was read at">
                 Planned
               </th>
               <th style={th}>Space</th>
-              <th style={th}>Provenance</th>
+              <th style={th} title="Which source document this row came from, and whether a planner confirmed it">Provenance</th>
             </tr>
           </thead>
           <tbody>
@@ -410,7 +418,9 @@ export default function WorkOrders({
         </table>
       </div>
       {rows.length === 0 && (
-        <p style={{ color: C.dim, fontSize: 12.5 }}>No work orders match.</p>
+        <p style={{ color: C.dim, fontSize: 12.5 }}>
+          No work orders match{unverifiedOnly ? " — every order's provenance is confirmed; clear the provenance filter to see them all" : ""}.
+        </p>
       )}
     </div>
   );

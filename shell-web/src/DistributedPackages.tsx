@@ -163,7 +163,12 @@ export default function DistributedPackages({
   }, [identity, vesselId, asOf, detail]);
 
   if (error) {
-    return <p style={{ color: C.danger }}>This hull is out of scope for you ({error}).</p>;
+    return (
+      <p style={{ color: C.danger }}>
+        Couldn&apos;t load the packages — the hull may be out of your scope, or the API is
+        unreachable ({error}).
+      </p>
+    );
   }
   if (packages === null) {
     return <Loading label="Reading the distributed packages…" />;
@@ -272,6 +277,7 @@ export default function DistributedPackages({
           <button
             key={p.code}
             onClick={() => setSelected(p.code)}
+            title={`${p.name} — one work order distributed across ${p.compartment_count} compartments in ${p.segment_count} segments. Click to open its footprint.`}
             style={{
               padding: "6px 11px", borderRadius: 6, cursor: "pointer", font: "inherit", fontSize: 12,
               textAlign: "left",
@@ -396,7 +402,9 @@ export default function DistributedPackages({
 
           {detail.faults.length > 0 && (
             <p style={{ color: C.danger, fontSize: 12.5, marginTop: 12 }}>
-              Topology faults in the source data: {JSON.stringify(detail.faults)}
+              {detail.faults.length} topology fault{detail.faults.length === 1 ? "" : "s"} in the
+              source data — the package&apos;s upstream/downstream links do not all resolve; the
+              affected segments are drawn from what does.
             </p>
           )}
         </>

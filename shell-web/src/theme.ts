@@ -162,8 +162,8 @@ export const badgeStyle = (tone: { fg: string; bg: string; border: string }): Re
 
 /** A square icon button — zoom, reset, close. */
 export const iconBtnStyle: React.CSSProperties = {
-  width: 24,
-  height: 20,
+  width: 26,
+  height: 24,
   borderRadius: 5,
   cursor: "pointer",
   background: "transparent",
@@ -210,6 +210,26 @@ export const ACTIVITY_STATUS: Record<
 
 /** Man-hours, grouped — these numbers are read aloud in a production meeting. */
 export const mh = (n: number): string => `${n.toLocaleString()} MH`;
+
+/** One colour convention for door messages: ✓ green, ⏳ amber, anything else red. */
+export const msgColor = (m: string): string =>
+  m.startsWith("✓") ? C.ok : m.startsWith("⏳") ? C.warn : C.danger;
+
+/** An error, without the "Error:" scaffolding — copy a person reads. */
+export const errText = (e: unknown): string =>
+  e instanceof Error ? e.message : String(e);
+
+/** The commit button of a staged flow — one shape for every Confirm. */
+export const commitBtnStyle: React.CSSProperties = {
+  font: "inherit",
+  fontSize: 11.5,
+  cursor: "pointer",
+  padding: "3px 10px",
+  borderRadius: 6,
+  color: C.text,
+  background: C.raised,
+  border: `1px solid ${C.accent}`,
+};
 
 /** A hold time, or an honest statement that there is no clock on it. */
 export const fmtClear = (ms: number | null): string =>

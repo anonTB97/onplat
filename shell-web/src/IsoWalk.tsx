@@ -290,7 +290,8 @@ export function IsoWalk({
         if (e.key === "ArrowRight") setIdx((i) => Math.min(i + 1, steps.length - 1));
         if (e.key === "ArrowLeft") setIdx((i) => Math.max(i - 1, 0));
       }}
-      style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.well, outline: "none" }}
+      aria-label="3D walkthrough — focus this panel and use the left/right arrow keys to step"
+      style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.well }}
     >
       {/* the camera: how the same scene is angled */}
       <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "7px 12px 5px", fontSize: 10, color: C.dim }}>
@@ -484,6 +485,7 @@ export function IsoWalk({
         <div style={{ display: "flex", gap: 6, alignItems: "center", paddingTop: 2 }}>
           <button
             onClick={() => setIdx((i) => Math.max(i - 1, 0))}
+            title="Previous step (or press ←)"
             disabled={idx === 0}
             style={{
               font: "inherit", fontSize: 12, width: 26, padding: "3px 0", borderRadius: 6,
@@ -498,6 +500,7 @@ export function IsoWalk({
           </span>
           <button
             onClick={() => setIdx((i) => Math.min(i + 1, steps.length - 1))}
+            title="Next step (or press →)"
             disabled={idx >= steps.length - 1}
             style={{
               font: "inherit", fontSize: 12, width: 26, padding: "3px 0", borderRadius: 6,
@@ -517,7 +520,7 @@ export function IsoWalk({
               onClick={() => setIdx(i)}
               title={s.title}
               style={{
-                width: 9, height: 9, borderRadius: 5, padding: 0, cursor: "pointer",
+                width: 13, height: 13, borderRadius: 7, padding: 0, cursor: "pointer",
                 background: i === idx ? TONE_FG[s.tone] : i < idx ? `${TONE_FG[s.tone]}88` : "transparent",
                 border: `1px solid ${i <= idx ? TONE_FG[s.tone] : C.faint}`,
               }}

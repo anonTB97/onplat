@@ -137,7 +137,12 @@ export function LoadDigest({
   }, [activities, spaces, grain]);
 
   if (periods.length === 0) {
-    return <p style={{ color: C.dim, fontSize: 12.5 }}>Nothing dated in the register.</p>;
+    return (
+      <p style={{ color: C.dim, fontSize: 12.5 }}>
+        Nothing dated in the register — import a schedule with ⭱ Import XER above, or check the
+        Register view for undated rows.
+      </p>
+    );
   }
 
   const cellOf = (lane: string, i: number) => cells.get(`${lane}·${i}`);
@@ -154,10 +159,18 @@ export function LoadDigest({
   return (
     <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.well }}>
       <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "8px 12px", borderBottom: `1px solid ${C.line}` }}>
-        <button style={chipStyle(grain === "week")} onClick={() => setGrain("week")}>
+        <button
+          style={chipStyle(grain === "week")}
+          onClick={() => setGrain("week")}
+          title="One column per week — the working grain for the next month or two"
+        >
           Week by week
         </button>
-        <button style={chipStyle(grain === "month")} onClick={() => setGrain("month")}>
+        <button
+          style={chipStyle(grain === "month")}
+          onClick={() => setGrain("month")}
+          title="One column per month — the whole availability's shape at a glance"
+        >
           Month by month
         </button>
         <span style={{ fontSize: 11, color: C.dim, marginLeft: 6 }}>

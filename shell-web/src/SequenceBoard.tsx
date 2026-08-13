@@ -37,7 +37,8 @@ import { Loading } from "./Loading";
 import { LoadDigest } from "./LoadDigest";
 import { ModuleHeader } from "./ModuleHeader";
 import { ZoneLanes } from "./ZoneLanes";
-import { tdStyle, thStyle, chipStyle, C, mh } from "./theme";
+import { tdStyle, thStyle, chipStyle, commitBtnStyle, C, errText, mh, msgColor } from "./theme";
+import { DiscardButton } from "./DiscardButton";
 
 type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
 
@@ -135,6 +136,7 @@ export default function SequenceBoard({
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 } | null>(null);
   const [openEvidence, setOpenEvidence] = useState<string | null>(null);
   const [alternatives, setAlternatives] = useState<AlternativeRow[]>([]);
+  const [altsSettled, setAltsSettled] = useState(false);
   /** The row under inspection — any click on an activity opens it. */
   const [inspect, setInspect] = useState<Activity | null>(null);
 
@@ -172,13 +174,17 @@ export default function SequenceBoard({
   // under a new hull's bars.
   useEffect(() => {
     setAlternatives([]);
+    setAltsSettled(false);
     let stale = false;
     scheduleAlternatives(identity, vesselId, asOf)
       .then((r) => {
         if (!stale) setAlternatives(r.alternatives);
       })
       .catch(() => {
-        /* the board simply shows no proposals */
+        /* settled-without-rows renders as "unavailable" in the inspector */
+      })
+      .finally(() => {
+        if (!stale) setAltsSettled(true);
       });
     return () => {
       stale = true;
@@ -305,7 +311,7 @@ export default function SequenceBoard({
   const chip = chipStyle;
 
   return (
-    <div>
+    <div style={{ marginRight: inspect ? 406 : 0, transition: "margin-right 0.15s ease" }}>
       <ModuleHeader
         kicker={`Sequence Board · ${hullLabel}`}
         title="The activity register"
@@ -360,7 +366,11 @@ export default function SequenceBoard({
           how a real P6 export becomes the thing on screen, and the export is
           how what is on screen goes back to whoever plans in spreadsheets. */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <button style={chip(boardView === "register")} onClick={() => setBoardView("register")}>
+        <button
+          style={chip(boardView === "register")}
+          onClick={() => setBoardView("register")}
+          title="Every activity as a sortable, filterable table — the reading view"
+        >
           Register
         </button>
         <button
@@ -386,9 +396,7 @@ export default function SequenceBoard({
         </button>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           {importMsg && (
-            <span style={{ fontSize: 11, color: importMsg.startsWith("✓") ? C.ok : importMsg.startsWith("⏳") ? C.warn : C.danger }}>
-              {importMsg}
-            </span>
+            <span style={{ fontSize: 11, color: msgColor(importMsg) }}>{importMsg}</span>
           )}
           <label style={{ ...chip(false), display: "inline-flex", alignItems: "center", gap: 5 }} title="Import a Primavera P6 XER export as this hull's schedule of record. All-or-nothing: one rejected line refuses the file.">
             ⭱ Import XER
@@ -407,7 +415,7 @@ export default function SequenceBoard({
                       setPending({ label: file.name, xer, preview: r });
                       setImportMsg(null);
                     })
-                    .catch((err: unknown) => setImportMsg(String(err))),
+                    .catch((err: unknown) => setImportMsg(errText(err))),
                 );
               }}
             />
@@ -449,20 +457,19 @@ export default function SequenceBoard({
             ⭳ Edges CSV
           </button>
           {source !== null && (
-            <button
-              style={chip(false)}
-              title="Discard the ingested schedule and serve the generated register again."
-              onClick={() => {
+            <DiscardButton
+              what="the ingested schedule"
+              title="Throw away the ingested schedule of record; the generated demo register is served again."
+              onDiscard={() => {
+                setImportMsg("⏳ discarding the ingested schedule…");
                 void revertSchedule(identity, vesselId)
                   .then(() => {
-                    setImportMsg("✓ reverted to the generated register");
+                    setImportMsg("✓ back to the generated register");
                     setReloadNonce((n) => n + 1);
                   })
-                  .catch((err: unknown) => setImportMsg(String(err)));
+                  .catch((err: unknown) => setImportMsg(errText(err)));
               }}
-            >
-              ⟲ Revert
-            </button>
+            />
           )}
         </span>
       </div>
@@ -489,7 +496,8 @@ export default function SequenceBoard({
               </span>
               <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                 <button
-                  style={chip(true)}
+                  style={commitBtnStyle}
+                  title="Store this schedule as the hull's schedule of record. Reversible: Discard brings the generated register back."
                   onClick={() => {
                     const staged = pending;
                     setPending(null);
@@ -500,12 +508,18 @@ export default function SequenceBoard({
                         setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);
                         setReloadNonce((n) => n + 1);
                       })
-                      .catch((err: unknown) => setImportMsg(String(err)));
+                      .catch((err: unknown) => setImportMsg(errText(err)));
                   }}
                 >
                   Confirm import
                 </button>
-                <button style={chip(false)} onClick={() => setPending(null)}>Cancel</button>
+                <button
+                  style={chip(false)}
+                  title="Walk away — the preview cost nothing and nothing was stored."
+                  onClick={() => setPending(null)}
+                >
+                  Cancel
+                </button>
               </span>
             </div>
             <div style={line}>
@@ -516,7 +530,7 @@ export default function SequenceBoard({
               {m.located_derived.length > 0 && (
                 <span
                   style={{ color: C.warn }}
-                  title="A placard parsed out of the task's own name — the parser's guess, graded medium and listed so it can be inspected and refused."
+                  title="A compartment number read out of the task's own name (its door placard) — the parser's guess, graded medium and listed so it can be inspected and refused."
                 >
                   · {m.located_derived.length} read from task names:{" "}
                   {m.located_derived.slice(0, 8).map((d) => `${d.activity} → ${d.compartment}`).join(", ")}
@@ -586,15 +600,23 @@ export default function SequenceBoard({
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          title="Narrow the register by anything a row carries — activity code, name, compartment, work order"
           placeholder="Search code, name, space, work order…"
           style={{
             font: "inherit", fontSize: 12, padding: "5px 9px", minWidth: 240,
             background: "#0b0c0e", color: C.text, border: `1px solid ${C.line}`, borderRadius: 6,
           }}
         />
-        <button style={chip(trade === null)} onClick={() => setTrade(null)}>All trades</button>
+        <button style={chip(trade === null)} onClick={() => setTrade(null)} title="Show every trade's work">
+          All trades
+        </button>
         {trades.map((t) => (
-          <button key={t} style={chip(trade === t)} onClick={() => setTrade(trade === t ? null : t)}>
+          <button
+            key={t}
+            style={chip(trade === t)}
+            onClick={() => setTrade(trade === t ? null : t)}
+            title={`Show only ${t} work · click again to clear`}
+          >
             {t}
           </button>
         ))}
@@ -620,15 +642,26 @@ export default function SequenceBoard({
         </select>
         <span style={{ width: 1, height: 18, background: C.line }} />
         {(["all", "not_started", "in_progress", "complete"] as StatusFilter[]).map((k) => (
-          <button key={k} style={chip(status === k)} onClick={() => setStatus(k)}>
+          <button
+            key={k}
+            style={chip(status === k)}
+            onClick={() => setStatus(k)}
+            title={k === "all" ? "Show every status" : `Show only ${STATUS_LABEL[k].label.toLowerCase()} activities`}
+          >
             {k === "all" ? "Any status" : STATUS_LABEL[k].label.toLowerCase()}
           </button>
         ))}
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, cursor: "pointer" }}>
+        <label
+          title="Only activities planned for the instant on the time control"
+          style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, cursor: "pointer" }}
+        >
           <input type="checkbox" checked={inWindowOnly} onChange={(e) => setInWindowOnly(e.target.checked)} />
           In window now
         </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: notExecOnly ? C.danger : C.dim, cursor: "pointer" }}>
+        <label
+          title="Only the refusals — work whose space refuses it somewhere inside its planned window"
+          style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: notExecOnly ? C.danger : C.dim, cursor: "pointer" }}
+        >
           <input type="checkbox" checked={notExecOnly} onChange={(e) => setNotExecOnly(e.target.checked)} />
           Not executable
         </label>
@@ -659,12 +692,19 @@ export default function SequenceBoard({
                 return (
                   <th
                     key={key}
+                    tabIndex={0}
                     onClick={() =>
                       // Cycle: schedule order → ascending → descending → back.
                       setSort(
                         !active ? { key, dir: 1 } : sort?.dir === 1 ? { key, dir: -1 } : null,
                       )
                     }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSort(!active ? { key, dir: 1 } : sort?.dir === 1 ? { key, dir: -1 } : null);
+                      }
+                    }}
                     title="Click to sort · third click restores schedule order"
                     style={{
                       ...th,
@@ -686,6 +726,10 @@ export default function SequenceBoard({
               <Fragment key={a.activity_id}>
               <tr
                 onClick={() => setInspect(a)}
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") setInspect(a);
+                }}
                 title="Open this activity's inspector — details, evidence, and the suggested alternative"
                 style={{
                   // Marked, not filtered: out-of-window rows dim, milestones read
@@ -706,7 +750,10 @@ export default function SequenceBoard({
                 <td style={{ ...td, minWidth: 220 }}>
                   {a.name}
                   {a.is_milestone && (
-                    <span style={{ marginLeft: 6, fontSize: 9.5, color: C.accent, fontWeight: 700 }}>
+                    <span
+                      title="A milestone: a dated event the plan sequences around — not work"
+                      style={{ marginLeft: 6, fontSize: 9.5, color: C.accent, fontWeight: 700 }}
+                    >
                       KEY EVENT
                     </span>
                   )}
@@ -836,7 +883,7 @@ export default function SequenceBoard({
                 </td>
                 <td style={{ ...td, fontSize: 10, fontWeight: 700, whiteSpace: "nowrap" }}>
                   {a.is_milestone ? (
-                    <span style={{ color: C.accent }}>MILESTONE</span>
+                    <span style={{ color: C.accent }} title="A dated event, not work — it carries no hours">MILESTONE</span>
                   ) : (
                     <span style={{ color: STATUS_LABEL[a.status].fg }}>{STATUS_LABEL[a.status].label}</span>
                   )}
@@ -895,6 +942,7 @@ export default function SequenceBoard({
         <ActivityInspector
           a={inspect}
           alt={altByCode.get(inspect.code)}
+          altsSettled={altsSettled}
           identity={identity}
           vesselId={vesselId}
           asOf={asOf}

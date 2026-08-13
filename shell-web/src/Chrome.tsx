@@ -253,14 +253,22 @@ export function TopBar({
 }) {
   const [menu, setMenu] = useState<"context" | "persona" | "alerts" | null>(null);
   const [query, setQuery] = useState("");
+  /** The keyboard-highlighted search hit; Enter takes it, arrows move it. */
+  const [hitIdx, setHitIdx] = useState(0);
   const box = useRef<HTMLElement>(null);
+  const searchBox = useRef<HTMLDivElement>(null);
 
   // Click-away and Esc. A menu that only closes by clicking the thing that
   // opened it is the kind of small wrongness that makes a tool feel unfinished.
   useEffect(() => {
-    if (!menu) return undefined;
+    if (!menu && query === "") return undefined;
     const away = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) setMenu(null);
+      if (menu && box.current && !box.current.contains(e.target as Node)) setMenu(null);
+      // The search results panel obeys the same rule as every menu: a click
+      // anywhere else dismisses it.
+      if (query !== "" && searchBox.current && !searchBox.current.contains(e.target as Node)) {
+        setQuery("");
+      }
     };
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") setMenu(null);
@@ -271,7 +279,7 @@ export function TopBar({
       document.removeEventListener("mousedown", away);
       document.removeEventListener("keydown", key);
     };
-  }, [menu]);
+  }, [menu, query]);
 
   // Search over what is loaded: placard number, space name, zone, and the work
   // booked in it. Frames match on "fr 164" or bare "164", because that is how a
@@ -337,7 +345,7 @@ export function TopBar({
       </div>
 
       {/* global search */}
-      <div style={{ position: "relative", flex: "1 1 320px", maxWidth: 520 }}>
+      <div ref={searchBox} style={{ position: "relative", flex: "1 1 320px", maxWidth: 520 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 7, background: C.well, border: `1px solid ${LINE}`, borderRadius: 7, padding: "0 9px", height: 32 }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.subtle} strokeWidth={1.8}>
             <circle cx="11" cy="11" r="7" />
@@ -346,17 +354,29 @@ export function TopBar({
           <input
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setHitIdx(0);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Escape") setQuery("");
-              if (e.key === "Enter" && hits[0]) {
-                onJump(hits[0].compartment);
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setHitIdx((i) => Math.min(i + 1, hits.length - 1));
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setHitIdx((i) => Math.max(i - 1, 0));
+              }
+              if (e.key === "Enter" && hits[hitIdx]) {
+                onJump((hits[hitIdx] as SearchHit).compartment);
                 setQuery("");
               }
             }}
             placeholder="Search compartments, spaces, zones, work items, frames…"
             aria-label="Search the hull"
-            style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: C.text, font: "inherit", fontSize: 12 }}
+            title="Search everything loaded for this hull — compartment numbers, names, zones, work items, frame stations (try “fr 164”). ↑↓ to pick, Enter to jump."
+            style={{ flex: 1, background: "transparent", border: "none", color: C.text, font: "inherit", fontSize: 12 }}
           />
           {query && (
             <span style={{ fontSize: 10.5, color: DIM, whiteSpace: "nowrap" }}>
@@ -373,7 +393,8 @@ export function TopBar({
                   onJump(h.compartment);
                   setQuery("");
                 }}
-                style={{ display: "block", width: "100%", textAlign: "left", padding: "7px 11px", background: "transparent", border: "none", borderBottom: `1px solid ${LINE}`, cursor: "pointer", font: "inherit", color: C.text }}
+                title="Open this space on the deck plan"
+                style={{ display: "block", width: "100%", textAlign: "left", padding: "7px 11px", background: hits.indexOf(h) === hitIdx ? C.raised : "transparent", border: "none", borderBottom: `1px solid ${LINE}`, cursor: "pointer", font: "inherit", color: C.text }}
               >
                 <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
                   <span style={{ fontFamily: "monospace", fontSize: 12 }}>{h.compartment}</span>
@@ -389,7 +410,12 @@ export function TopBar({
 
       {/* context selector — which hull, and what else is in the portfolio */}
       <div style={{ position: "relative", marginLeft: "auto" }}>
-        <button onClick={() => setMenu(menu === "context" ? null : "context")} style={clusterBtn} aria-expanded={menu === "context"}>
+        <button
+          onClick={() => setMenu(menu === "context" ? null : "context")}
+          title="Which hull every screen answers for — switch it here"
+          style={clusterBtn}
+          aria-expanded={menu === "context"}
+        >
           <span style={{ textAlign: "left" }}>
             <span style={{ display: "block", fontSize: 8.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM }}>
               In focus
@@ -450,7 +476,8 @@ export function TopBar({
 
       {/* persona — sets the altitude the Deck Explorer opens at */}
       <div style={{ position: "relative" }}>
-        <button onClick={() => setMenu(menu === "persona" ? null : "persona")} style={clusterBtn} aria-expanded={menu === "persona"}>
+        <button
+          title="Your job sets where screens open — altitude and time horizon — nothing else changes" onClick={() => setMenu(menu === "persona" ? null : "persona")} style={clusterBtn} aria-expanded={menu === "persona"}>
           <span style={{ width: 26, height: 26, borderRadius: 13, background: C.raised, color: C.accent, fontSize: 10.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>
             {initialsOf(persona.name)}
           </span>

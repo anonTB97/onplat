@@ -40,6 +40,7 @@ const block: React.CSSProperties = {
 export function ActivityInspector({
   a,
   alt,
+  altsSettled,
   identity,
   vesselId,
   asOf,
@@ -49,6 +50,9 @@ export function ActivityInspector({
   a: Activity;
   /** The engine's re-sequence proposal for this activity, when it is refused. */
   alt: AlternativeRow | undefined;
+  /** Whether the alternatives fetch has finished (either way) — so "Computing…"
+   *  can honestly become "unavailable" instead of spinning forever. */
+  altsSettled: boolean;
   identity: Identity;
   vesselId: string;
   asOf: AsOf;
@@ -56,10 +60,21 @@ export function ActivityInspector({
   onOpenSpace: (compartment: string) => void;
 }) {
   const [assessment, setAssessment] = useState<Assessment | null>(null);
+  const [optionsError, setOptionsError] = useState(false);
+
+  // A drawer closes on Escape — the norm every menu in this app already keeps.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   // The space's options, from the same endpoint the Deck Explorer reads.
   useEffect(() => {
     setAssessment(null);
+    setOptionsError(false);
     const no = a.compartment_no;
     if (!no) return undefined;
     let stale = false;
@@ -68,7 +83,7 @@ export function ActivityInspector({
         if (!stale) setAssessment(r);
       })
       .catch(() => {
-        /* the panel simply shows no options block */
+        if (!stale) setOptionsError(true);
       });
     return () => {
       stale = true;
@@ -104,10 +119,10 @@ export function ActivityInspector({
         )}
         <button
           onClick={onClose}
-          title="Close (the row stays where it was)"
+          title="Close (or press Escape) — the row stays where it was"
           style={{
-            marginLeft: "auto", font: "inherit", fontSize: 13, cursor: "pointer", lineHeight: 1,
-            padding: "1px 7px", borderRadius: 5, color: C.dim, background: "transparent",
+            marginLeft: "auto", font: "inherit", fontSize: 14, cursor: "pointer", lineHeight: 1,
+            padding: "4px 10px", borderRadius: 5, color: C.dim, background: "transparent",
             border: `1px solid ${C.line}`,
           }}
         >
@@ -228,7 +243,11 @@ export function ActivityInspector({
           <div style={{ ...block, border: "1px solid rgba(34,197,94,0.35)" }}>
             <div style={{ ...label, color: C.ok }}>Suggested alternative</div>
             {!alt ? (
-              <div style={{ fontSize: 11.5, color: C.dim }}>Computing…</div>
+              <div style={{ fontSize: 11.5, color: C.dim }}>
+                {altsSettled
+                  ? "Proposals are unavailable right now — reload the board to retry."
+                  : "Computing…"}
+              </div>
             ) : alt.alternative.kind === "viable" ? (
               <>
                 <div style={{ fontSize: 11.5 }}>
@@ -265,6 +284,11 @@ export function ActivityInspector({
         )}
 
         {/* the space's options — same assessment the Deck Explorer shows */}
+        {a.compartment_no && optionsError && (
+          <div style={{ fontSize: 10.5, color: C.dim }}>
+            The space&apos;s options could not be loaded — open the space to see them there.
+          </div>
+        )}
         {a.compartment_no && assessment && assessment.options.length > 0 && (
           <div style={{ ...block }}>
             <div style={label}>Options in {a.compartment_no}</div>
@@ -286,9 +310,10 @@ export function ActivityInspector({
             ))}
             <button
               onClick={() => onOpenSpace(a.compartment_no ?? "")}
+              title="Jump to this space on the Deck Explorer, with its full options panel open — decisions are recorded there, into the ledger."
               style={{
                 alignSelf: "flex-start", marginTop: 2, font: "inherit", fontSize: 11, cursor: "pointer",
-                padding: "2px 9px", borderRadius: 5, color: C.accent, background: "transparent",
+                padding: "3px 10px", borderRadius: 5, color: C.accent, background: "transparent",
                 border: `1px solid ${C.accent}55`,
               }}
             >
@@ -298,8 +323,9 @@ export function ActivityInspector({
         )}
 
         <div style={{ fontSize: 10, color: C.faint, lineHeight: 1.5 }}>
-          Proposals, not changes: re-sequencing happens in P6, deciding happens on the space&apos;s
-          options panel, and the ledger remembers what was decided.
+          Proposals, not changes: re-sequencing happens in P6 (Primavera, the yard&apos;s
+          scheduler), deciding happens on the space&apos;s options panel, and the ledger
+          remembers what was decided.
         </div>
       </div>
     </aside>

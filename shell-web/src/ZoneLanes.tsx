@@ -160,7 +160,12 @@ export function ZoneLanes({
   const allWindows = [...dated, ...milestones].map((a) => a.planned).filter((w) => w !== null);
   // Every hook is called by now, so the empty return is legal again.
   if (allWindows.length === 0) {
-    return <p style={{ color: C.dim, fontSize: 12.5 }}>Nothing dated in the register.</p>;
+    return (
+      <p style={{ color: C.dim, fontSize: 12.5 }}>
+        Nothing dated in the register — import a schedule with ⭱ Import XER above, or check the
+        Register view for undated rows.
+      </p>
+    );
   }
   const t0 = Math.min(...allWindows.map((w) => w.start)) - 2 * DAY;
   const t1 = Math.max(...allWindows.map((w) => w.end)) + 2 * DAY;
@@ -510,7 +515,7 @@ export function ZoneLanes({
             const key = `${e.pred_code}->${e.succ_code}`;
             return (
               <g key={key}>
-                <title>{`${e.pred_code} → ${e.succ_code} · ${e.kind} ${e.lag_hours >= 0 ? "+" : ""}${e.lag_hours}h${neg ? "\nSuccessor starts before its predecessor finishes." : ""}`}</title>
+                <title>{`${e.pred_code} → ${e.succ_code} · ${e.kind} (${e.kind === "PR_FS" ? "finish-to-start" : e.kind === "PR_SS" ? "start-to-start" : e.kind === "PR_FF" ? "finish-to-finish" : "start-to-finish"}) ${e.lag_hours >= 0 ? "+" : ""}${e.lag_hours}h${neg ? "\nSuccessor starts before its predecessor finishes." : ""}`}</title>
                 <path
                   d={`M ${px} ${p.y} C ${px + reach} ${p.y}, ${sx - reach} ${s.y}, ${sx} ${s.y}`}
                   fill="none"
@@ -541,6 +546,7 @@ export function ZoneLanes({
             <g>
               <line x1={x(now)} y1={AXIS_H - 8} x2={x(now)} y2={H} stroke="#f87171" strokeWidth={1.2} strokeDasharray="5 3" />
               <text x={x(now) + 4} y={H - 6} fill="#f87171" fontSize={8.5}>
+                <title>The instant on the time control: left of this line is history, right is plan. It marks — it never filters.</title>
                 as of {fmtDay(now)}
               </text>
             </g>
@@ -682,7 +688,7 @@ export function ZoneLanes({
                 }}
                 title={hint}
                 style={{
-                  font: "inherit", fontSize: 10, width: 22, padding: "2px 0", borderRadius: 5, cursor: "pointer",
+                  font: "inherit", fontSize: 11, width: 26, padding: "4px 0", borderRadius: 5, cursor: "pointer",
                   background: "transparent", color: C.dim, border: `1px solid ${C.line}`,
                 }}
               >
@@ -745,6 +751,11 @@ function ZoomWheel({
     const el = svgRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
+      // Already showing the full availability and zooming further out: let the
+      // page scroll instead of silently eating the gesture.
+      const w = winRef.current;
+      const f = fullRef.current;
+      if (e.deltaY > 0 && w.v0 <= f.v0 && w.v1 >= f.v1) return;
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const sx = ((e.clientX - rect.left) * W) / rect.width;

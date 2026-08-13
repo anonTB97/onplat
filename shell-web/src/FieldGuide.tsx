@@ -37,6 +37,7 @@ function Go({ to, label, onOpenModule }: { to: string; label: string; onOpenModu
   return (
     <button
       onClick={() => onOpenModule(to)}
+      title={`Open ${label}`}
       style={{
         font: "inherit", fontSize: 11, cursor: "pointer", padding: "0px 7px 1px", borderRadius: 5,
         color: C.accent, background: "transparent", border: `1px solid ${C.accent}44`,
@@ -112,7 +113,7 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
             <tbody>
               {[
                 ["3-148-2-E", "plain chip", "Authored: the schedule's own compartment field said where. High trust."],
-                ["≈ 3-185-0-L", "amber, dashed", "Derived: a placard read out of the task's own name. The parser's guess — graded, listed at import, marked everywhere it appears."],
+                ["≈ 3-185-0-L", "amber, dashed", "Derived: a compartment number read out of the task's own name (the placard stencilled at a space's door). The parser's guess — graded, listed at import, marked everywhere it appears."],
                 ["not located · Z5 per WBS", "amber text", "A zone HINT from where the task sits in the WBS tree. Places work at zone grain on zone boards, and nothing finer — never on a deck plan."],
                 ["not located", "amber text", "The schedule did not say. Visible on the register, undrawable on the ship, and unassessable by the engine — unknown is never presented as fine."],
                 ["unknown space", "red", "Located to a compartment this hull's register does not carry — mapped, and to nowhere the hull knows. The crosswalk gap to chase first."],

@@ -29,11 +29,12 @@ import {
   type Identity,
   type ZoneChart,
 } from "./api";
+import { DiscardButton } from "./DiscardButton";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
 import { fmtBytes, parseBudgetCsv, parseZoneCsv } from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
-import { C, mh } from "./theme";
+import { commitBtnStyle, C, errText, mh, msgColor } from "./theme";
 
 /** A staged document: previewed by the server, nothing stored, Confirm or walk away. */
 interface Staged {
@@ -266,15 +267,14 @@ export default function SourcesBoard({
           <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <button
               onClick={confirmStaged}
-              style={{
-                font: "inherit", fontSize: 11.5, cursor: "pointer", padding: "3px 10px",
-                borderRadius: 6, color: C.text, background: C.raised, border: `1px solid ${C.accent}`,
-              }}
+              title="Store the document. Reversible: every card has a Discard that brings the previous state back."
+              style={commitBtnStyle}
             >
               Confirm import
             </button>
             <button
               onClick={() => setStaged(null)}
+              title="Walk away — the preview cost nothing and nothing was stored."
               style={{
                 font: "inherit", fontSize: 11.5, cursor: "pointer", padding: "3px 10px",
                 borderRadius: 6, color: C.dim, background: "transparent", border: `1px solid ${C.line}`,
@@ -342,13 +342,15 @@ export default function SourcesBoard({
           onOpenHome={() => onOpenModule("sequenceBoard")}
           onRevert={
             register.schedule_source
-              ? () =>
+              ? () => {
+                  setMsg("⏳ discarding the ingested schedule…");
                   void revertSchedule(identity, vesselId)
                     .then(() => {
                       setMsg("✓ back to the generated register");
                       setNonce((n) => n + 1);
                     })
-                    .catch((e: unknown) => setMsg(String(e)))
+                    .catch((e: unknown) => setMsg(errText(e)));
+                }
               : undefined
           }
         />
@@ -389,13 +391,15 @@ export default function SourcesBoard({
           onOpenHome={() => onOpenModule("deckExplorer")}
           onRevert={
             zones.source
-              ? () =>
+              ? () => {
+                  setMsg("⏳ discarding the zone chart…");
                   void revertZoneChart(identity, vesselId)
                     .then(() => {
                       setMsg("✓ back to inferred bands");
                       setNonce((n) => n + 1);
                     })
-                    .catch((e: unknown) => setMsg(String(e)))
+                    .catch((e: unknown) => setMsg(errText(e)));
+                }
               : undefined
           }
         />
@@ -428,13 +432,15 @@ export default function SourcesBoard({
           onOpenHome={() => onOpenModule("workOrders")}
           onRevert={
             register.reconciliation.source
-              ? () =>
+              ? () => {
+                  setMsg("⏳ discarding the budget book…");
                   void revertBudgetBook(identity, vesselId)
                     .then(() => {
                       setMsg("✓ back to the seeded budgets");
                       setNonce((n) => n + 1);
                     })
-                    .catch((e: unknown) => setMsg(String(e)))
+                    .catch((e: unknown) => setMsg(errText(e)));
+                }
               : undefined
           }
         />
@@ -455,7 +461,7 @@ export default function SourcesBoard({
       </div>
 
       {msg && (
-        <p style={{ fontSize: 11.5, marginTop: 10, color: msg.startsWith("✓") ? C.ok : C.danger }}>{msg}</p>
+        <p style={{ fontSize: 11.5, marginTop: 10, color: msgColor(msg) }}>{msg}</p>
       )}
     </div>
   );
@@ -544,17 +550,11 @@ function SourceCard({
             </label>
           )}
           {onRevert && (
-            <button
-              onClick={onRevert}
-              title="Discard this document — the screens return to what the tool can honestly serve without it."
-              style={{
-                font: "inherit", fontSize: 10.5, cursor: "pointer",
-                padding: "2px 8px", borderRadius: 5, color: C.dim, background: "transparent",
-                border: `1px solid ${C.line}`,
-              }}
-            >
-              ⟲ Revert
-            </button>
+            <DiscardButton
+              what="this document"
+              title="Throw this document away — the screens return to what the tool can honestly serve without it."
+              onDiscard={onRevert}
+            />
           )}
         </span>
       </header>
@@ -571,6 +571,7 @@ function SourceCard({
         {importHint && onOpenHome && (
           <button
             onClick={onOpenHome}
+            title="Open this document's home screen — the same door lives there beside the data it feeds."
             style={{
               alignSelf: "flex-start", marginTop: 3, font: "inherit", fontSize: 10.5, cursor: "pointer",
               padding: "2px 8px", borderRadius: 5, color: C.accent, background: "transparent",

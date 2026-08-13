@@ -33,6 +33,21 @@ async fn read_import_body<T: serde::de::DeserializeOwned>(
         .map_err(|e| ApiError::OutOfRange(format!("invalid JSON body: {e}")))
 }
 
+/// Maps a deferred `Json` rejection to the honest status. The deferral exists
+/// so scope is checked before the body is judged; the one thing that must not
+/// get flattened in the process is a length-limit trip — that is a 413 with
+/// the ceiling named (axum's small default on these routes; the import doors
+/// read their own bodies against [`crate::MAX_IMPORT_BYTES`]), not a 422.
+fn body_rejection(rejection: &axum::extract::rejection::JsonRejection) -> ApiError {
+    // axum's default body ceiling on extractors, which these routes keep.
+    const DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;
+    if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::PayloadTooLarge(DEFAULT_BODY_LIMIT)
+    } else {
+        ApiError::OutOfRange(rejection.body_text())
+    }
+}
+
 /// The `?as_of=` parameter: the instant the caller wants the answer for.
 ///
 /// Epoch milliseconds, matching how [`Timestamp`] already crosses the wire, so a
@@ -912,7 +927,7 @@ pub(crate) async fn record_decision(
     let hull = state.store.get_vessel(&scope, vessel).await?;
     let body = match body {
         Ok(Json(body)) => body,
-        Err(rejection) => return Err(ApiError::OutOfRange(rejection.body_text())),
+        Err(rejection) => return Err(body_rejection(&rejection)),
     };
 
     let disposition = match body.disposition.as_str() {
@@ -1250,7 +1265,7 @@ pub(crate) async fn acknowledge_issue(
     let hull = state.store.get_vessel(&scope, vessel).await?;
     let body = match body {
         Ok(Json(body)) => body,
-        Err(rejection) => return Err(ApiError::OutOfRange(rejection.body_text())),
+        Err(rejection) => return Err(body_rejection(&rejection)),
     };
     let at = AsOf { as_of: body.as_of }.resolve(&state, &hull)?;
 

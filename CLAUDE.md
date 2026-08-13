@@ -18,7 +18,10 @@ plan and every slice is expected to advance it, or at minimum not regress it.
 - **Identity enters in one place** (`wadl-api/src/auth.rs`). Every scoped
   handler runs the extractor first — scope check before body read, always.
   New routes must be added to `routes::inventory` and get a generated leak
-  test (`cargo run -p xtask -- gen-leak-tests`).
+  test (`cargo run -p xtask -- gen-leak-tests`) — and regenerate the SSP
+  input too (`cargo run -p xtask -- gen-ssp`); CI checks both for drift.
+  After posture-relevant changes, run `scripts/self-assessment.sh` against
+  a running instance; CI runs it against every build.
 - **Imports are all-or-nothing** with dry-run preview, typed refusals, and
   revert. Never commit a partial document; never parse before the scope
   check; respect `MAX_IMPORT_BYTES` at the three import doors only.

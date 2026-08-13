@@ -202,7 +202,9 @@ the journal, whose sealing and forwarding is the AU-9 tamper story
 ## NIST 800-53 anchor points (for the eventual SSP)
 
 Not a compliance matrix — a map from control families to the mechanisms in
-this tree, so the SSP writes itself from things that exist:
+this tree. The SSP-shaped version of this table, with per-control
+implementation statements and verification pointers, is the generated
+`docs/ssp-input.md`:
 
 | Family | Mechanism in this tree |
 |---|---|
@@ -230,8 +232,20 @@ this tree, so the SSP writes itself from things that exist:
   successes) and the tracing stack removed in its favor; SBOM artifact,
   air-gap rehearsal, and reproducibility check in CI; the hardened systemd
   unit and deploy runbook in `deploy/`.
-- **Wave 3 — accreditation package.** SSP input doc generated from the
-  table above; STIG-style self-checklist; POA&M seeds for the accepted
-  gaps (dev shim default, in-memory demo store) with their closure paths
-  named; session lifetime rules at the identity broker; role→capability
-  matrix when roles beyond per-hull assignment enter the domain.
+- **Wave 3 — done.** The accreditation package, as build products:
+  `docs/ssp-input.md` is *generated* (`cargo xtask gen-ssp`) with the
+  endpoint inventory and enforcement parameters read from the code, and CI
+  refuses an API change that isn't reflected in it — the paperwork cannot
+  drift from the system. `scripts/self-assessment.sh` is the STIG-style
+  checklist as a runnable script (checks `WADL-SA-01…10`: headers, refusal
+  shapes, scope, body ceilings, traversal, error hygiene), executed by CI
+  against a booted binary on every push and by an assessor against a
+  deployment with one command; WARN verdicts cite their POA&M entry.
+  `docs/poam.md` seeds the POA&M register — six items, each with the
+  mitigation in place, the named closure path, and the trigger. Session
+  lifetime/re-auth rules are specified for the terminator in
+  `deploy/README.md`.
+- **Conditional (tracked as POAM-6).** Role→capability matrix beyond
+  per-hull assignment, when such roles enter the domain model: asserted by
+  the proxy, enforced at the one extractor, served via `/api/whoami`,
+  leak-tested per role.

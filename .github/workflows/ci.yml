@@ -52,6 +52,34 @@ jobs:
         run: cargo run --locked -p xtask -- gen-leak-tests --check
       - name: run leak tests
         run: cargo test --locked -p wadl-api --test generated_leak_test
+      # The SSP input document embeds the endpoint inventory and enforcement
+      # parameters; an API change that isn't reflected there fails here, so
+      # the accreditation paperwork cannot quietly drift from the system.
+      - name: SSP input document up to date
+        run: cargo run --locked -p xtask -- gen-ssp --check
+
+  self-assessment:
+    name: STIG-style self-assessment against a booted binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: build the server
+        run: cargo build --locked -p wadl-api --bin serve
+      # The same script an assessor runs against a deployed instance, run
+      # here against every build: headers, refusal shapes, scope, body
+      # ceilings, traversal, error hygiene. WADL-SA-05 WARNs (dev shim) —
+      # WARNs are findings, not failures; FAILs break the build.
+      - name: boot and assess
+        run: |
+          ./target/debug/serve &
+          for i in $(seq 1 50); do
+            curl -sf http://127.0.0.1:8080/health >/dev/null && break
+            sleep 0.2
+          done
+          scripts/self-assessment.sh
+          kill %1
 
   fixtures:
     name: sample P6 export is internally consistent

@@ -38,7 +38,11 @@ fn run() -> Result<()> {
             let check = args.next().as_deref() == Some("--check");
             gen_leak_tests(check)
         }
-        other => bail!("unknown task {other:?}; try: gen-leak-tests [--check]"),
+        Some("gen-ssp") => {
+            let check = args.next().as_deref() == Some("--check");
+            gen_ssp(check)
+        }
+        other => bail!("unknown task {other:?}; try: gen-leak-tests [--check] | gen-ssp [--check]"),
     }
 }
 
@@ -206,6 +210,77 @@ fn gen_leak_tests(check: bool) -> Result<()> {
             "wrote {} ({} scoped routes)",
             path.display(),
             routes::scoped_id_routes().len()
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// gen-ssp: the System Security Plan input document, as a build product.
+// ---------------------------------------------------------------------------
+
+const SSP_PATH: &str = "docs/ssp-input.md";
+
+/// Renders `docs/ssp-input.md`. The endpoint inventory and the enforcement
+/// parameters are read from the code they describe, so an SSP claim about the
+/// API surface cannot drift from the API surface: adding a route changes this
+/// document, and CI's `gen-ssp --check` refuses the change until the document
+/// is regenerated — the same discipline the leak tests live under.
+fn render_ssp() -> String {
+    let inventory = routes::inventory();
+    let scoped = inventory.iter().filter(|r| r.tenant_scoped).count();
+    let open = inventory.len() - scoped;
+    let limits = wadl_api::hardening::Limits::default();
+
+    let mut endpoints = String::new();
+    for r in &inventory {
+        let _ = writeln!(
+            endpoints,
+            "| `{}` | `{}` | {} |",
+            r.method,
+            r.path,
+            if r.tenant_scoped {
+                "tenant-scoped"
+            } else {
+                "open"
+            }
+        );
+    }
+
+    format!(
+        include_str!("ssp_template.md"),
+        endpoints = endpoints.trim_end(),
+        total = inventory.len(),
+        scoped = scoped,
+        open = open,
+        max_in_flight = limits.max_in_flight,
+        timeout_secs = limits.request_timeout.as_secs(),
+        import_mb = wadl_api::MAX_IMPORT_BYTES / (1024 * 1024),
+    )
+}
+
+fn gen_ssp(check: bool) -> Result<()> {
+    let path = PathBuf::from(SSP_PATH);
+    let rendered = render_ssp();
+    if check {
+        let existing = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if existing != rendered {
+            bail!(
+                "{} is out of date — run `cargo run -p xtask -- gen-ssp`",
+                path.display()
+            );
+        }
+        println!(
+            "SSP input up to date ({} endpoints)",
+            routes::inventory().len()
+        );
+    } else {
+        std::fs::write(&path, rendered).with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "wrote {} ({} endpoints)",
+            path.display(),
+            routes::inventory().len()
         );
     }
     Ok(())

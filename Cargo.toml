@@ -59,8 +59,10 @@ wadl-issues = { path = "crates/wadl-issues" }
 # Backend (never pulled into wadl-engine or wadl-domain)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "tower-log"] }
+# Test-only (ServiceExt::oneshot in the API tests). Runtime middleware is
+# hand-rolled on tokio primitives — see wadl-api::hardening — so the deploy
+# surface carries no tower-http and no tower service stack of its own.
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "timeout", "limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros", "migrate"] }

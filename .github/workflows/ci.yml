@@ -28,10 +28,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all --check
+      # --locked on every cargo invocation: the build must use exactly the
+      # committed Cargo.lock, or fail. A resolver that quietly picks a newer
+      # transitive version in CI is a supply-chain door left open.
       - name: clippy (all targets, all features)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      # Default features only — this also proves the demo/test tree builds and
+      # passes without sqlx, which is the dependency-minimalism claim in
+      # docs/production-posture.md made checkable.
       - name: test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   leak-tests:
     name: cross-tenant leak tests are current
@@ -43,9 +49,9 @@ jobs:
       # Fails if an endpoint was added to the route inventory without
       # regenerating its leak test.
       - name: leak-test codegen up to date
-        run: cargo run -p xtask -- gen-leak-tests --check
+        run: cargo run --locked -p xtask -- gen-leak-tests --check
       - name: run leak tests
-        run: cargo test -p wadl-api --test generated_leak_test
+        run: cargo test --locked -p wadl-api --test generated_leak_test
 
   fixtures:
     name: sample P6 export is internally consistent
@@ -73,18 +79,18 @@ jobs:
       # If a dependency creeps in that breaks the wasm build, this job fails —
       # which is exactly what it exists to catch.
       - name: build engine for wasm
-        run: cargo build -p wadl-engine --target wasm32-unknown-unknown
+        run: cargo build --locked -p wadl-engine --target wasm32-unknown-unknown
       - name: build planning math for wasm
-        run: cargo build -p wadl-plan --target wasm32-unknown-unknown
+        run: cargo build --locked -p wadl-plan --target wasm32-unknown-unknown
       # Mitigation options are counterfactual engine verdicts, so they must be
       # computable where the engine is — including in a browser at the compartment
       # door with no network on the ship.
       - name: build mitigation options for wasm
-        run: cargo build -p wadl-mitigate --target wasm32-unknown-unknown
+        run: cargo build --locked -p wadl-mitigate --target wasm32-unknown-unknown
       # Issues are joins of the register against the engine; the same offline
       # reasoning applies to "can this execute as planned" as to "what opens it".
       - name: build issue derivation for wasm
-        run: cargo build -p wadl-issues --target wasm32-unknown-unknown
+        run: cargo build --locked -p wadl-issues --target wasm32-unknown-unknown
 
   migrations:
     name: migrations + RLS on PostgreSQL
@@ -107,17 +113,19 @@ jobs:
       - name: apply migrations via the CLI
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: cargo run -p wadl-cli -- migrate
+        run: cargo run --locked -p wadl-cli -- migrate
       - name: seed the demo world
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: cargo run -p wadl-cli -- seed
+        run: cargo run --locked -p wadl-cli -- seed
       # The queries under test carry no org_id clause — the database supplies the
       # filter — so a dropped or mis-written policy fails here and nowhere else.
+      # The pg seam is behind wadl-store's `postgres` feature; this job is one
+      # of the two sanctioned consumers (the CLI above is the other).
       - name: prove row-level security on a real database
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: cargo test -p wadl-store --test pg_rls
+        run: cargo test --locked -p wadl-store --features postgres --test pg_rls
 
   supply-chain:
     name: cargo-deny

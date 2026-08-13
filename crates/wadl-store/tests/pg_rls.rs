@@ -18,9 +18,12 @@
 //! ```text
 //! createdb wadl_dev
 //! DATABASE_URL=postgres://…/wadl_dev cargo run -p wadl-cli -- migrate
-//! DATABASE_URL=postgres://…/wadl_dev cargo test -p wadl-store --test pg_rls
+//! DATABASE_URL=postgres://…/wadl_dev cargo test -p wadl-store --features postgres --test pg_rls
 //! ```
 
+// The pg seam is behind the `postgres` feature; without it this file compiles
+// to nothing, matching the library it tests.
+#![cfg(feature = "postgres")]
 // doc_markdown fires on domain and product names (PostgreSQL, RLS); backticking
 // them in prose hurts readability more than it helps.
 #![allow(

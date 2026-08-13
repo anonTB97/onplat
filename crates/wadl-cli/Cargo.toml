@@ -15,7 +15,9 @@ path = "src/main.rs"
 wadl-domain.workspace = true
 wadl-engine.workspace = true
 wadl-ingest.workspace = true
-wadl-store.workspace = true
+# The CLI is a deployment tool — it is the thing that opens databases, so it
+# is one of the two places allowed to pull the postgres feature (with tests).
+wadl-store = { workspace = true, features = ["postgres"] }
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true

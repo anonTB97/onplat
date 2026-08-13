@@ -7,6 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# PostgreSQL is a deployment concern, not a library concern: only the binaries
+# that actually open a database (wadl-cli, a future production serve) opt in.
+# Everything else — the demo server, the API tests, the shell's whole backend —
+# compiles without sqlx and its ~90-crate transitive tree. Smaller attack
+# surface to scan, smaller SBOM to justify, faster builds.
+[features]
+default = []
+postgres = ["dep:sqlx"]
+
 [dependencies]
 wadl-domain.workspace = true
 wadl-engine.workspace = true
@@ -16,7 +25,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 chrono.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, optional = true }
 sha2.workspace = true
 hex.workspace = true
 

@@ -253,8 +253,7 @@ pub fn earliest_viable_window(
             Executability::Executable => {
                 return Alternative::Viable {
                     window: candidate,
-                    delay_hours: (cursor.epoch_millis() - planned.start.epoch_millis())
-                        / 3_600_000,
+                    delay_hours: (cursor.epoch_millis() - planned.start.epoch_millis()) / 3_600_000,
                 }
             }
             Executability::NotExecutable(refusal) => match refusal.earliest_clear {
@@ -263,9 +262,7 @@ pub fn earliest_viable_window(
                 // cursor in place.
                 Some(clear) => {
                     cursor = Timestamp::from_epoch_millis(
-                        clear
-                            .epoch_millis()
-                            .max(cursor.epoch_millis() + 60_000),
+                        clear.epoch_millis().max(cursor.epoch_millis() + 60_000),
                     );
                 }
                 None => return Alternative::VerificationGated { refusal },

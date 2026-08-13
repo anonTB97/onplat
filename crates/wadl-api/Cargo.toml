@@ -16,9 +16,9 @@ wadl-issues.workspace = true
 wadl-ingest.workspace = true
 wadl-store.workspace = true
 axum.workspace = true
-tower.workspace = true
-tower-http.workspace = true
-tokio.workspace = true
+# sync + time carry the hardening layer (semaphore shed, request timeout) on
+# the runtime we already ship instead of adding a middleware crate.
+tokio = { workspace = true, features = ["sync", "time"] }
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true

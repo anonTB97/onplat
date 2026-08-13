@@ -262,10 +262,7 @@ pub(crate) async fn schedule_alternatives(
     let edges = state.store.list_schedule_edges(&scope, vessel).await?;
     let start_of: std::collections::BTreeMap<&str, i64> = activities
         .iter()
-        .filter_map(|a| {
-            a.planned
-                .map(|w| (a.code.as_str(), w.start.epoch_millis()))
-        })
+        .filter_map(|a| a.planned.map(|w| (a.code.as_str(), w.start.epoch_millis())))
         .collect();
 
     let mut rows: Vec<Value> = Vec::new();
@@ -277,8 +274,7 @@ pub(crate) async fn schedule_alternatives(
         let wadl_issues::Executability::NotExecutable(refusal) = exec else {
             continue;
         };
-        let alternative =
-            wadl_issues::earliest_viable_window(&hull, compartment, planned, horizon);
+        let alternative = wadl_issues::earliest_viable_window(&hull, compartment, planned, horizon);
         // The slide's knock-on: successors whose planned start would now sit
         // before the proposed finish. Finish-to-start reading; lags ignored
         // and said so in the response's `knock_on_basis`.

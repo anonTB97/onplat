@@ -11,11 +11,11 @@
 //! * [`clock::SystemClock`] — the one and only sanctioned caller of the wall
 //!   clock. Every other crate injects a [`wadl_domain::Clock`].
 //!
-//! The [`pg`] module holds the PostgreSQL seam: the pool, the forward-only
+//! The `pg` module holds the PostgreSQL seam: the pool, the forward-only
 //! migrator, and the per-transaction tenant scoping (`SET LOCAL app.org_id`)
-//! that arms row-level security. Wiring the compile-time-checked `query_as!`
-//! repositories onto it is the next step once a dev database / offline cache is
-//! present; the trait above is what they will implement.
+//! that arms row-level security. It sits behind the `postgres` cargo feature —
+//! a deployment opts in (wadl-cli does; a production server binary would);
+//! every other consumer compiles without sqlx in its dependency tree at all.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::doc_markdown)]
@@ -35,7 +35,9 @@ pub mod error;
 pub mod ledger;
 pub mod memory;
 pub mod model;
+#[cfg(feature = "postgres")]
 pub mod pg;
+#[cfg(feature = "postgres")]
 pub mod pg_repo;
 pub mod repo;
 pub mod scope;

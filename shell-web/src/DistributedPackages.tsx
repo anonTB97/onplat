@@ -213,7 +213,7 @@ export default function DistributedPackages({
     detail.footprint.forEach((f, i) => {
       const isGov = g !== null && g.compartment === f.compartment_no;
       walkSteps.push({
-        title: `${i + 1} · ${f.compartment_no}${isGov ? " — THE GOVERNING CONSTRAINT" : ""}`,
+        title: `${f.compartment_no}${isGov ? " — THE GOVERNING CONSTRAINT" : ""}`,
         tone: isGov ? "danger" : f.state === "ALLOW" ? "ok" : "warn",
         body:
           (isGov && g ? `${g.consequence} ` : "") +
@@ -476,7 +476,7 @@ function WhyPanel({
             ) : (
               <> ({g.constraint.rules.join(", ")}).</>
             )}{" "}
-            Only <b style={{ color: C.bright }}>{g.constraint.clearing_authority}</b> can clear it
+            Only <b style={{ color: C.bright }}>{g.constraint.clearing_authority.replace(/_/g, " ")}</b> can clear it
             {g.constraint.earliest_clear
               ? ` — earliest ${fmtClear(g.constraint.earliest_clear)}`
               : " — on verification, never on a clock"}
@@ -515,7 +515,7 @@ function WhyPanel({
                     {w.remote && (
                       <> — the hold lives in {space(w.origin)} and reaches it.</>
                     )}{" "}
-                    Cleared by <b style={{ color: C.bright }}>{w.clearing_authority}</b>
+                    Cleared by <b style={{ color: C.bright }}>{w.clearing_authority.replace(/_/g, " ")}</b>
                     {w.earliest_clear ? `, earliest ${fmtClear(w.earliest_clear)}` : " on verification"}.
                   </span>
                 );

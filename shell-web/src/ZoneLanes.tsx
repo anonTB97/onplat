@@ -118,6 +118,14 @@ export function ZoneLanes({
   /** What the bar fill encodes: the reader's choice of colour language. */
   const [colourBy, setColourBy] = useState<"status" | "trade" | "risk" | "grade">("status");
   const [showKey, setShowKey] = useState(false);
+  useEffect(() => {
+    if (!showKey) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowKey(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showKey]);
   const [showAlts, setShowAlts] = useState(true);
   const logic: LogicMode = logicChoice ?? (edges.length > 800 ? "inversions" : "all");
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -126,7 +134,13 @@ export function ZoneLanes({
   // it reads the current window and extent through refs.
   const winRef = useRef<TimeWindow>({ v0: 0, v1: 1 });
   const fullRef = useRef<TimeWindow>({ v0: 0, v1: 1 });
-  const drag = useRef<{ x: number; win: TimeWindow; moved: boolean } | null>(null);
+  const drag = useRef<{
+    x: number;
+    win: TimeWindow;
+    moved: boolean;
+    pointerId: number;
+    captured: boolean;
+  } | null>(null);
 
   const zoneOf = new Map<string, string>();
   for (const r of spaces) zoneOf.set(r.compartment.compartment_no, r.compartment.zone);
@@ -296,15 +310,23 @@ export function ZoneLanes({
         style={{ width: "100%", minWidth: 900, display: "block", touchAction: "none", cursor: drag.current ? "grabbing" : undefined }}
         onPointerDown={(e) => {
           if (e.button !== 0) return;
-          drag.current = { x: e.clientX, win, moved: false };
-          e.currentTarget.setPointerCapture(e.pointerId);
+          // Capturing here would retarget the ensuing click to the svg and
+          // silently eat every bar's onClick — the pointer is captured only
+          // once real movement makes this a drag.
+          drag.current = { x: e.clientX, win, moved: false, pointerId: e.pointerId, captured: false };
         }}
         onPointerMove={(e) => {
           const d = drag.current;
           if (!d) return;
           const rect = e.currentTarget.getBoundingClientRect();
           const dxPx = e.clientX - d.x;
-          if (Math.abs(dxPx) > 4) d.moved = true;
+          if (Math.abs(dxPx) > 4) {
+            d.moved = true;
+            if (!d.captured) {
+              e.currentTarget.setPointerCapture(d.pointerId);
+              d.captured = true;
+            }
+          }
           const dt = (-dxPx * (W / rect.width) * (d.win.v1 - d.win.v0)) / PLOT_W;
           const next = windowPan(d.win, fullRef.current, dt);
           setView(next.v0 <= fullRef.current.v0 && next.v1 >= fullRef.current.v1 ? null : next);
@@ -555,7 +577,7 @@ export function ZoneLanes({
       </svg>
 
       {showKey && (
-        <div style={{ borderTop: `1px solid ${C.line}`, padding: "9px 12px", display: "grid", gap: "5px 22px", gridTemplateColumns: "repeat(auto-fit,minmax(330px,1fr))", fontSize: 11, color: C.text, background: "#101118" }}>
+        <div style={{ borderTop: `1px solid ${C.line}`, padding: "9px 12px 14px", display: "grid", gap: "5px 22px", gridTemplateColumns: "repeat(auto-fit,minmax(330px,1fr))", fontSize: 11, color: C.text, background: "#101118" }}>
           {[
             [<svg key="k1" width={26} height={10}><rect x={1} y={1} width={24} height={8} rx={2} fill={STATUS_FILL.in_progress} /></svg>,
              "A bar is one activity, in its planned window. Fill = the colour language you pick below (status, trade, risk or location grade)."],

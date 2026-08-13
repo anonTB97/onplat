@@ -1308,6 +1308,16 @@ pub(crate) async fn import_schedule(
     let body: ImportSchedule = read_import_body(req).await?;
     let sor = crate::schedule::parse_xer(&body.label, &body.xer)
         .map_err(|reasons| ApiError::OutOfRange(format!("XER rejected: {reasons}")))?;
+    // A file that parses to nothing is refused, not previewed: every line of
+    // an alien file reads as XER "header noise", so without this check a
+    // grabbed-the-wrong-file upload sails to a live Confirm button whose
+    // click would empty every board.
+    if sor.activities.is_empty() {
+        return Err(ApiError::OutOfRange(
+            "XER rejected: the file carries no activities — no TASK section was found.              Is this a Primavera P6 XER export?"
+                .to_owned(),
+        ));
+    }
     let activities = sor.activities.len();
     let edges = sor.edges.len();
     // The dry run: everything the import would say, nothing it would do —

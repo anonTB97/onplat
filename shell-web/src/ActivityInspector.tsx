@@ -216,7 +216,7 @@ export function ActivityInspector({
             <div style={{ fontSize: 11, color: e.earliest_clear ? C.warn : "#c4b5fd" }}>
               {e.earliest_clear
                 ? `clears ${fmtInstant(e.earliest_clear)} on its own`
-                : `clears on verification by ${e.clearing_authority} — never on a clock`}
+                : `clears on verification by ${e.clearing_authority.replace(/_/g, " ")} — never on a clock`}
             </div>
           </div>
         ) : e.verdict === "unassessable" ? (
@@ -271,7 +271,7 @@ export function ActivityInspector({
               <div style={{ fontSize: 11.5 }}>
                 <b style={{ color: "#c4b5fd" }}>No date-certain window can be promised:</b>{" "}
                 {alt.alternative.refusal.rule_code} clears only on verification by{" "}
-                <b>{alt.alternative.refusal.clearing_authority}</b>. The honest proposal is the
+                <b>{alt.alternative.refusal.clearing_authority.replace(/_/g, " ")}</b>. The honest proposal is the
                 action, not a date — see the options below.
               </div>
             ) : (

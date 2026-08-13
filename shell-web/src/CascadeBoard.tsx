@@ -432,6 +432,11 @@ function ActionCard({
           {net >= 0 ? "+" : ""}{mh(net)} net
         </span>
       </div>
+      {a.action.kind === "interrupt" && (
+        <div style={{ fontSize: 10, color: C.subtle, marginTop: 2, fontFamily: "monospace" }}>
+          {a.action.from} ⟶ {a.action.to} · {a.action.coupling}
+        </div>
+      )}
       <div style={{ fontSize: 10.5, color: C.dim, marginTop: 3 }}>
         frees {a.effect.frees.length} · shuts{" "}
         <span style={{ color: a.effect.closes.length > 0 ? "#f87171" : undefined, fontWeight: a.effect.closes.length > 0 ? 700 : 400 }}>

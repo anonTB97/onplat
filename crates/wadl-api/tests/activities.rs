@@ -616,3 +616,29 @@ async fn alternatives_are_engine_verdicts_not_guesses() {
         .collect();
     assert!(hours.windows(2).all(|w| w[0] >= w[1]), "{hours:?}");
 }
+
+/// A grabbed-the-wrong-file upload must be refused at the dry run, not
+/// previewed with a live Confirm: an alien text file parses to zero
+/// activities (every line is XER "header noise"), and zero activities is a
+/// refusal with its reason, never a preview.
+#[tokio::test]
+async fn an_alien_file_is_refused_not_previewed() {
+    let (app, world) = app_at_anchor();
+    let (status, body) = post(
+        &app,
+        &world,
+        &format!(
+            "/api/vessels/{}/schedule-of-record?dry_run=true",
+            world.cvn73.as_uuid()
+        ),
+        serde_json::json!({
+            "label": "notes.xer",
+            "xer": "meeting notes\nremember to call the pier office\n- coffee"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("no activities"), "{detail}");
+    assert!(detail.contains("P6 XER"), "{detail}");
+}

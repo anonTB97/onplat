@@ -93,7 +93,7 @@ const refusalTitle = (a: Activity): string => {
   if (e.verdict !== "not_executable") return "";
   const clears = e.earliest_clear
     ? `clears ${fmtInstant(e.earliest_clear)}`
-    : `clears on verification by ${e.clearing_authority}`;
+    : `clears on verification by ${e.clearing_authority.replace(/_/g, " ")}`;
   return (
     `Refused from ${fmtInstant(e.at)} inside the planned window — ` +
     `${e.rule_code} · ${e.hazard} @ ${e.origin} · ${clears}. ` +
@@ -190,6 +190,12 @@ export default function SequenceBoard({
       stale = true;
     };
   }, [identity, vesselId, asOf, reloadNonce]);
+
+  // A view switch orphans the inspector: a panel describing one register row
+  // must not sit over a heat map it has nothing to say about.
+  useEffect(() => {
+    setInspect(null);
+  }, [boardView]);
 
   // A hull switch invalidates everything the reader had staged or narrowed:
   // a preview audited against hull A must never be one click from committing
@@ -314,7 +320,15 @@ export default function SequenceBoard({
     <div style={{ marginRight: inspect ? 406 : 0, transition: "margin-right 0.15s ease" }}>
       <ModuleHeader
         kicker={`Sequence Board · ${hullLabel}`}
-        title="The activity register"
+        title={
+          boardView === "lanes"
+            ? "Work by zone, on one calendar"
+            : boardView === "spaceLanes"
+              ? "The sequence inside each space"
+              : boardView === "digest"
+                ? "Where the load sits, week by week"
+                : "The activity register"
+        }
         stats={[
           { value: activities.length, label: "activities", title: "Every scheduled activity at the grain a crew is handed — the doing grain the six work orders are made of." },
           { value: inWindow, label: "in window now", title: "Planned for the instant on the time control. The instant marks rows, never filters them." },
@@ -353,9 +367,8 @@ export default function SequenceBoard({
             </>
           ) : (
             <>
-              Generated from the seeded work orders and packages so every hour reconciles
-              with the boards; real P6 ingest replaces this register without changing the
-              screen.
+              This is the demo&apos;s built-in schedule. Import a real P6 schedule (⭱ Import
+              XER) and it takes over every screen — nothing else changes.
             </>
           )
         }
@@ -445,7 +458,7 @@ export default function SequenceBoard({
           </button>
           <button
             style={chip(false)}
-            title="Download the schedule's dependency logic — pred, succ, kind, lag. Negative lags are the rows worth reading."
+            title="Download the schedule's dependency links (the 'edges': which activity waits on which, and by how much). The negative lags are the rows worth reading."
             onClick={() => {
               const lines = [
                 "pred_code,succ_code,kind,lag_hours",
@@ -454,7 +467,7 @@ export default function SequenceBoard({
               downloadCsv(lines, `edges-${source ?? "generated"}${stamp(asOfMs)}.csv`);
             }}
           >
-            ⭳ Edges CSV
+            ⭳ Logic CSV
           </button>
           {source !== null && (
             <DiscardButton
@@ -492,7 +505,11 @@ export default function SequenceBoard({
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <b style={{ fontSize: 12.5 }}>{pending.label}</b>
               <span style={{ fontSize: 11.5, color: C.dim }}>
-                {p.activities} activities · {p.edges} edges · {m.milestones} key events — previewed, nothing stored
+                {p.activities} activities · {p.edges} edges · {m.milestones} key events — previewed,
+                nothing stored.{" "}
+                <b style={{ color: C.warn }}>
+                  Confirm replaces the current register ({activities.length} activities) on every screen.
+                </b>
               </span>
               <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                 <button
@@ -830,12 +847,17 @@ export default function SequenceBoard({
                           a.compartment_no ?? (e.verdict === "not_executable" ? e.origin : ""),
                         );
                       }}
-                      title={refusalTitle(a)}
+                      title={
+                        (a.status === "complete"
+                          ? "Already complete — no hours are affected; the space refuses NEW work in that window. "
+                          : "") + refusalTitle(a)
+                      }
                       style={{
                         font: "inherit", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4,
                         cursor: "pointer", padding: "2px 7px", borderRadius: 4,
                         color: C.dangerSoft, background: "rgba(239,68,68,0.12)",
                         border: "1px solid rgba(239,68,68,0.45)",
+                        opacity: a.status === "complete" ? 0.55 : 1,
                       }}
                     >
                       NOT EXECUTABLE
@@ -924,9 +946,13 @@ export default function SequenceBoard({
                       <span style={{ color: a.executability.earliest_clear ? C.warn : "#c4b5fd" }}>
                         {a.executability.earliest_clear
                           ? `clears ${fmtInstant(a.executability.earliest_clear)} on its own`
-                          : `clears on verification by ${a.executability.clearing_authority} — never on a clock`}
+                          : `clears on verification by ${a.executability.clearing_authority.replace(/_/g, " ")} — never on a clock`}
                       </span>
-                      <span style={{ color: C.dim }}>{mh(a.remaining_hours)} at stake</span>
+                      <span style={{ color: C.dim }}>
+                        {a.remaining_hours === 0
+                          ? "already complete — nothing at stake"
+                          : `${mh(a.remaining_hours)} at stake`}
+                      </span>
                     </div>
                   </td>
                 </tr>

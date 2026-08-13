@@ -85,7 +85,8 @@ export default function SourcesBoard({
           label: file.name,
           sizeBytes: file.size,
           summary:
-            `${p.activities} activities · ${p.edges} edges · ${m.milestones} key events · ` +
+            `${p.activities} activities · ${p.edges} edges · ${m.milestones} key events — ` +
+            `Confirm replaces the current register (${register?.activities.length ?? "?"} activities) on every screen · ` +
             `location: ${m.located_authored} authored` +
             (m.located_derived.length > 0 ? ` / ${m.located_derived.length} from task names` : "") +
             (m.unlocated.length > 0 ? ` / ${m.unlocated.length} unlocated` : "") +

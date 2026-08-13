@@ -197,6 +197,15 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
         </Section>
 
         <Section n="06" title="Controls, everywhere the same">
+          <p style={{ margin: "0 0 8px", fontSize: 12 }}>
+            <span style={dt}>Three words the boards use constantly:</span>{" "}
+            <b style={{ color: C.bright }}>MH</b> is man-hours — every workload number here.{" "}
+            <b style={{ color: C.bright }}>Edges</b> (the arrows, and the Logic CSV) are the
+            schedule&apos;s dependency links: which activity waits on which, and by how much.{" "}
+            <b style={{ color: C.bright }}>Stranded</b> hours are finished or finishable work that
+            still cannot proceed — installed pipe that cannot be tested because a space upstream
+            is held. Stranding is what the biggest red numbers on Conflicts &amp; Risk are made of.
+          </p>
           <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
             <tbody>
               {[

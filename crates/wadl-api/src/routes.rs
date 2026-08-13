@@ -38,6 +38,9 @@ pub struct RouteSpec {
 pub fn inventory() -> Vec<RouteSpec> {
     const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         ("GET", "/health", false, None),
+        // Scoped (it requires and reflects a caller identity) but addresses no
+        // hull id, so the id-swap leak test has nothing to drive it with.
+        ("GET", "/api/whoami", true, None),
         ("GET", "/api/vessels", true, None),
         ("GET", "/api/vessels/:id", true, None),
         ("GET", "/api/vessels/:id/compartments", true, None),

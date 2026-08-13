@@ -1865,3 +1865,24 @@ async fn decide(
         at,
     }))
 }
+
+/// `GET /api/whoami` — the caller's resolved identity, as the server sees it.
+///
+/// Serves the outcome of the trust boundary rather than echoing headers: the
+/// tenant and hull assignments that every scoped query will actually run
+/// under, plus which identity mode admitted them. The shell uses this to show
+/// doors a caller can open instead of doors that exist (least privilege made
+/// visible), and an operator uses it to verify a proxy configuration end to
+/// end with one curl.
+pub(crate) async fn whoami(Caller(scope): Caller) -> Json<Value> {
+    Json(json!({
+        "org": scope.org.to_string(),
+        "assigned_vessels": scope
+            .assigned_vessels
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "identity_mode": crate::auth::identity_mode(),
+        "decision_support_only": true,
+    }))
+}

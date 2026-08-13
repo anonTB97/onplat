@@ -58,6 +58,7 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
+        .route("/api/whoami", get(handlers::whoami))
         .route("/api/vessels", get(handlers::list_vessels))
         .route("/api/vessels/:id", get(handlers::get_vessel))
         .route(

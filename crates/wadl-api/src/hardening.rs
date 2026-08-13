@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use tokio::sync::Semaphore;
+use wadl_domain::Clock;
 
 /// Overload limits for [`harden`]. Both exist so that one runaway client — or
 /// one slow downstream — degrades service loudly (fast 503s) instead of
@@ -47,13 +48,16 @@ impl Default for Limits {
     }
 }
 
-/// Applies the production middleware to a finished router: security headers
-/// on every response, then concurrency shedding and a per-request timeout.
+/// Applies the production middleware to a finished router: concurrency
+/// shedding and a per-request timeout innermost, security headers on every
+/// response, and the audit log outermost.
 ///
-/// The headers layer is outermost so even a shed 503 carries the full header
-/// set — an origin that answers differently under load is the kind of
-/// inconsistency scanners flag.
-pub fn harden(router: Router, limits: Limits) -> Router {
+/// Ordering is the point: headers wrap the guard so even a shed 503 carries
+/// the full header set — an origin that answers differently under load is the
+/// kind of inconsistency scanners flag — and the audit layer wraps everything
+/// so refusals of every kind (shed, timed out, unauthorized) are recorded
+/// exactly as loudly as successes.
+pub fn harden(router: Router, limits: Limits, clock: Arc<dyn Clock>) -> Router {
     let gate = Arc::new(Semaphore::new(limits.max_in_flight));
     let timeout = limits.request_timeout;
     router
@@ -62,6 +66,53 @@ pub fn harden(router: Router, limits: Limits) -> Router {
             async move { guarded(&gate, timeout, req, next).await }
         }))
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let clock = Arc::clone(&clock);
+            async move { audited(clock.as_ref(), req, next).await }
+        }))
+}
+
+/// The audit stream: one JSON object per request on stdout.
+///
+/// What is logged: every `/api` request, and every non-2xx response wherever
+/// it came from — a refused action is precisely the record an assessor asks
+/// for, so refusals can never be quieter than successes. What is *not*
+/// logged: 2xx static-asset and health traffic (volume without meaning), the
+/// query string (time-control instants add nothing to accountability), and
+/// request bodies (an import's content is accounted for by the ledger and
+/// the door's own receipt, not the transport log).
+///
+/// The `org` field repeats the caller's asserted tenant so log lines can be
+/// grouped per tenant; in proxy-asserted mode (see `auth`) that assertion is
+/// only accepted from the authenticated proxy hop.
+async fn audited(clock: &dyn Clock, req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let org = req
+        .headers()
+        .get("x-org-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-")
+        .to_owned();
+    let started = clock.now().epoch_millis();
+    let res = next.run(req).await;
+    let finished = clock.now().epoch_millis();
+    let status = res.status().as_u16();
+    if path.starts_with("/api") || status >= 400 {
+        println!(
+            "{}",
+            serde_json::json!({
+                "audit": "http",
+                "ts_ms": finished,
+                "method": method.as_str(),
+                "path": path,
+                "status": status,
+                "dur_ms": finished - started,
+                "org": org,
+            })
+        );
+    }
+    res
 }
 
 /// The concurrency + timeout guard. Shedding uses `try_acquire` — a request

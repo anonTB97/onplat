@@ -20,6 +20,9 @@
 //! * `WADL_SCHEDULE_XER` — a P6 export to load as the schedule of record.
 //! * `WADL_MAX_IN_FLIGHT`, `WADL_REQUEST_TIMEOUT_SECS` — overload limits;
 //!   defaults in [`wadl_api::hardening::Limits`].
+//! * `WADL_PROXY_KEY` — arms proxy-asserted identity: requests must carry a
+//!   matching `x-wadl-proxy-key` header before their identity headers are
+//!   trusted. Unset means the dev header shim. See `wadl-api`'s auth module.
 //!
 //! The port default is not hardcoded at call sites because an orphaned dev
 //! server silently holding the port once made every later start bind nothing —
@@ -38,7 +41,7 @@ use wadl_store::InMemoryStore;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let clock = SystemClock;
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let (store, world) = InMemoryStore::demo_at(clock.now());
 
     // `WADL_SCHEDULE_XER=<path>` loads a real P6 export as the in-focus hull's
@@ -70,7 +73,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    let state = wadl_api::AppState::new(Arc::new(store), Arc::new(clock));
+    let state = wadl_api::AppState::new(Arc::new(store), Arc::clone(&clock));
     let mut app = wadl_api::build_router(state);
 
     // With a built shell on disk, this binary is the whole product.
@@ -95,13 +98,20 @@ async fn main() -> std::io::Result<()> {
         request_timeout: env_parse("WADL_REQUEST_TIMEOUT_SECS")
             .map_or(defaults.request_timeout, Duration::from_secs),
     };
-    let app = hardening::harden(app, limits);
+    let app = hardening::harden(app, limits, Arc::clone(&clock));
 
     let port: u16 = env_parse("WADL_PORT").unwrap_or(8080);
     let bind: IpAddr = env_parse("WADL_BIND").unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
 
-    // Print the demo identity so an operator can set the dev-shim headers.
+    // Print the demo identity so an operator can set the dev-shim headers,
+    // and which trust boundary is armed so nobody has to guess from behavior.
+    let identity = if std::env::var("WADL_PROXY_KEY").is_ok() {
+        "proxy-asserted — identity headers accepted only with x-wadl-proxy-key"
+    } else {
+        "dev header shim — identity headers trusted as given (loopback only)"
+    };
     println!("Shipyard AI Onboard — demo API on http://{bind}:{port}");
+    println!("  identity trust:      {identity}");
     println!("  x-org-id:            {}", world.yard_org);
     println!(
         "  x-assigned-vessels:  {},{},{}",

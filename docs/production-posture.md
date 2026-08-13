@@ -73,9 +73,11 @@ things*, and the discipline is a written admission test.
   features (uuid carries no RNG except where IDs are minted; axum carries
   no websockets/multipart/http2; chrono carries no locale data).
 
-**Next (wave 2):** vendored-source build (`cargo vendor`) proven in CI so an
-air-gapped enclave build is a rehearsed procedure, not a first attempt;
-SBOM emission (CycloneDX) as a CI artifact per release.
+**Wave 2 additions (done):** the direct `tracing` dependency and the whole
+`tracing-subscriber` tree (regex and friends) removed — the audit and
+diagnostic streams are hand-rolled JSON lines; a vendored-source `--offline` build
+rehearsed in CI on every push so the air-gapped enclave build is a practiced
+procedure; SBOM (SPDX, from both lockfiles) emitted as a CI artifact.
 
 ## Pillar 2 — Identity and access
 
@@ -93,9 +95,21 @@ checks (provably present, leak-tested) and PostgreSQL row-level security
 (provably effective, `pg_rls` on a real database). A dropped policy and a
 skipped check each fail CI independently.
 
-**Wave 2:** the production identity adapter behind a feature flag; session
-lifetime and re-authentication rules; an explicit RBAC matrix served, so
-the UI can stop showing doors a role cannot open (AC-6 least privilege).
+**Trust modes (wave 2, done).** The extractor now enforces *who may assert*
+those identity headers. Default is the dev shim (headers trusted as given —
+loopback only). Setting `WADL_PROXY_KEY` arms **proxy-asserted** mode: a
+request must carry a matching `x-wadl-proxy-key`, compared in constant time,
+before its identity headers are read at all. That is the accredited-yard
+pattern — CAC/PIV terminates at the reverse proxy, which asserts the mapped
+identity plus the shared key on its private hop (and strips all three
+headers from client traffic; `deploy/README.md` documents the contract).
+`GET /api/whoami` serves the resolved scope and the active mode, so a proxy
+pairing is verifiable end to end with one call, and the shell can show a
+caller the doors they can actually open (AC-6).
+
+**Still ahead:** session lifetime/re-authentication rules at the broker, and
+a full role→capability matrix once roles beyond per-hull assignment exist in
+the domain.
 
 ## Pillar 3 — Transport and browser protections
 
@@ -137,11 +151,29 @@ dev server runs the same stack:
 The domain already demands what AU controls ask for: decisions are recorded
 in a hash-chained ledger with actor, timestamp, and rationale, the chain is
 verifiable (`wadl-cli verify-ledger`), and the UI treats the ledger as a
-first-class surface. **Wave 2** extends the same spirit to the transport:
-structured (JSON) request logging via the `tracing` stack already in the
-tree — subject, route, tenant, decision, latency, refusal reason — with the
-explicit rule that *refusals are logged at least as loudly as successes*,
-because the refused action is the one an assessor asks about.
+first-class surface.
+
+**Transport audit stream (wave 2, done).** The outermost middleware layer
+emits one JSON object per request on stdout —
+
+```json
+{"audit":"http","ts_ms":1765432100123,"method":"POST",
+ "path":"/api/vessels/…/schedule-of-record","status":413,"dur_ms":12,"org":"…"}
+```
+
+— hand-rolled on `serde_json` rather than the tracing stack, after the
+tree's one `tracing::error!` call was found silently dropped for want of a
+subscriber: a `println` cannot have that failure mode. The direct `tracing`
+dependency and the whole `tracing-subscriber` tree (regex and friends) left
+with it; a `tracing-core` remnant remains only as axum's own transitive. The governing rule is that
+*refusals are logged at least as loudly as successes*: every `/api` request
+and every non-2xx response anywhere is logged (shed 503s included — the
+audit layer wraps the limiter), while 2xx asset/health noise, query strings,
+and request bodies are excluded by design (bodies are accounted for by the
+ledger and the import doors' own receipts). Backend errors emit
+`{"event":"backend_error",…}` on stderr. Under systemd both streams land in
+the journal, whose sealing and forwarding is the AU-9 tamper story
+(`deploy/wadl.service`).
 
 ## Pillar 6 — Build and deploy integrity
 
@@ -156,9 +188,14 @@ because the refused action is the one an assessor asks about.
 - Toolchain pinned; `--locked` everywhere in CI; release profile already
   builds with thin LTO, one codegen unit, and line-table debug info (kept
   deliberately: actionable backtraces from the field outweigh the size).
-- **Wave 2:** a hardened systemd unit template (DynamicUser, ProtectSystem,
-  NoNewPrivileges, read-only dist), release checksums, and a reproducible-
-  build check (build twice, compare hashes) in CI.
+- **Wave 2, done:** `deploy/wadl.service` — a hardened unit template
+  (DynamicUser, `ProtectSystem=strict`, empty capability set,
+  `@system-service` seccomp filter, loopback-only address families, read-only
+  `/opt/wadl`) with the install procedure in `deploy/README.md`; SBOM
+  (SPDX from both lockfiles) generated as a CI artifact on every push; an
+  air-gap rehearsal job (`cargo vendor` + `--offline` build) so the enclave
+  build is a practiced procedure; and an on-demand reproducibility check
+  (two clean release builds, hashes must match) for release cuts.
 
 ---
 
@@ -170,9 +207,9 @@ this tree, so the SSP writes itself from things that exist:
 | Family | Mechanism in this tree |
 |---|---|
 | AC-3 / AC-4 (enforcement, information flow) | `TenantScope` extractor on every scoped route; PostgreSQL RLS; generated cross-tenant leak tests |
-| AU-2 / AU-9 / AU-10 (audit, protection, non-repudiation) | hash-chained decision ledger + `verify-ledger`; wave-2 structured request logs |
-| CM-7 (least functionality) | feature-gated postgres; `default-features = false` everywhere; loopback bind default; no CORS |
-| IA-2 (identification) | single identity seam in `auth.rs`, built for CAC/PIV or OIDC replacement |
+| AU-2 / AU-9 / AU-10 (audit, protection, non-repudiation) | hash-chained decision ledger + `verify-ledger`; JSON audit stream (every /api request, every refusal) into the journal |
+| CM-7 (least functionality) | feature-gated postgres; `default-features = false` everywhere; loopback bind default; no CORS; systemd sandbox in `deploy/wadl.service` |
+| IA-2 (identification) | single identity seam in `auth.rs` with proxy-asserted trust mode (`WADL_PROXY_KEY`); `/api/whoami` for end-to-end verification |
 | RA-5 / SA-11 (vuln monitoring, developer testing) | cargo-deny on every push; clippy wall; leak/RLS/property/golden tests in CI |
 | SC-5 (denial-of-service protection) | per-door body ceilings; concurrency shed; request timeout |
 | SC-8 (transmission confidentiality) | TLS at the accredited terminator; loopback default until then |
@@ -187,9 +224,14 @@ this tree, so the SSP writes itself from things that exist:
   timeout, drain), single-binary static serving with traversal guard,
   `WADL_BIND`, `--locked` CI, this document, and the philosophy written
   into `CLAUDE.md` so it governs every future slice.
-- **Wave 2 — next.** Identity adapter behind the seam; structured audit
-  logging; SBOM + vendored build + reproducibility check in CI; systemd
-  hardening template; RBAC matrix served to the UI.
+- **Wave 2 — done.** Proxy-asserted identity trust boundary
+  (`WADL_PROXY_KEY`, constant-time compare) with `/api/whoami` serving the
+  resolved scope and mode; the JSON audit stream (refusals as loud as
+  successes) and the tracing stack removed in its favor; SBOM artifact,
+  air-gap rehearsal, and reproducibility check in CI; the hardened systemd
+  unit and deploy runbook in `deploy/`.
 - **Wave 3 — accreditation package.** SSP input doc generated from the
   table above; STIG-style self-checklist; POA&M seeds for the accepted
-  gaps (dev shim, in-memory demo store) with their closure paths named.
+  gaps (dev shim default, in-memory demo store) with their closure paths
+  named; session lifetime rules at the identity broker; role→capability
+  matrix when roles beyond per-hull assignment enter the domain.

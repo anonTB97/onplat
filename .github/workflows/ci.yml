@@ -136,6 +136,60 @@ jobs:
         with:
           command: check
 
+  sbom:
+    name: SBOM (SPDX) artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The software bill of materials an accreditation package inventories —
+      # generated from the lockfiles (cargo + npm) on every push so the SBOM
+      # is a build product, not a document someone writes after the fact.
+      - uses: anchore/sbom-action@v0
+        with:
+          format: spdx-json
+          artifact-name: wadl-sbom.spdx.json
+
+  air-gap:
+    name: vendored offline build rehearsal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # An air-gapped enclave build must be a rehearsed procedure, not a first
+      # attempt: vendor every dependency from the lockfile, cut the network
+      # off (--offline), and prove the deploy tree still compiles. Default
+      # features on purpose — this rehearses building the artifact that ships.
+      - name: vendor dependencies
+        run: |
+          mkdir -p .cargo
+          cargo vendor --locked vendor >> .cargo/config.toml
+      - name: build offline from the vendor directory
+        run: cargo check --locked --offline --workspace
+
+  reproducible:
+    # Two full release builds per run is too slow for every push; run it on
+    # demand (workflow_dispatch) before cutting a release artifact.
+    if: github.event_name == 'workflow_dispatch'
+    name: release build is reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: build once
+        run: |
+          cargo build --locked --release -p wadl-api --bin serve
+          sha256sum target/release/serve | tee first.sum
+      - name: build again from clean
+        run: |
+          cargo clean
+          cargo build --locked --release -p wadl-api --bin serve
+          sha256sum target/release/serve | tee second.sum
+      - name: hashes must match
+        run: |
+          cut -d' ' -f1 first.sum > a; cut -d' ' -f1 second.sum > b
+          diff a b && echo "reproducible: $(cat a)"
+
   web:
     name: shell typecheck · unit tests · build
     runs-on: ubuntu-latest

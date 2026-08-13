@@ -1,0 +1,91 @@
+# Shipyard AI Onboard — hardened systemd unit template.
+#
+# This is the deployment shape docs/production-posture.md Pillar 6 describes:
+# one binary serving the API and the built shell, loopback-bound behind an
+# accredited TLS/CAC terminator, running as a transient unprivileged user
+# with the broadest sandbox systemd offers. Every directive below either
+# removes a capability the process does not need or makes a filesystem
+# surface read-only; the service works with all of them on, so any relaxation
+# is a documented decision, not a default.
+#
+# Install:
+#   install -m 0755 serve            /opt/wadl/serve
+#   cp -r shell-web/dist             /opt/wadl/dist
+#   install -m 0644 wadl.service     /etc/systemd/system/wadl.service
+#   systemctl daemon-reload && systemctl enable --now wadl
+
+[Unit]
+Description=Shipyard AI Onboard (WADL) — decision support API + shell
+Documentation=file:///opt/wadl/docs/production-posture.md
+After=network.target
+
+[Service]
+ExecStart=/opt/wadl/serve
+Restart=on-failure
+RestartSec=2
+
+# ---- identity & configuration (environment-only, no config file) ----------
+Environment=WADL_PORT=8080
+Environment=WADL_BIND=127.0.0.1
+Environment=WADL_STATIC_DIR=/opt/wadl/dist
+# Arm proxy-asserted identity: generate a key, share it only with the reverse
+# proxy that terminates CAC/TLS, and identity headers from any other source
+# are refused. Prefer a credential file over an inline value:
+#   systemd-creds encrypt --name=wadl-proxy-key plain.txt /etc/wadl/proxy-key.cred
+# LoadCredentialEncrypted=wadl-proxy-key:/etc/wadl/proxy-key.cred
+# Environment=WADL_PROXY_KEY=change-me
+
+# ---- privilege ------------------------------------------------------------
+# A fresh unprivileged user per start; nothing persists under its uid.
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# ---- filesystem -----------------------------------------------------------
+# The process needs to read its binary and the dist directory — nothing else.
+# strict = /usr, /boot, /etc read-only and everything else inaccessible,
+# then the two paths are opened read-only explicitly.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/opt/wadl
+UMask=0077
+
+# ---- kernel & device surface ---------------------------------------------
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+PrivateDevices=yes
+ProcSubset=pid
+ProtectProc=invisible
+
+# ---- network & syscalls ---------------------------------------------------
+# Loopback TCP only; widen to the proxy's address family, never to raw/packet.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallArchitectures=native
+
+# ---- resource ceilings (defense in depth behind the app's own limits) -----
+MemoryMax=2G
+TasksMax=256
+LimitNOFILE=4096
+
+# ---- audit stream ---------------------------------------------------------
+# stdout carries the JSON audit lines; the journal stamps, persists, and
+# forwards them (AU-9: journald's sealing/forwarding is the tamper story).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wadl
+
+[Install]
+WantedBy=multi-user.target

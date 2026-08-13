@@ -36,7 +36,15 @@ impl From<StoreError> for ApiError {
         match err {
             StoreError::NotFound => Self::NotFound,
             StoreError::Backend(detail) => {
-                tracing::error!(%detail, "store backend error");
+                // Emitted as a JSON line on stderr — the same shape as the
+                // audit stream on stdout, but kept on the diagnostic channel.
+                // This used to go through `tracing::error!`, which, with no
+                // subscriber installed anywhere, dropped the one message that
+                // explains a 500.
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "event": "backend_error", "detail": detail })
+                );
                 Self::Internal
             }
         }

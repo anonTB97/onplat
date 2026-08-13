@@ -63,8 +63,10 @@ axum = { version = "0.7", default-features = false, features = ["http1", "json",
 # hand-rolled on tokio primitives — see wadl-api::hardening — so the deploy
 # surface carries no tower-http and no tower service stack of its own.
 tower = "0.5"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+# No tracing stack: the audit and diagnostic streams are hand-rolled JSON
+# lines (wadl-api::hardening and error.rs) — the one tracing::error! call the
+# tree ever had was silently dropped for want of a subscriber, which is the
+# failure mode a framework invites and a println cannot have.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros", "migrate"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 anyhow = "1"

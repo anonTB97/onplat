@@ -2136,7 +2136,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tower",
- "tracing",
  "uuid",
  "wadl-domain",
  "wadl-engine",

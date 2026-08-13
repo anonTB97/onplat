@@ -26,6 +26,11 @@ plan and every slice is expected to advance it, or at minimum not regress it.
   WHY-prose are served; the shell never derives an authorization truth.
 - **Middleware is hand-rolled** in `wadl-api::hardening` on tokio
   primitives. Extend that module rather than adding tower-http et al.
+  Logging is hand-rolled JSON lines too (audit on stdout, diagnostics on
+  stderr) — no tracing stack; refusals are logged as loudly as successes.
+- **Identity trust modes** live in `auth.rs`: dev header shim by default,
+  proxy-asserted when `WADL_PROXY_KEY` is set. New identity sources replace
+  the inside of that extractor only. Deployment shape: `deploy/`.
 - The lint wall is part of the product: no `unsafe`, no `unwrap`/`expect`/
   `panic`/indexing in non-test code, `-D warnings`, `--locked` in CI. Run
   `cargo fmt --all && cargo clippy --workspace --all-targets --all-features

@@ -28,8 +28,7 @@ import { ModuleHeader } from "./ModuleHeader";
 import { chipStyle, C, mh } from "./theme";
 import { activityWindowHours, refusalOverlaps } from "./windowLoad";
 
-const fmtTime = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
-const fmtDay = (ms: number): string => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
+import { fmtDay, fmtStamp, fmtTime } from "./clock";
 
 /** The activity's slot as a foreman reads it: times inside a day, else days. */
 const fmtSlot = (w: { start: number; end: number } | null): string => {
@@ -185,7 +184,7 @@ export default function DailyOps({
 
   const sliceLabel =
     win === null
-      ? `at ${asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}Z` : "now"}`
+      ? `at ${asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}` : "now"}`
       : `${SHIFTS.find((s) => s.id === shift)?.label ?? ""} · ${fmtDay(win.start)} (Z)`;
 
   // The one-pager. Generated as its own monochrome document rather than
@@ -246,7 +245,7 @@ export default function DailyOps({
       ${heldCount > 0 ? ` · ${heldCount} in a space the engine refuses now` : ""}
       ${doomedCount > 0 ? ` · ${doomedCount} not executable as planned` : ""}</p>
       ${eventRows}${rows}
-      <footer>Generated ${new Date().toISOString().slice(0, 16).replace("T", " ")}Z · decision support only — flags risk; the planner decides. Does not modify the schedule.</footer>
+      <footer>Generated ${fmtStamp(Date.now())} · decision support only — flags risk; the planner decides. Does not modify the schedule.</footer>
       </body></html>`;
     const w = window.open("", "_blank", "width=900,height=700");
     if (!w) return;

@@ -73,8 +73,7 @@ export const KIND: Record<
   },
 };
 
-const fmtInstant = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 16).replace("-", "/").replace("T", " ");
+import { fmtDay, fmtDayTime } from "./clock";
 
 /** What the issue is, in one line a planner can repeat in a meeting. */
 export function claim(i: Issue): string {
@@ -97,10 +96,10 @@ function evidence(i: Issue): string {
   switch (i.kind) {
     case "not_executable_as_planned":
       return (
-        `${i.trade} · refused from ${fmtInstant(i.refusal.at)} in its planned window — ` +
+        `${i.trade} · refused from ${fmtDayTime(i.refusal.at)} in its planned window — ` +
         `${i.refusal.rule_code} · ${i.refusal.hazard} @ ${i.refusal.origin} · ` +
         (i.refusal.earliest_clear
-          ? `clears ${fmtInstant(i.refusal.earliest_clear)}`
+          ? `clears ${fmtDayTime(i.refusal.earliest_clear)}`
           : `clears on verification by ${i.refusal.clearing_authority}`)
       );
     case "held_with_crews_booked":
@@ -194,7 +193,6 @@ export default function IssuesBoard({
     verticalAlign: "top",
   };
   const chip = chipStyle;
-  const fmtDay = (ms: number) => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
 
   const submitAck = (key: string) => {
     setAckErr(null);

@@ -23,10 +23,7 @@ import {
 import { actionTitle } from "./Mitigations";
 import { C, mh } from "./theme";
 
-const fmtDay = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 10).replace("-", "/");
-const fmtInstant = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 16).replace("-", "/").replace("T", " ");
+import { fmtDay, fmtDayTime } from "./clock";
 
 const label: React.CSSProperties = {
   fontSize: 9, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase",
@@ -198,7 +195,7 @@ export function ActivityInspector({
           <div style={{ ...block, border: "1px solid rgba(239,68,68,0.45)", background: "rgba(239,68,68,0.06)" }}>
             <div style={{ ...label, color: C.dangerSoft }}>Not executable as planned</div>
             <div style={{ fontSize: 11.5 }}>
-              Refused from <b style={{ fontFamily: "monospace" }}>{fmtInstant(e.at)}</b> inside the
+              Refused from <b style={{ fontFamily: "monospace" }}>{fmtDayTime(e.at)}</b> inside the
               planned window — rule <b style={{ fontFamily: "monospace", color: C.bright }}>{e.rule_code}</b>,{" "}
               {e.hazard} @{" "}
               <button
@@ -215,7 +212,7 @@ export function ActivityInspector({
             </div>
             <div style={{ fontSize: 11, color: e.earliest_clear ? C.warn : "#c4b5fd" }}>
               {e.earliest_clear
-                ? `clears ${fmtInstant(e.earliest_clear)} on its own`
+                ? `clears ${fmtDayTime(e.earliest_clear)} on its own`
                 : `clears on verification by ${e.clearing_authority.replace(/_/g, " ")} — never on a clock`}
             </div>
           </div>

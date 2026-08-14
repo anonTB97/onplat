@@ -42,6 +42,7 @@ import { HORIZONS, type Horizon } from "./TimeControl";
 import { windowLoadBySpace, windowLoadTotal, type SpaceLoad } from "./windowLoad";
 import { DiscardButton } from "./DiscardButton";
 import { zoneBands, type ZoneGeometry } from "./zones";
+import { fmtDate, fmtDay } from "./clock";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -590,7 +591,7 @@ export default function DeckExplorer({
               or change the horizon and these numbers move with the plan. */}
           {winStart > 0 && (
             <span
-              title={`The schedule inside the reading window: ${new Date(winStart).toISOString().slice(0, 10)} + one ${HORIZONS[horizon].label.toLowerCase()}. Budget is pro-rated by each activity's overlap with the window — the Load digest's rule. Unlocated rows cannot land on a space and are counted, never hidden.`}
+              title={`The schedule inside the reading window: ${fmtDate(winStart)} + one ${HORIZONS[horizon].label.toLowerCase()}. Budget is pro-rated by each activity's overlap with the window — the Load digest's rule. Unlocated rows cannot land on a space and are counted, never hidden.`}
               style={{
                 marginLeft: "auto", alignSelf: "center", fontSize: 11, color: DIM,
                 display: "flex", gap: 10, alignItems: "baseline", whiteSpace: "nowrap",
@@ -1205,7 +1206,7 @@ function TracePanel({
                               )}
                               {l.next && (
                                 <span style={{ color: DIM }}>
-                                  {" "}· next {l.next.code} on {new Date(l.next.start).toISOString().slice(5, 10).replace("-", "/")}
+                                  {" "}· next {l.next.code} on {fmtDay(l.next.start)}
                                 </span>
                               )}
                             </>

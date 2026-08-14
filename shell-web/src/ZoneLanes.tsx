@@ -36,6 +36,7 @@ import type { Activity, DeckStateRow, ScheduleEdge } from "./api";
 import { wheelFactor, windowPan, windowZoomAt, type TimeWindow } from "./camera";
 import { ACTIVITY_STATUS, C, mh, tradeColour, zoneColour } from "./theme";
 import type { Window } from "./api";
+import { fmtDay } from "./clock";
 
 const W = 1240;
 const GUTTER_W = 225;
@@ -330,7 +331,6 @@ export function ZoneLanes({
   const step = span < 21 * DAY ? DAY : 7 * DAY;
   const ticks: number[] = [];
   for (let t = Math.ceil(win.v0 / step) * step; t <= win.v1; t += step) ticks.push(t);
-  const fmtDay = (ms: number) => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
 
   return (
     <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.well, overflowX: "auto" }}>

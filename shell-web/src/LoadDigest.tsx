@@ -50,9 +50,7 @@ function nextMonth(ms: number): number {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
 }
 
-const fmtWeek = (ms: number) => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
-const fmtMonth = (ms: number) =>
-  new Date(ms).toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+import { fmtDay as fmtWeek, fmtMonth } from "./clock";
 
 export function LoadDigest({
   activities,

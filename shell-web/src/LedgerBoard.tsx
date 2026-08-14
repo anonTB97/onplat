@@ -16,6 +16,7 @@ import { listLedger, type AuditEntry, type Identity, type LedgerReport } from ".
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { C } from "./theme";
+import { fmtStamp } from "./clock";
 
 /** How each recorded action reads at a glance. */
 const ACTION_STYLE: Record<string, { label: string; fg: string; bg: string; border: string }> = {
@@ -47,7 +48,7 @@ const FALLBACK_STYLE = {
 };
 
 const fmtInstant = (ms: number): string =>
-  new Date(ms).toISOString().slice(0, 16).replace("T", " ") + "Z";
+  fmtStamp(ms);
 
 /** A compartment placard, e.g. `3-160-2-Q` — the shape that can route. */
 const PLACARD = /^\d+-\d+-\d+-[A-Z]$/;

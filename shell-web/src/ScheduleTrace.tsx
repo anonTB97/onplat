@@ -22,10 +22,7 @@ import { useEffect, useState } from "react";
 import { listActivities, type Activity, type AsOf, type Identity } from "./api";
 import { ACTIVITY_STATUS, C, mh } from "./theme";
 
-const fmtDay = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 10).replace("-", "/");
-const fmtMonth = (ms: number): string =>
-  new Date(ms).toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+import { fmtDay, fmtMonth } from "./clock";
 
 function monthStarts(t0: number, t1: number): number[] {
   const out: number[] = [];

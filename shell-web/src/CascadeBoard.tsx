@@ -39,8 +39,7 @@ const CONFIDENCE_GLOSS: Record<Confidence, string> = {
   assumes_own_authorization: "assumes the closure work is itself authorized",
 };
 
-const fmtInstant = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 16).replace("-", "/").replace("T", " ");
+import { fmtDayTime } from "./clock";
 
 export default function CascadeBoard({
   identity,
@@ -257,7 +256,7 @@ export default function CascadeBoard({
         title="If we do it, what happens everywhere else?"
         stats={[
           { value: actions.length, label: actions.length === 1 ? "action on offer" : "actions on offer" },
-          asOfMs !== null && { value: `${fmtInstant(asOfMs)}Z`, label: "evaluated as of" },
+          asOfMs !== null && { value: fmtDayTime(asOfMs), label: "evaluated as of" },
         ]}
         note="Pick an action; the hull becomes its consequence map. Every effect is a counterfactual engine verdict — the world rebuilt with the action taken and re-evaluated. Decision support, not automation: this proposes, a planner decides on the space's options panel, and the ledger remembers."
       />

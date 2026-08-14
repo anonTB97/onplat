@@ -16,14 +16,14 @@ import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { commitBtnStyle, C, errText, mh, msgColor, overlayBucket, OVERLAY_STYLE, STATE_STYLE } from "./theme";
 import { DiscardButton } from "./DiscardButton";
+import { fmtDay } from "./clock";
 
 type SortKey = "code" | "remaining" | "compartment" | "start";
 
 /** A planned window, at day resolution — the resolution a schedule carries. */
 const fmtWindow = (w: { start: number; end: number } | null): string => {
   if (!w) return "no dates";
-  const d = (ms: number) => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
-  return `${d(w.start)} → ${d(w.end)}`;
+  return `${fmtDay(w.start)} → ${fmtDay(w.end)}`;
 };
 
 export default function WorkOrders({

@@ -63,13 +63,11 @@ const STATUS_LABEL: Record<Exclude<StatusFilter, "all">, { label: string; fg: st
 /** A planned window at day resolution — the resolution a schedule carries. */
 const fmtWindow = (w: { start: number; end: number } | null): string => {
   if (!w) return "no dates";
-  const d = (ms: number) => new Date(ms).toISOString().slice(5, 10).replace("-", "/");
-  return `${d(w.start)} → ${d(w.end)}`;
+  return `${fmtDay(w.start)} → ${fmtDay(w.end)}`;
 };
 
 /** An instant, to the minute — refusals are priced to the minute, not the day. */
-const fmtInstant = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 16).replace("-", "/").replace("T", " ");
+import { fmtDay, fmtDayTime } from "./clock";
 
 /** The as-of stamp an export's filename carries — a file found on a desktop
  *  next month must say which instant it spoke for. */
@@ -92,10 +90,10 @@ const refusalTitle = (a: Activity): string => {
   const e = a.executability;
   if (e.verdict !== "not_executable") return "";
   const clears = e.earliest_clear
-    ? `clears ${fmtInstant(e.earliest_clear)}`
+    ? `clears ${fmtDayTime(e.earliest_clear)}`
     : `clears on verification by ${e.clearing_authority.replace(/_/g, " ")}`;
   return (
-    `Refused from ${fmtInstant(e.at)} inside the planned window — ` +
+    `Refused from ${fmtDayTime(e.at)} inside the planned window — ` +
     `${e.rule_code} · ${e.hazard} @ ${e.origin} · ${clears}. ` +
     `Click to open the space with its options.`
   );
@@ -919,7 +917,7 @@ export default function SequenceBoard({
                     <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center", fontSize: 11 }}>
                       <span style={{ color: C.dim }}>
                         refused from{" "}
-                        <b style={{ color: C.dangerSoft, fontFamily: "monospace" }}>{fmtInstant(a.executability.at)}</b>{" "}
+                        <b style={{ color: C.dangerSoft, fontFamily: "monospace" }}>{fmtDayTime(a.executability.at)}</b>{" "}
                         inside {fmtWindow(a.planned)}
                       </span>
                       <span style={{ color: C.dim }}>
@@ -945,7 +943,7 @@ export default function SequenceBoard({
                       </span>
                       <span style={{ color: a.executability.earliest_clear ? C.warn : "#c4b5fd" }}>
                         {a.executability.earliest_clear
-                          ? `clears ${fmtInstant(a.executability.earliest_clear)} on its own`
+                          ? `clears ${fmtDayTime(a.executability.earliest_clear)} on its own`
                           : `clears on verification by ${a.executability.clearing_authority.replace(/_/g, " ")} — never on a clock`}
                       </span>
                       <span style={{ color: C.dim }}>

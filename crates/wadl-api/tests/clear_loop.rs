@@ -71,7 +71,7 @@ fn hull(world: &DemoWorld) -> String {
 /// decision trace carries the hazard's label. Read through the same endpoints
 /// the shell reads, so the assertion is about what a planner would see.
 async fn spaces_held_by(app: &axum::Router, world: &DemoWorld, label: &str) -> Vec<String> {
-    let (status, states) = call(
+    let (status, board) = call(
         app,
         world,
         "GET",
@@ -81,7 +81,7 @@ async fn spaces_held_by(app: &axum::Router, world: &DemoWorld, label: &str) -> V
     .await;
     assert_eq!(status, StatusCode::OK);
     let mut held = Vec::new();
-    for row in states.as_array().unwrap() {
+    for row in board.as_array().unwrap() {
         let no = row["compartment"]["compartment_no"].as_str().unwrap();
         let (status, state) = call(
             app,

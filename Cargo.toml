@@ -67,7 +67,7 @@ tower = "0.5"
 # lines (wadl-api::hardening and error.rs) — the one tracing::error! call the
 # tree ever had was silently dropped for want of a subscriber, which is the
 # failure mode a framework invites and a println cannot have.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

@@ -63,10 +63,11 @@ things*, and the discipline is a written admission test.
 - `tower-http` removed — declared, never used; the middleware it would have
   provided is hand-rolled in `wadl-api::hardening` on tokio primitives.
 - `tower` demoted to dev-dependency (test utilities only).
-- `sqlx` (~90 transitive crates, its own TLS and protocol stack) is now
+- `sqlx` (~90 transitive crates, its own TLS and protocol stack) is
   behind `wadl-store`'s `postgres` feature. The demo server, the API tests,
-  and the whole shell backend compile without it; `wadl-cli` and the RLS
-  test job are the two sanctioned consumers. `cargo test --workspace` in CI
+  and the whole shell backend compile without it; the sanctioned consumers
+  are `wadl-cli`, the RLS/trait test job, and the serve binary's `postgres`
+  feature — the production serving path (POAM-2, closed). `cargo test --workspace` in CI
   runs featureless, which keeps the claim checkable; clippy runs
   `--all-features` so the gated code never rots.
 - Workspace dependencies declare `default-features = false` and enumerate

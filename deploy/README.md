@@ -9,9 +9,17 @@ operations.
 ```sh
 # The shell, content-hashed and minified:
 cd shell-web && npm ci && npx vite build && cd ..
-# The binary (release profile: thin LTO, one codegen unit, line tables kept):
-cargo build --locked --release -p wadl-api --bin serve
+# The binary (release profile: thin LTO, one codegen unit, line tables kept).
+# --features postgres compiles the production store in; without it the binary
+# cannot open a database at all:
+cargo build --locked --release -p wadl-api --bin serve --features postgres
 ```
+
+Prepare the database once (`DATABASE_URL` set): `wadl migrate && wadl seed`
+(or your own data load). At runtime, `DATABASE_URL` in the unit's environment
+selects the PostgreSQL store — row-level security armed per request — and its
+absence falls back to the in-memory demo world, which the startup banner
+states plainly.
 
 The deployable set is exactly two things: `target/release/serve` and
 `shell-web/dist/`. Checksum both at build time and verify at install.

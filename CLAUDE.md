@@ -50,5 +50,8 @@ plan and every slice is expected to advance it, or at minimum not regress it.
 - Dev servers: API `cargo run -p wadl-api --bin serve` (WADL_PORT, demo
   identity printed at startup); shell `npx vite --port 5173 --strictPort`
   in shell-web. Single-binary mode: set `WADL_STATIC_DIR=shell-web/dist`.
+  PostgreSQL mode: build with `--features postgres`, set `DATABASE_URL`
+  (after `wadl migrate && wadl seed`); the pg trait tests need
+  `DATABASE_URL` + `--features postgres` and skip without it.
 - Commit and push every completed slice immediately to the designated
   branch. Never put model identifiers in committed artifacts.

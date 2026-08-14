@@ -224,3 +224,238 @@ async fn the_register_is_inherited_from_the_class() {
     assert_eq!(pump_room.deck_ordinal, 3);
     assert_eq!(pump_room.category, "Machinery / electrical");
 }
+
+// ============================================================================
+// Full-trait coverage (POAM-2): every Repositories method against a real
+// database, asserting the same invariants the in-memory tests pin — same
+// topology math, same scope funnel, same ledger chain.
+// ============================================================================
+
+use wadl_domain::units::ManHours;
+use wadl_store::memory::{BudgetBook, ScheduleOfRecord, ZoneRegister};
+use wadl_store::model::ZoneBoundSummary;
+use wadl_store::Repositories;
+
+#[tokio::test]
+async fn work_orders_roll_up_from_segment_spaces() {
+    let store = require_db!();
+    let orders = store
+        .list_work_orders(&yard_scope(), vessel(CVN73))
+        .await
+        .unwrap();
+    assert_eq!(orders.len(), 6, "six ordinary orders on the demo hull");
+    let tank = orders.iter().find(|o| o.code == "WI-3318").unwrap();
+    assert_eq!(tank.budget_hours, ManHours::new(680));
+    assert_eq!(tank.earned_hours, ManHours::new(512));
+    assert_eq!(tank.compartment_no.as_str(), "4-110-2-W");
+    assert!(tank.planned.is_some(), "windows come from work_order");
+    // Packages are not orders; the two registers do not bleed together.
+    assert!(orders.iter().all(|o| o.code != "WI-2201"));
+}
+
+#[tokio::test]
+async fn packages_carry_topology_and_the_trunk_holds_everything() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let packages = store.list_packages(&scope, vessel(CVN73)).await.unwrap();
+    assert_eq!(packages.len(), 2);
+    let hvac = packages.iter().find(|p| p.code == "WI-2201").unwrap();
+    assert_eq!(hvac.segment_count, 6);
+    assert_eq!(hvac.compartment_count, 11);
+
+    // The same wadl-plan invariants the in-memory store pins: T1 is open at
+    // 3-160-2-Q, so nothing is testable and every segment names T1.
+    let package = store
+        .get_package(&scope, vessel(CVN73), "WI-2201")
+        .await
+        .unwrap();
+    let analysis = package.analyse();
+    assert!(
+        analysis.faults.is_empty(),
+        "seed topology must be well formed"
+    );
+    assert_eq!(analysis.testable_segment_count, 0);
+    for code in ["B1", "B2", "T2", "B3", "R1"] {
+        let seg = analysis.segments.iter().find(|s| s.code == code).unwrap();
+        assert!(seg.held_by.contains(&"T1".to_owned()), "{code} held by T1");
+    }
+
+    // And the stranded report agrees: worst offender is the open trunk space.
+    let report = store.stranded_hours(&scope, vessel(CVN73)).await.unwrap();
+    let worst = report.items.first().unwrap();
+    assert_eq!(worst.package_code, "WI-2201");
+    assert_eq!(worst.compartment_no.as_str(), "3-160-2-Q");
+
+    // Unknown package code: not-found, same as an out-of-scope hull.
+    assert!(matches!(
+        store.get_package(&scope, vessel(CVN73), "WI-9999").await,
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn engine_inputs_come_back_typed_with_rejection_paths_unused() {
+    let store = require_db!();
+    let scope = yard_scope();
+
+    let graph = store.adjacency_graph(&scope, vessel(CVN73)).await.unwrap();
+    assert_eq!(graph.edge_count(), 8, "the aft-third neighbourhood");
+
+    let hazards = store.live_hazards(&scope, vessel(CVN73)).await.unwrap();
+    assert_eq!(hazards.len(), 2);
+    let origins: Vec<&str> = hazards.iter().map(|h| h.origin.as_str()).collect();
+    assert!(origins.contains(&"3-160-2-Q"));
+    assert!(origins.contains(&"3-148-2-E"));
+
+    // The stored rule payloads must round-trip the engine's own seed exactly —
+    // the 0011 contract, asserted at the byte level entry by entry.
+    let rules = store.rules_in_force(&scope, vessel(CVN73)).await.unwrap();
+    let expected = wadl_engine::RuleSet::seed_usn_hot_work();
+    assert_eq!(
+        rules.entries().len(),
+        expected.entries().len(),
+        "every seeded entry is served"
+    );
+    for want in expected.entries() {
+        assert!(
+            rules.entries().iter().any(|got| got == want),
+            "rule {} v{:?} did not round-trip",
+            want.rule_code,
+            want.rule_version
+        );
+    }
+}
+
+#[tokio::test]
+async fn ingested_documents_are_all_or_nothing_and_tenant_scoped() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN73);
+
+    // Nothing ingested: the honest empty register, not an invented one.
+    store.clear_schedule_of_record(&scope, hull).await.unwrap();
+    assert!(store
+        .list_activities(&scope, hull)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store.schedule_source(&scope, hull).await.unwrap().is_none());
+
+    // Install, read back, replace, revert.
+    store
+        .set_zone_register(
+            &scope,
+            hull,
+            ZoneRegister {
+                label: "CVN73-zones.csv".to_owned(),
+                bounds: vec![ZoneBoundSummary {
+                    zone: "Z6".to_owned(),
+                    lo_frame: 140,
+                    hi_frame: 180,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let zones = store.zone_register(&scope, hull).await.unwrap().unwrap();
+    assert_eq!(zones.label, "CVN73-zones.csv");
+    assert_eq!(zones.bounds.len(), 1);
+
+    // Another tenant cannot see the document, even claiming the hull.
+    let navy = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.zone_register(&navy, hull).await,
+        Err(StoreError::NotFound)
+    ));
+
+    store.clear_zone_register(&scope, hull).await.unwrap();
+    assert!(store.zone_register(&scope, hull).await.unwrap().is_none());
+
+    // The budget book uses the same door discipline.
+    store
+        .set_budget_book(
+            &scope,
+            hull,
+            BudgetBook {
+                label: "book.csv".to_owned(),
+                items: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(store.budget_book(&scope, hull).await.unwrap().is_some());
+    store.clear_budget_book(&scope, hull).await.unwrap();
+
+    // A schedule of record round-trips through JSON with its full shape.
+    let activities = vec![];
+    store
+        .set_schedule_of_record(
+            &scope,
+            hull,
+            ScheduleOfRecord {
+                label: "test.xer".to_owned(),
+                activities,
+                edges: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .schedule_source(&scope, hull)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("test.xer")
+    );
+    store.clear_schedule_of_record(&scope, hull).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_ledger_chains_and_filters_in_postgres() {
+    let store = require_db!();
+    let scope = yard_scope();
+    // CVN-75 so this test's entries do not interleave with other tests' hulls.
+    let hull = vessel(CVN75);
+
+    let first = store
+        .append_audit(
+            &scope,
+            hull,
+            "TEST_ONE",
+            "detail one",
+            Some("4-141-0-C"),
+            1_000,
+        )
+        .await
+        .unwrap();
+    let second = store
+        .append_audit(&scope, hull, "TEST_TWO", "detail two", None, 2_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.prev_hash.as_deref(),
+        Some(first.entry_hash.as_str()),
+        "each entry chains to the last"
+    );
+
+    let all = store.list_audit(&scope, hull, None).await.unwrap();
+    assert!(all.len() >= 2, "newest first, everything kept");
+    assert_eq!(all.first().unwrap().action, "TEST_TWO");
+
+    let filtered = store
+        .list_audit(&scope, hull, Some("4-141-0-C"))
+        .await
+        .unwrap();
+    assert!(filtered
+        .iter()
+        .all(|r| r.subject_ref.as_deref() == Some("4-141-0-C")));
+
+    // The scope funnel applies to writes exactly as to reads.
+    assert!(matches!(
+        store
+            .append_audit(&scope, vessel(DDG), "NOPE", "x", None, 3_000)
+            .await,
+        Err(StoreError::NotFound)
+    ));
+}

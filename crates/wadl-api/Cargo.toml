@@ -24,6 +24,13 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
+[features]
+# The production serving path: compiles the PostgreSQL store into the binary.
+# Activated at runtime by DATABASE_URL (see the serve binary's doc header);
+# without the feature the binary cannot open a database at all, which keeps
+# the demo artifact's dependency tree free of the driver (CM-7).
+postgres = ["wadl-store/postgres"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 tower = { workspace = true, features = ["util"] }

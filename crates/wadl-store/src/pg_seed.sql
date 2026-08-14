@@ -111,3 +111,129 @@ INSERT INTO ingest_run (run_id, org_id, source_system, source_file, row_count, r
   ('00000000-0000-0000-0000-000000009001', '00000000-0000-0000-0000-000000000001', 'seed', 'crates/wadl-store/src/pg_seed.sql', NULL, 0,
    'Illustrative / notional demo world. Not customer data.')
 ON CONFLICT (run_id) DO NOTHING;
+
+-- =============================================================================
+-- Work, packages, topology, and live conditions (POAM-2 closure).
+--
+-- Mirrors InMemoryStore::demo(), with ONE declared difference: the in-memory
+-- demo re-anchors its story on the clock at every boot, while a database's
+-- rows are durable facts, so this seed anchors the story on a fixed instant —
+-- ANCHOR = 2026-08-10 00:00Z (the sample XER's data date). Windows below are
+-- day offsets from that anchor, written as intervals so the offsets stay
+-- readable against memory.rs. The demo rule set is NOT here: `wadl seed`
+-- writes it programmatically from `RuleSet::seed_usn_hot_work()` so the stored
+-- payload round-trips the engine's own serde byte-for-byte (see 0011).
+-- =============================================================================
+
+-- The PIA-26 availability must reach past the furthest seeded window (day 130).
+UPDATE availability SET end_on = '2027-01-31'
+ WHERE availability_id = '00000000-0000-0000-0000-00000000a073';
+
+-- Ordinary work orders: one segment ('S1'), one space carrying the hours.
+INSERT INTO work_order (work_order_id, availability_id, code, title, system, trade, is_distributed, source_ref, source_verified, planned_start, planned_finish) VALUES
+  ('00000000-0000-0000-0000-000000003318', '00000000-0000-0000-0000-00000000a073', 'WI-3318', 'Reserve feed water tank preservation',    '506 Tanks & Voids',          'Preservation', false, 'AWR 73-26-3318', true,  timestamptz '2026-08-10 00:00Z' + interval '-9 days',  timestamptz '2026-08-10 00:00Z' + interval '4 days'),
+  ('00000000-0000-0000-0000-000000003402', '00000000-0000-0000-0000-00000000a073', 'WI-3402', 'Sounding & vent piping modification',     '529 Drainage & Tank Level',  'Mechanical',   false, 'AWR 73-26-3402', true,  timestamptz '2026-08-10 00:00Z' + interval '5 days',   timestamptz '2026-08-10 00:00Z' + interval '12 days'),
+  ('00000000-0000-0000-0000-000000004471', '00000000-0000-0000-0000-00000000a073', 'WI-4471', 'Hangar Bay 2 structural hot work',        '130 Hull Decks',             'Welding',      false, 'AWR 73-26-4471', true,  timestamptz '2026-08-10 00:00Z' + interval '7 days',   timestamptz '2026-08-10 00:00Z' + interval '95 days'),
+  ('00000000-0000-0000-0000-000000003905', '00000000-0000-0000-0000-00000000a073', 'WI-3905', 'Aft IC preservation & cableway closure',  '431 Interior Comm',          'Electrical',   false, 'AWR 73-26-3905', false, timestamptz '2026-08-10 00:00Z' + interval '2 days',   timestamptz '2026-08-10 00:00Z' + interval '11 days'),
+  ('00000000-0000-0000-0000-000000001905', '00000000-0000-0000-0000-00000000a073', 'WI-1905', 'Switchboard No. 1 rip-out',               '322 Power Distribution',     'Electrical',   false, 'AWR 73-26-1905', false, timestamptz '2026-08-10 00:00Z' + interval '40 days',  timestamptz '2026-08-10 00:00Z' + interval '74 days'),
+  ('00000000-0000-0000-0000-000000005571', '00000000-0000-0000-0000-00000000a073', 'WI-5571', 'Fan room duct insulation',                '512 Ventilation & Uptakes',  'Preservation', false, 'AWR 73-26-5571', true,  timestamptz '2026-08-10 00:00Z' + interval '96 days',  timestamptz '2026-08-10 00:00Z' + interval '130 days')
+ON CONFLICT (work_order_id) DO NOTHING;
+
+INSERT INTO work_segment (segment_id, work_order_id, code, kind, upstream_id, label) VALUES
+  ('00000000-0000-0000-0000-000033180001', '00000000-0000-0000-0000-000000003318', 'S1', 'scope', NULL, NULL),
+  ('00000000-0000-0000-0000-000034020001', '00000000-0000-0000-0000-000000003402', 'S1', 'scope', NULL, NULL),
+  ('00000000-0000-0000-0000-000044710001', '00000000-0000-0000-0000-000000004471', 'S1', 'scope', NULL, NULL),
+  ('00000000-0000-0000-0000-000039050001', '00000000-0000-0000-0000-000000003905', 'S1', 'scope', NULL, NULL),
+  ('00000000-0000-0000-0000-000019050001', '00000000-0000-0000-0000-000000001905', 'S1', 'scope', NULL, NULL),
+  ('00000000-0000-0000-0000-000055710001', '00000000-0000-0000-0000-000000005571', 'S1', 'scope', NULL, NULL)
+ON CONFLICT (segment_id) DO NOTHING;
+
+INSERT INTO work_segment_space (segment_id, compartment_no, budget_hours, earned_hours) VALUES
+  ('00000000-0000-0000-0000-000033180001', '4-110-2-W', 680, 512),
+  ('00000000-0000-0000-0000-000034020001', '4-110-2-W', 240, 0),
+  ('00000000-0000-0000-0000-000044710001', '1-136-0-Q', 410, 12),
+  ('00000000-0000-0000-0000-000039050001', '4-141-0-C', 340, 0),
+  ('00000000-0000-0000-0000-000019050001', '4-102-2-E', 160, 0),
+  ('00000000-0000-0000-0000-000055710001', '4-120-4-Q', 140, 0)
+ON CONFLICT (segment_id, compartment_no) DO NOTHING;
+
+-- The two distributed packages, their segment topology, and the per-space work.
+INSERT INTO work_order (work_order_id, availability_id, code, title, system, trade, is_distributed, source_ref, source_verified, test_verb) VALUES
+  ('00000000-0000-0000-0000-000000002201', '00000000-0000-0000-0000-00000000a073', 'WI-2201', 'AC Plant No. 2 — supply & return distribution',  'Ventilation & air conditioning · Zone 3 forward and aft',   'Sheet Metal', true, 'AWR 73-26-2201', true, 'leak-tested'),
+  ('00000000-0000-0000-0000-000000003310', '00000000-0000-0000-0000-00000000a073', 'WI-3310', 'Zone 3 overhead cableway — power and IC pulls',  'Electrical distribution and interior communications',       'Electrical',  true, 'AWR 73-26-3310', true, 'continuity- and megger-tested')
+ON CONFLICT (work_order_id) DO NOTHING;
+
+INSERT INTO work_segment (segment_id, work_order_id, code, kind, upstream_id, label) VALUES
+  ('00000000-0000-0000-0000-000022010001', '00000000-0000-0000-0000-000000002201', 'T1', 'Trunk',  NULL, 'Main supply trunk — AC-2 to Fr 148'),
+  ('00000000-0000-0000-0000-000022010002', '00000000-0000-0000-0000-000000002201', 'B1', 'Branch', '00000000-0000-0000-0000-000022010001', 'Branch 1 — Zone 3 upper, mess and scullery'),
+  ('00000000-0000-0000-0000-000022010003', '00000000-0000-0000-0000-000000002201', 'B2', 'Branch', '00000000-0000-0000-0000-000022010001', 'Branch 2 — switchgear and berthing'),
+  ('00000000-0000-0000-0000-000022010004', '00000000-0000-0000-0000-000000002201', 'T2', 'Trunk',  '00000000-0000-0000-0000-000022010001', 'Aft supply trunk — Fr 176 to Fr 192'),
+  ('00000000-0000-0000-0000-000022010005', '00000000-0000-0000-0000-000000002201', 'B3', 'Branch', '00000000-0000-0000-0000-000022010004', 'Branch 3 — wardroom terminal'),
+  ('00000000-0000-0000-0000-000022010006', '00000000-0000-0000-0000-000000002201', 'R1', 'Riser',  '00000000-0000-0000-0000-000022010004', 'Riser — Hangar Bay 2 supply'),
+  ('00000000-0000-0000-0000-000033100001', '00000000-0000-0000-0000-000000003310', 'C1', 'Run',    NULL, 'Main run — Fr 140 to Fr 160, overhead 3rd deck'),
+  ('00000000-0000-0000-0000-000033100002', '00000000-0000-0000-0000-000000003310', 'C2', 'Run',    '00000000-0000-0000-0000-000033100001', 'Berthing overhead — Fr 140'),
+  ('00000000-0000-0000-0000-000033100003', '00000000-0000-0000-0000-000000003310', 'C3', 'Run',    '00000000-0000-0000-0000-000033100001', 'Switchgear terminations')
+ON CONFLICT (segment_id) DO NOTHING;
+
+-- Segment membership and hours per compartment, windows as day offsets from the
+-- anchor — completed spaces in the past, in-progress straddling, unstarted
+-- ahead, exactly the story memory.rs tells.
+INSERT INTO work_segment_space (segment_id, compartment_no, budget_hours, earned_hours, planned_start, planned_finish) VALUES
+  -- WI-2201 · T1
+  ('00000000-0000-0000-0000-000022010001', '3-172-0-M', 620, 620, timestamptz '2026-08-10 00:00Z' + interval '-12 days', timestamptz '2026-08-10 00:00Z' + interval '-6 days'),
+  ('00000000-0000-0000-0000-000022010001', '3-160-2-Q', 380, 300, timestamptz '2026-08-10 00:00Z' + interval '-2 days',  timestamptz '2026-08-10 00:00Z' + interval '3 days'),
+  ('00000000-0000-0000-0000-000022010001', '3-148-0-L', 240, 240, timestamptz '2026-08-10 00:00Z' + interval '-6 days',  timestamptz '2026-08-10 00:00Z' + interval '-2 days'),
+  -- WI-2201 · B1
+  ('00000000-0000-0000-0000-000022010002', '2-160-1-Q', 560, 410, timestamptz '2026-08-10 00:00Z' + interval '-1 days',  timestamptz '2026-08-10 00:00Z' + interval '5 days'),
+  ('00000000-0000-0000-0000-000022010002', '2-152-0-Q', 400, 180, timestamptz '2026-08-10 00:00Z' + interval '-1 days',  timestamptz '2026-08-10 00:00Z' + interval '8 days'),
+  -- WI-2201 · B2
+  ('00000000-0000-0000-0000-000022010003', '3-148-2-E', 320, 96,  timestamptz '2026-08-10 00:00Z',                        timestamptz '2026-08-10 00:00Z' + interval '6 days'),
+  ('00000000-0000-0000-0000-000022010003', '3-140-0-Q', 480, 0,   timestamptz '2026-08-10 00:00Z' + interval '6 days',   timestamptz '2026-08-10 00:00Z' + interval '30 days'),
+  -- WI-2201 · T2
+  ('00000000-0000-0000-0000-000022010004', '3-184-0-Q', 340, 300, timestamptz '2026-08-10 00:00Z' + interval '-8 days',  timestamptz '2026-08-10 00:00Z' + interval '-1 days'),
+  ('00000000-0000-0000-0000-000022010004', '3-192-2-E', 210, 210, timestamptz '2026-08-10 00:00Z' + interval '-10 days', timestamptz '2026-08-10 00:00Z' + interval '-4 days'),
+  -- WI-2201 · B3
+  ('00000000-0000-0000-0000-000022010005', '2-176-0-Q', 300, 165, timestamptz '2026-08-10 00:00Z' + interval '-2 days',  timestamptz '2026-08-10 00:00Z' + interval '9 days'),
+  -- WI-2201 · R1
+  ('00000000-0000-0000-0000-000022010006', '1-160-0-Q', 300, 60,  timestamptz '2026-08-10 00:00Z' + interval '-3 days',  timestamptz '2026-08-10 00:00Z' + interval '62 days'),
+  -- WI-3310 · C1
+  ('00000000-0000-0000-0000-000033100001', '3-148-0-L', 410, 410, timestamptz '2026-08-10 00:00Z' + interval '-9 days',  timestamptz '2026-08-10 00:00Z' + interval '-3 days'),
+  ('00000000-0000-0000-0000-000033100001', '3-152-0-Q', 260, 240, timestamptz '2026-08-10 00:00Z' + interval '-3 days',  timestamptz '2026-08-10 00:00Z' + interval '2 days'),
+  -- WI-3310 · C2
+  ('00000000-0000-0000-0000-000033100002', '3-140-0-Q', 520, 310, timestamptz '2026-08-10 00:00Z' + interval '-4 days',  timestamptz '2026-08-10 00:00Z' + interval '26 days'),
+  -- WI-3310 · C3
+  ('00000000-0000-0000-0000-000033100003', '3-148-2-E', 300, 40,  timestamptz '2026-08-10 00:00Z',                        timestamptz '2026-08-10 00:00Z' + interval '7 days')
+ON CONFLICT (segment_id, compartment_no) DO NOTHING;
+
+-- Coupling semantics and the CVN-73 aft-third neighbourhood. Type ids mirror
+-- the in-memory seed so a decision trace is comparable across stores.
+INSERT INTO coupling_type (coupling_type_id, org_id, code, label, directional, propagates, default_max_hops) VALUES
+  ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'deck_penetration', 'Deck penetration', true,  '{heat,vapour}', 1),
+  ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'shared_bulkhead',  'Shared bulkhead',  false, '{heat,vapour}', 2),
+  ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'exhaust_trunk',    'Exhaust trunk',    true,  '{vapour}',      3)
+ON CONFLICT (coupling_type_id) DO NOTHING;
+
+-- Directed rows; the symmetric bulkheads appear in both directions, as the
+-- schema requires.
+INSERT INTO class_coupling (class_coupling_id, class_id, from_comp_id, to_comp_id, coupling_type_id) VALUES
+  ('00000000-0000-0000-0000-00000000ed01', '00000000-0000-0000-0000-0000000c0068', '00000000-0000-0000-0000-00000000c306', '00000000-0000-0000-0000-00000000c203', '00000000-0000-0000-0000-000000000001'),
+  ('00000000-0000-0000-0000-00000000ed02', '00000000-0000-0000-0000-0000000c0068', '00000000-0000-0000-0000-00000000c306', '00000000-0000-0000-0000-00000000c406', '00000000-0000-0000-0000-000000000001'),
+  ('00000000-0000-0000-0000-00000000ed03', '00000000-0000-0000-0000-0000000c0068', '00000000-0000-0000-0000-00000000c306', '00000000-0000-0000-0000-00000000c305', '00000000-0000-0000-0000-000000000002'),
+  ('00000000-0000-0000-0000-00000000ed04', '00000000-0000-0000-0000-0000000c0068', '00000000-0000-0000-0000-00000000c305', '00000000-0000-0000-0000-00000000c306', '00000000-0000-0000-0000-000000000002'),
+  ('00000000-0000-0000-0000-00000000ed05', '00000000-0000-0000-0000-0000000c0068', '00000000-0000-0000-0000-00000000c306', '00000000-0000-0000-0000-00000000c307', '00000000-0000-0000-0000-000000000003'),
+  ('00000000-0000-0000-0000-00000000ed06', '00000000-0000-0000-0000-0000000c0068', '00000000-0000-0000-0000-00000000c307', '00000000-0000-0000-0000-00000000c407', '00000000-0000-0000-0000-000000000003'),
+  ('00000000-0000-0000-0000-00000000ed07', '00000000-0000-0000-0000-0000000c0068', '00000000-0000-0000-0000-00000000c402', '00000000-0000-0000-0000-00000000c403', '00000000-0000-0000-0000-000000000002'),
+  ('00000000-0000-0000-0000-00000000ed08', '00000000-0000-0000-0000-0000000c0068', '00000000-0000-0000-0000-00000000c403', '00000000-0000-0000-0000-00000000c402', '00000000-0000-0000-0000-000000000002')
+ON CONFLICT (class_coupling_id) DO NOTHING;
+
+-- Live conditions on CVN-73: the curing coat (a timed hold — scrub past the
+-- cure and it releases) and the energised bus (clears only on a verified
+-- zero-energy state — no amount of scrubbing discharges it). Raised relative
+-- to seed time — the one place this seed reads the clock — because a hazard
+-- row records when it was raised, and this demo's story is that the coat is
+-- three hours into its cure WHEN THE WORLD IS CREATED, exactly as
+-- InMemoryStore::demo_at anchors it.
+INSERT INTO hazard (hazard_id, org_id, vessel_id, compartment_no, kind, raised_at, label) VALUES
+  ('00000000-0000-0000-0000-00000000ba01', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000073', '3-160-2-Q', 'coating_open',  now() - interval '3 hours', 'CT-3160-4 · final coat, curing'),
+  ('00000000-0000-0000-0000-00000000ba02', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000073', '3-148-2-E', 'energised_bus', now() - interval '2 days', 'Bus 3-SG-2 energised — no verified zero-energy state')
+ON CONFLICT (hazard_id) DO NOTHING;

@@ -22,18 +22,25 @@ acceptable behind compensating controls, time-boxed; **Low** is tracked.
   set per `deploy/README.md`. Trigger: first deployment reachable by anyone
   but a developer. Verify: WADL-SA-05 reports `proxy-asserted`.
 
-## POAM-2 — Demo store is in-memory
+## POAM-2 — Demo store is in-memory — **CLOSED**
 
-- **Weakness.** The demo serve binary holds state in memory: no durability,
-  and the RLS layer (the second isolation gate) is not in the serving path.
-  Severity: **High** for production data; intended for the demo.
-- **Mitigation in place.** The PostgreSQL store, migrations, and RLS
-  policies exist behind the `postgres` feature and are proven on a live
-  database in CI (`migrations` job); the in-code scope checks — the first
-  gate — are identical in both stores and leak-tested.
-- **Closure.** Production wiring passes the PostgreSQL-backed store in
-  `serve` (compile with `--features postgres`, connect via `DATABASE_URL`).
-  Trigger: any deployment holding real availability data.
+- **Was.** The serve binary could only hold state in memory: no durability,
+  and the RLS layer (the second isolation gate) was not in the serving path.
+- **Closure, delivered.** `PgStore` now implements the full `Repositories`
+  trait — work orders and packages from the `work_segment` topology,
+  adjacency/hazards/rules as typed engine inputs with rejection paths for
+  schema drift, ingested documents (schedule of record, zone chart, budget
+  book) as atomic all-or-nothing rows, and the hash-chained ledger writing
+  through `audit_entry` under an advisory lock. Building `serve` with
+  `--features postgres` and setting `DATABASE_URL` serves the migrated,
+  seeded database with RLS armed on every request; CI proves the trait
+  suite and an end-to-end API answer against live PostgreSQL on every push
+  (`migrations` job).
+- **Residual, tracked here.** Development still defaults to the in-memory
+  demo store (that is the point of it), and the demo register generator
+  remains a demo-store property — the database serves only what was
+  actually ingested. Real deployments must run `wadl migrate && wadl seed`
+  (or their own data load) before first start.
 
 ## POAM-3 — No per-client throttling
 

@@ -192,7 +192,7 @@ pub struct PackageSummary {
 /// scheduler said, and anything the platform *derives* — executability, risk —
 /// is kept separate so a derived judgement can never be mistaken for the
 /// schedule's own claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityStatus {
     /// Not started.
@@ -209,7 +209,7 @@ pub enum ActivityStatus {
 /// any schedule import: a parsed value must never present as an authored one.
 /// (The same grading lives in `wadl-ingest`; unifying the two enums is part of
 /// the XER-ingest work, where the mapping actually happens.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reliability {
     /// Authored in a controlled field.
@@ -227,7 +227,7 @@ pub enum Reliability {
 /// execute as planned — and that is only detectable if the activities are in the
 /// platform. Work orders are the accounting grain; activities are the doing
 /// grain.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActivitySummary {
     /// Primary key.
     pub activity_id: ActivityId,
@@ -296,7 +296,7 @@ impl ActivitySummary {
 /// The raw material of schedule-quality findings: a negative lag lets the
 /// successor start before its predecessor finishes — legitimate as an overlap,
 /// and exactly where cure-window inversions hide.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScheduleEdgeSummary {
     /// Predecessor activity code.
     pub pred_code: String,

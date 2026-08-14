@@ -148,12 +148,31 @@ jobs:
         run: cargo run --locked -p wadl-cli -- seed
       # The queries under test carry no org_id clause — the database supplies the
       # filter — so a dropped or mis-written policy fails here and nowhere else.
-      # The pg seam is behind wadl-store's `postgres` feature; this job is one
-      # of the two sanctioned consumers (the CLI above is the other).
+      # The pg seam is behind wadl-store's `postgres` feature; its sanctioned
+      # consumers are the CLI, this test, and the serve binary's production
+      # feature exercised below.
       - name: prove row-level security on a real database
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: cargo test --locked -p wadl-store --features postgres --test pg_rls
+      # The POAM-2 closure, end to end: the hardened binary compiled with the
+      # postgres feature, serving the seeded database — and the stranded-hours
+      # answer (wadl-plan math over SQL-loaded topology) coming back correct.
+      - name: the API serves from PostgreSQL
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: |
+          cargo build --locked -p wadl-api --bin serve --features postgres
+          ./target/debug/serve &
+          for i in $(seq 1 50); do
+            curl -sf http://127.0.0.1:8080/health >/dev/null && break
+            sleep 0.2
+          done
+          curl -sf -H 'x-org-id: 00000000-0000-0000-0000-000000000001' \
+               -H 'x-assigned-vessels: 00000000-0000-0000-0000-000000000073' \
+               http://127.0.0.1:8080/api/vessels/00000000-0000-0000-0000-000000000073/stranded-hours \
+            | grep -q '3-160-2-Q'
+          kill %1
 
   supply-chain:
     name: cargo-deny

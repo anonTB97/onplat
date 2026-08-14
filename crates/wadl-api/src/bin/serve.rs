@@ -39,11 +39,35 @@ use wadl_domain::Clock;
 use wadl_store::clock::SystemClock;
 use wadl_store::InMemoryStore;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let (store, world) = InMemoryStore::demo_at(clock.now());
+/// Builds the store: the database-backed one when the binary carries the `postgres`
+/// feature AND `DATABASE_URL` is set (the migrated, seeded database is the
+/// world — run `wadl migrate && wadl seed` first); the in-memory demo world
+/// otherwise. Returns the store plus its banner line, so the operator can see
+/// which one is answering.
+// Async for the postgres connect path; compiled without that feature there is
+// nothing to await, and the signature must not change with the feature set.
+#[allow(clippy::unused_async)]
+async fn build_store(
+    clock: &Arc<dyn Clock>,
+) -> std::io::Result<(Arc<dyn wadl_store::Repositories>, &'static str)> {
+    #[cfg(feature = "postgres")]
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        let store = wadl_store::pg::PgStore::connect(&url).await.map_err(|e| {
+            eprintln!("cannot connect to DATABASE_URL: {e}");
+            std::io::Error::other("database connection failed")
+        })?;
+        if std::env::var("WADL_SCHEDULE_XER").is_ok() {
+            // The boot loader is a demo-store affordance; a database's schedule
+            // arrives through the import door, with identity and a ledger entry.
+            eprintln!("WADL_SCHEDULE_XER is ignored with DATABASE_URL — import via the API");
+        }
+        return Ok((
+            Arc::new(store),
+            "PostgreSQL (row-level security armed per request)",
+        ));
+    }
 
+    let (store, world) = InMemoryStore::demo_at(clock.now());
     // `WADL_SCHEDULE_XER=<path>` loads a real P6 export as the in-focus hull's
     // schedule of record: the register, Daily Ops, executability and the issue
     // board all serve the export instead of the generated demo rows, and the
@@ -72,8 +96,15 @@ async fn main() -> std::io::Result<()> {
             }
         }
     }
+    Ok((Arc::new(store), "in-memory demo world"))
+}
 
-    let state = wadl_api::AppState::new(Arc::new(store), Arc::clone(&clock));
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let (store, store_banner) = build_store(&clock).await?;
+
+    let state = wadl_api::AppState::new(store, Arc::clone(&clock));
     let mut app = wadl_api::build_router(state);
 
     // With a built shell on disk, this binary is the whole product.
@@ -110,12 +141,15 @@ async fn main() -> std::io::Result<()> {
     } else {
         "dev header shim — identity headers trusted as given (loopback only)"
     };
-    println!("Shipyard AI Onboard — demo API on http://{bind}:{port}");
+    // The seeded identity below is identical in both stores by construction —
+    // `wadl seed` writes the same world the demo store builds in memory.
+    println!("Shipyard AI Onboard — API on http://{bind}:{port}");
+    println!("  store:               {store_banner}");
     println!("  identity trust:      {identity}");
-    println!("  x-org-id:            {}", world.yard_org);
+    println!("  x-org-id:            00000000-0000-0000-0000-000000000001");
     println!(
-        "  x-assigned-vessels:  {},{},{}",
-        world.cvn73, world.cvn71, world.cvn75
+        "  x-assigned-vessels:  00000000-0000-0000-0000-000000000073,\
+         00000000-0000-0000-0000-000000000071,00000000-0000-0000-0000-000000000075"
     );
     println!("  try: GET /api/vessels");
 

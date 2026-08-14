@@ -8,11 +8,10 @@
 //! platform's first invariant) depends on this being a transaction, not a
 //! connection setting.
 //!
-//! The tenancy and taxonomy reads live in [`crate::pg_repo`] and are exercised
-//! against a real database by `tests/pg_rls.rs`. The remaining
-//! [`crate::Repositories`] methods are still served by
-//! [`crate::InMemoryStore`] — see that module's gap list for what each one needs
-//! from the schema before it can move.
+//! The queries — the full [`crate::Repositories`] implementation — live in
+//! [`crate::pg_repo`] and are exercised against a real database by
+//! `tests/pg_rls.rs`, from tenant isolation through package topology to the
+//! ledger's hash chain.
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};

@@ -13,36 +13,30 @@
 //!   person is assigned to this hull" (ADR 0003). Tenant isolation and RBAC are
 //!   separate gates and are enforced separately.
 //!
-//! ## What is NOT here yet, and what each one needs
+//! ## Coverage, and the decisions the schema now records
 //!
-//! Four of the eleven [`crate::Repositories`] methods are still served by
-//! [`crate::InMemoryStore`], because moving them requires a decision rather than
-//! just a query. Listed so the gap is a known quantity rather than a surprise:
+//! [`PgStore`] implements the FULL [`crate::Repositories`] trait (POAM-2,
+//! closed). The gaps the earlier version of this doc enumerated were closed by
+//! decisions now written where they are enforced:
 //!
-//! * **`live_hazards`** — *the schema has no hazard table.* A hazard is a
-//!   derived fact: an open coating ticket, a live hot-work permit, a bus with no
-//!   verified zero-energy record. Deriving it means picking which rows constitute
-//!   each hazard kind (probably `permit` by `work_type` and status, plus
-//!   `space_certificate` expiry), which is a safety-relevant modelling decision
-//!   and should be confirmed, not invented.
-//! * **`rules_in_force`** — `rule_version.trigger_expr` is `jsonb`, deliberately
-//!   "a structured predicate, not code". Nothing yet defines that JSON's shape.
-//!   The engine's `Applies::{SameSpace, Coupled}` and its hold minutes are the
-//!   de facto schema; writing it down is a small spec, and rules stop being data
-//!   in name only once it exists.
-//! * **`list_work_orders`** — the model carries one compartment and a budget per
-//!   order, but the schema books hours per `work_segment_space`. A non-distributed
-//!   order is therefore one segment with one space, and "the order's compartment"
-//!   is a roll-up. That is fine, but it means the seed has to create segments for
-//!   ordinary work orders too.
-//! * **`list_packages` / `get_package` / `stranded_hours`** — these read the same
-//!   `work_segment` topology and follow directly once the above is seeded.
+//! * **`live_hazards`** reads the `hazard` table (0011): a hazard is a
+//!   recorded fact someone can point at, challenge and clear — not an
+//!   inference derived from permits at read time. The modelling decision and
+//!   its alternative are stated in the migration.
+//! * **`rules_in_force`** deserializes `rule_version.trigger_expr` under the
+//!   0011 payload contract: the JSON IS the engine's `RuleEntry`, seeded
+//!   programmatically from [`wadl_engine::RuleSet::seed_usn_hot_work`] and
+//!   asserted byte-identical by the integration test.
+//! * **`list_work_orders` / `list_packages` / `get_package` /
+//!   `stranded_hours`** read the `work_segment` topology; hours roll up from
+//!   segment spaces and the stranding math is [`wadl_plan`]'s, same as the
+//!   demo store's.
+//! * **The ingested documents** (schedule of record, zone chart, budget book)
+//!   are atomic `ingested_document` rows — the document is the unit of
+//!   consistency; without one the register is empty rather than invented.
 //!
-//! Two smaller mismatches, visible in this file: [`VesselSummary::confidence`]
-//! has no column (it is a planner's judgement, not a stored fact — it may belong
-//! in `availability`), and `adjacency_graph` needs `coupling_type.propagates`
-//! mapped onto the engine's `Propagation` enum, which is mechanical but wants a
-//! rejection path for an unknown value rather than a silent skip.
+//! One residual mismatch, still true: [`VesselSummary::confidence`] has no
+//! column (a planner's judgement, not a stored fact) and serves as `Unknown`.
 //!
 //! ## Deviation from the stack decision, stated plainly
 //!

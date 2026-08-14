@@ -1,12 +1,14 @@
-//! The server binary: the seeded demo world behind the hardened router.
+//! The server binary: one hardened router over whichever store is configured.
 //!
 //! One binary is the deployment story (see `docs/production-posture.md`): the
 //! API and the built shell ship together, wrapped in the same security
 //! headers, concurrency shedding and request timeout that production runs —
 //! development exercises the hardened path daily instead of meeting it at
-//! accreditation. Production wiring swaps the in-memory demo store for the
-//! database-backed store (behind wadl-store's `postgres` feature) and the
-//! header shim for real session identity; everything else in this file stays.
+//! accreditation. Built with the `postgres` feature, `DATABASE_URL` selects
+//! the database-backed store (RLS armed per request); otherwise the seeded
+//! in-memory demo world answers, and the startup banner says which. The
+//! remaining production swap is identity: the header shim gives way to the
+//! proxy-asserted mode when `WADL_PROXY_KEY` is set.
 //!
 //! Configuration is environment-only — no config file to drift from the
 //! deployed reality:

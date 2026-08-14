@@ -4,6 +4,7 @@ import {
   listActivities,
   listWorkOrders,
   revertBudgetBook,
+  type Activity,
   type AsOf,
   type BudgetItem,
   type DeckStateRow,
@@ -18,7 +19,11 @@ import { commitBtnStyle, C, errText, mh, msgColor, overlayBucket, OVERLAY_STYLE,
 import { DiscardButton } from "./DiscardButton";
 import { fmtDay } from "./clock";
 
-type SortKey = "code" | "remaining" | "compartment" | "start";
+// The columns the reader may sort by — the Sequence Board register's
+// paradigm, applied here so the two tables the same planner reads all day
+// sort the same way: click a header, click again to flip, third click
+// restores the default order (largest remaining man-hours first).
+type SortKey = "code" | "trade" | "compartment" | "budget" | "earned" | "remaining" | "start";
 
 /** A planned window, at day resolution — the resolution a schedule carries. */
 const fmtWindow = (w: { start: number; end: number } | null): string => {
@@ -52,7 +57,7 @@ export default function WorkOrders({
 }) {
   const [orders, setOrders] = useState<WorkOrder[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sort, setSort] = useState<SortKey>("remaining");
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 } | null>(null);
   const [unverifiedOnly, setUnverifiedOnly] = useState(false);
   // What the hours answer to — the reconciliation block from the register's
   // own endpoint, so this screen and the Sequence Board read one truth.
@@ -69,6 +74,11 @@ export default function WorkOrders({
     summary: string;
   } | null>(null);
   const [bookNonce, setBookNonce] = useState(0);
+  // The register rows, kept so a reconciliation mismatch can open into the
+  // schedule lines behind the register's side of the number.
+  const [acts, setActs] = useState<Activity[]>([]);
+  const [showRecon, setShowRecon] = useState(false);
+  const [expandedCode, setExpandedCode] = useState<string | null>(null);
 
   useEffect(() => {
     setError(null);
@@ -79,8 +89,14 @@ export default function WorkOrders({
         setError(String(e));
       });
     listActivities(identity, vesselId, asOf)
-      .then((r) => setRecon(r.reconciliation))
-      .catch(() => setRecon(null));
+      .then((r) => {
+        setRecon(r.reconciliation);
+        setActs(r.activities);
+      })
+      .catch(() => {
+        setRecon(null);
+        setActs([]);
+      });
   }, [identity, vesselId, asOf, bookNonce]);
 
   const remaining = (w: WorkOrder) => Math.max(0, w.budget_hours - w.earned_hours);
@@ -88,16 +104,33 @@ export default function WorkOrders({
   const rows = useMemo(() => {
     const filtered = unverifiedOnly ? (orders ?? []).filter((w) => !w.source_verified) : (orders ?? []);
     const sorted = [...filtered];
-    sorted.sort((a, b) => {
-      if (sort === "remaining") return remaining(b) - remaining(a);
-      if (sort === "compartment") return a.compartment_no.localeCompare(b.compartment_no);
-      // Undated orders sort last rather than first. A null start is not an early
-      // start, and putting them at the top of a schedule view would read as
-      // "these are next".
-      if (sort === "start") {
-        return (a.planned?.start ?? Infinity) - (b.planned?.start ?? Infinity);
+    // No sort chosen = the board's reason for existing: largest open
+    // man-hours first — where the money is stuck.
+    if (!sort) {
+      sorted.sort((a, b) => remaining(b) - remaining(a));
+      return sorted;
+    }
+    const key = (w: WorkOrder): number | string => {
+      switch (sort.key) {
+        case "remaining": return remaining(w);
+        case "budget": return w.budget_hours;
+        case "earned": return w.earned_hours;
+        case "compartment": return w.compartment_no;
+        case "trade": return w.trade;
+        // Undated orders sort last rather than first. A null start is not an
+        // early start, and putting them at the top of a schedule view would
+        // read as "these are next".
+        case "start": return w.planned?.start ?? Infinity;
+        default: return w.code;
       }
-      return a.code.localeCompare(b.code);
+    };
+    sorted.sort((a, b) => {
+      const ka = key(a);
+      const kb = key(b);
+      const cmp = typeof ka === "number" && typeof kb === "number"
+        ? ka - kb
+        : String(ka).localeCompare(String(kb));
+      return cmp * sort.dir;
     });
     return sorted;
   }, [orders, sort, unverifiedOnly]);
@@ -141,9 +174,7 @@ export default function WorkOrders({
           },
           (recon?.mismatches.length ?? 0) > 0 && {
             value: recon?.mismatches.length ?? 0, label: "not reconciled", tone: C.warn,
-            title: (recon?.mismatches ?? [])
-              .map((m) => `${m.code}: book ${m.item_budget}/${m.item_earned} MH vs register ${m.register_budget}/${m.register_earned} MH`)
-              .join(" · "),
+            title: "The book and the register disagree on these items — the evidence panel below opens each one down to its schedule rows.",
           },
         ]}
         note={
@@ -157,38 +188,25 @@ export default function WorkOrders({
       />
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 11, color: C.dim }}>Sort</span>
-        {(["remaining", "code", "compartment", "start"] as SortKey[]).map((k) => (
+        {recon && (recon.mismatches.length > 0 || recon.unmapped_budget_hours > 0) && (
           <button
-            key={k}
-            onClick={() => setSort(k)}
-            title={
-              k === "remaining"
-                ? "Largest open man-hours first — where the money is stuck"
-                : k === "code"
-                  ? "By work-item number"
-                  : k === "compartment"
-                    ? "By compartment, so a space's orders sit together"
-                    : "Earliest planned start first"
-            }
+            onClick={() => setShowRecon((v) => !v)}
+            aria-expanded={showRecon}
+            title="Open the receipts: where the book and the register disagree, line by line, down to the schedule rows behind each number"
             style={{
               padding: "4px 10px", borderRadius: 6, cursor: "pointer", font: "inherit", fontSize: 11.5,
-              background: sort === k ? C.raised : "transparent",
-              color: sort === k ? C.text : C.dim,
-              border: `1px solid ${sort === k ? C.accent : C.line}`,
+              background: showRecon ? C.raised : "transparent",
+              color: recon.mismatches.length > 0 ? C.warn : C.dim,
+              border: `1px solid ${showRecon ? C.accent : C.line}`,
             }}
           >
-            {k === "remaining"
-              ? "MH remaining"
-              : k === "code"
-                ? "WI number"
-                : k === "compartment"
-                  ? "Compartment"
-                  : "Planned start"}
+            {showRecon ? "▾" : "▸"} {recon.mismatches.length > 0
+              ? `${recon.mismatches.length} not reconciled — show the evidence`
+              : "reconciliation evidence"}
           </button>
-        ))}
+        )}
         <label
-          title="Only rows whose source document no planner has confirmed — the trust gap to close" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, marginLeft: 6, cursor: "pointer" }}>
+          title="Only rows whose source document no planner has confirmed — the trust gap to close" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, cursor: "pointer" }}>
           <input
             type="checkbox"
             checked={unverifiedOnly}
@@ -299,22 +317,147 @@ export default function WorkOrders({
         </div>
       )}
 
+      {/* The receipts behind "not reconciled": each disagreement between the
+          hours authority (the book) and the register, opening into the very
+          schedule rows the register's number sums from — so the argument is
+          settled by reading the evidence, not by trusting a tooltip. */}
+      {showRecon && recon && (
+        <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 12px", marginBottom: 10, fontSize: 12 }}>
+          <div style={{ color: C.dim, marginBottom: 8 }}>
+            Hours authority: <b style={{ color: C.bright }}>{recon.source ?? "the seeded work items"}</b> ·
+            register: <b style={{ color: C.bright }}>{acts.filter((a) => !a.is_milestone).length} scheduled rows</b>.
+            A mismatch means the two documents disagree about a work item's hours — a data finding to
+            take back to whoever owns the wrong one, not something this tool will silently average.
+          </div>
+          {recon.mismatches.length === 0 && (
+            <div style={{ color: C.ok }}>✓ every work item's register hours match the book</div>
+          )}
+          {recon.mismatches.map((m) => {
+            const open = expandedCode === m.code;
+            const lines = acts.filter((a) => a.work_order_code === m.code && !a.is_milestone);
+            const dB = m.register_budget - m.item_budget;
+            const dE = m.register_earned - m.item_earned;
+            return (
+              <div key={m.code} style={{ borderTop: `1px solid ${C.hairline}` }}>
+                <button
+                  onClick={() => setExpandedCode(open ? null : m.code)}
+                  aria-expanded={open}
+                  title="Open the register rows this number sums from"
+                  style={{
+                    display: "flex", gap: 10, alignItems: "baseline", width: "100%", textAlign: "left",
+                    padding: "7px 2px", background: "transparent", border: "none", cursor: "pointer",
+                    font: "inherit", fontSize: 12, color: C.text,
+                  }}
+                >
+                  <span style={{ color: C.dim }}>{open ? "▾" : "▸"}</span>
+                  <b style={{ fontFamily: "monospace", color: C.accent }}>{m.code}</b>
+                  <span>book {m.item_budget.toLocaleString()} / {m.item_earned.toLocaleString()} MH</span>
+                  <span style={{ color: C.dim }}>vs</span>
+                  <span>register {m.register_budget.toLocaleString()} / {m.register_earned.toLocaleString()} MH</span>
+                  <span style={{ marginLeft: "auto", color: C.warn, fontVariantNumeric: "tabular-nums" }}>
+                    Δ {dB >= 0 ? "+" : ""}{dB.toLocaleString()} budget · {dE >= 0 ? "+" : ""}{dE.toLocaleString()} earned
+                  </span>
+                </button>
+                {open && (
+                  <div style={{ margin: "0 0 8px 22px" }}>
+                    {lines.length === 0 ? (
+                      <div style={{ color: C.warn }}>
+                        The register carries no scheduled rows for {m.code} — its whole booked figure
+                        comes from somewhere the register cannot show. That absence IS the evidence.
+                      </div>
+                    ) : (
+                      <table style={{ borderCollapse: "collapse", fontSize: 11.5 }}>
+                        <tbody>
+                          {lines.map((a) => (
+                            <tr key={a.activity_id}>
+                              <td style={{ padding: "2px 10px 2px 0", fontFamily: "monospace", color: C.dim }}>{a.code}</td>
+                              <td style={{ padding: "2px 10px 2px 0" }}>{a.name}</td>
+                              <td style={{ padding: "2px 10px 2px 0", fontFamily: "monospace", color: C.subtle }}>{fmtWindow(a.planned)}</td>
+                              <td style={{ padding: "2px 0", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                                {a.earned_hours.toLocaleString()} / {a.budget_hours.toLocaleString()} MH
+                              </td>
+                            </tr>
+                          ))}
+                          <tr>
+                            <td colSpan={3} style={{ padding: "4px 10px 2px 0", color: C.dim, borderTop: `1px solid ${C.hairline}` }}>
+                              register total — the number in the mismatch above
+                            </td>
+                            <td style={{ padding: "4px 0 2px", textAlign: "right", fontWeight: 600, borderTop: `1px solid ${C.hairline}`, fontVariantNumeric: "tabular-nums" }}>
+                              {lines.reduce((t, a) => t + a.earned_hours, 0).toLocaleString()} /{" "}
+                              {lines.reduce((t, a) => t + a.budget_hours, 0).toLocaleString()} MH
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {recon.unmapped_budget_hours > 0 && (
+            <div style={{ borderTop: `1px solid ${C.hairline}`, paddingTop: 7, color: C.warn }}>
+              {recon.unmapped_budget_hours.toLocaleString()} MH in the register map to no work item at
+              all — scheduled work the hours authority does not know about.
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 8 }}>
         <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 900 }}>
           <thead>
             <tr>
-              <th style={th}>WI</th>
-              <th style={th}>Title</th>
-              <th style={th}>Trade</th>
-              <th style={th}>Compartment</th>
-              <th style={{ ...th, textAlign: "right" }} title="Budgeted man-hours (MH)">Budget</th>
-              <th style={{ ...th, textAlign: "right" }} title="Man-hours of work completed so far (earned value)">Earned</th>
-              <th style={{ ...th, textAlign: "right" }} title="Budget minus earned — the man-hours still to work">Remaining</th>
-              <th style={th} title="The planned window, and whether it covers the instant this list was read at">
-                Planned
-              </th>
-              <th style={th}>Space</th>
-              <th style={th} title="Which source document this row came from, and whether a planner confirmed it">Provenance</th>
+              {(
+                [
+                  ["WI", "code", false, "By work-item number"],
+                  [null, null, false, null],
+                  ["Trade", "trade", false, "By trade, so a shop's orders sit together"],
+                  ["Compartment", "compartment", false, "By compartment, so a space's orders sit together"],
+                  ["Budget", "budget", true, "Budgeted man-hours (MH)"],
+                  ["Earned", "earned", true, "Man-hours of work completed so far (earned value)"],
+                  ["Remaining", "remaining", true, "Budget minus earned — the default order, largest first"],
+                  ["Planned", "start", false, "The planned window, and whether it covers the instant this list was read at"],
+                  [null, null, false, null],
+                  [null, null, false, null],
+                ] as [string | null, SortKey | null, boolean, string | null][]
+              ).map(([label, key, right, gloss], i) => {
+                // Unsortable columns keep plain headers.
+                if (key === null) {
+                  const plain = ["", "Title", "", "", "", "", "", "", "Space", "Provenance"][i];
+                  const t = i === 9
+                    ? "Which source document this row came from, and whether a planner confirmed it"
+                    : undefined;
+                  return <th key={i} style={th} title={t}>{plain}</th>;
+                }
+                const active = sort?.key === key;
+                const cycle = () =>
+                  setSort(!active ? { key, dir: 1 } : sort?.dir === 1 ? { key, dir: -1 } : null);
+                return (
+                  <th
+                    key={key}
+                    tabIndex={0}
+                    onClick={cycle}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        cycle();
+                      }
+                    }}
+                    title={`${gloss ?? ""} — click to sort · third click restores largest-remaining-first`}
+                    style={{
+                      ...th,
+                      textAlign: right ? "right" : "left",
+                      cursor: "pointer",
+                      color: active ? C.text : C.dim,
+                      userSelect: "none",
+                    }}
+                  >
+                    {label}
+                    {active && (sort?.dir === 1 ? " ↑" : " ↓")}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>

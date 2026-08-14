@@ -266,6 +266,9 @@ export interface FootprintSpace {
   earned_hours: number;
   remaining_hours: number;
   complete: boolean;
+  /** WHEN this space is touched — its own slice of the package, not the
+   *  package's span. null = undated, rides the whole availability. */
+  planned: Window | null;
   state: DecisionState;
   permits_work: boolean;
   rules_fired: string[];

@@ -1824,6 +1824,12 @@ pub(crate) async fn get_package(
                 "earned_hours": work.earned,
                 "remaining_hours": work.remaining(),
                 "complete": work.is_complete(),
+                // WHEN this space is touched — its own slice of the package,
+                // not the package's whole span. A trunk is worked before the
+                // branches hanging off it, so the footprint moves through the
+                // hull; a reader deciding whether to plan around this space
+                // needs its dates, not the package's.
+                "planned": work.window,
                 "state": decision.state,
                 "permits_work": decision.permits_work(),
                 "rules_fired": decision.trace.iter().map(|s| &s.rule_code).collect::<Vec<_>>(),

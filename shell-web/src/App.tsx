@@ -468,6 +468,7 @@ export default function App() {
           {!error && selected && module.id === "distPackages" && (
             <DistributedPackages
               identity={DEMO_IDENTITY}
+              now={frame?.now ?? null}
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}

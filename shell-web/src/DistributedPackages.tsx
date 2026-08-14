@@ -10,6 +10,7 @@ import {
   type PackageDetail,
   type PackageSummary,
 } from "./api";
+import { fmtDay } from "./clock";
 import { IsoWalk, type WalkStep, type WalkTone } from "./IsoWalk";
 import { ScheduleTrace } from "./ScheduleTrace";
 import { Loading } from "./Loading";
@@ -35,6 +36,7 @@ export default function DistributedPackages({
   vesselId,
   hullLabel,
   asOf,
+  now,
   spaces,
   onOpenSpace,
 }: {
@@ -43,6 +45,8 @@ export default function DistributedPackages({
   hullLabel: string;
   /** The instant the footprint's authorization is read at; `null` is live. */
   asOf: AsOf;
+  /** The SERVER's clock — the reading instant when no as-of is scrubbed. */
+  now: number | null;
   /** Per-space verdicts at the same instant — the walkthrough hull's ground truth. */
   spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
@@ -99,7 +103,7 @@ export default function DistributedPackages({
   // The cause layer: the held footprint spaces' decision traces carry the
   // hop-by-hop path of whatever holds them — drawn so a hold three decks
   // from its origin stops looking arbitrary.
-  const [routes, setRoutes] = useState<[string, string][]>([]);
+  const [routes, setRoutes] = useState<[string, string, string][]>([]);
   /** Each held space's refusals, in the engine's own prose — the WHY layer. */
   const [whyBySpace, setWhyBySpace] = useState<Map<string, SpaceWhy[]>>(new Map());
   useEffect(() => {
@@ -121,7 +125,7 @@ export default function DistributedPackages({
     ).then((results) => {
       if (stale) return;
       const seen = new Set<string>();
-      const edges: [string, string][] = [];
+      const edges: [string, string, string][] = [];
       const why = new Map<string, SpaceWhy[]>();
       for (const entry of results) {
         if (!entry) continue;
@@ -131,10 +135,12 @@ export default function DistributedPackages({
             const a = t.path[i];
             const b = t.path[i + 1];
             if (a === undefined || b === undefined) continue;
-            const key = `${a}→${b}`;
+            // The coupling each hop rides — the physics the edge draws in.
+            const via = t.via[i] ?? "";
+            const key = `${a}→${b}·${via}`;
             if (seen.has(key)) continue;
             seen.add(key);
-            edges.push([a, b]);
+            edges.push([a, b, via]);
           }
           // The refusing steps ARE the why, in the engine's own words.
           if (t.state === "BLOCK" || t.state === "SUSPEND") {
@@ -203,13 +209,18 @@ export default function DistributedPackages({
   }));
   const walkSteps: WalkStep[] = [];
   if (detail) {
+    // The overview step spotlights NOTHING on purpose: the arrival view is
+    // the phase paint itself — solid boxes are being worked at this instant,
+    // outlines are not touched yet, green is done, red is held. Spotlighting
+    // the whole footprint in one tone would bury exactly that first glance.
     walkSteps.push({
       title: `Walk the ${detail.package.code} footprint`,
       tone: "accent",
       body:
         `${detail.package.name} — one work order across ${detail.package.compartment_count} compartments. ` +
-        `A segment cannot be ${detail.package.test_verb} until it and everything upstream of it is complete, so the walk runs upstream → downstream.`,
-      spaces: detail.footprint.map((f) => f.compartment_no),
+        `The paint IS the situation: solid = crews in the space at this instant, outline = not touched yet, green = done, red = held. ` +
+        `The strip below says when each space is lost. Step forward to walk it upstream → downstream, the order it must be ${detail.package.test_verb}.`,
+      spaces: [],
     });
     detail.footprint.forEach((f, i) => {
       const isGov = g !== null && g.compartment === f.compartment_no;
@@ -220,6 +231,9 @@ export default function DistributedPackages({
           (isGov && g ? `${g.consequence} ` : "") +
           `${f.state}${f.rules_fired.length > 0 ? ` (${f.rules_fired.join(", ")})` : ""} · ` +
           (f.complete ? "work complete" : `${mh(f.remaining_hours)} of work left`) +
+          (f.planned
+            ? ` · this space is affected ${fmtDay(f.planned.start)} → ${fmtDay(f.planned.end)} — not the package's whole run`
+            : " · undated — assume affected throughout") +
           (isGov ? "" : f.state === "ALLOW" ? " — nothing refuses this segment's work." : " — held; downstream segments wait on this space."),
         spaces: [f.compartment_no],
         arrowFrom: i > 0 ? detail.footprint[i - 1]?.compartment_no : undefined,
@@ -333,6 +347,13 @@ export default function DistributedPackages({
               steps={walkSteps}
               routes={routes}
               cast={walkCast}
+              windows={detail.footprint.map((f) => ({
+                space: f.compartment_no,
+                window: f.planned,
+                complete: f.complete,
+                remaining_hours: f.remaining_hours,
+              }))}
+              at={asOf ?? now}
               onOpenSpace={onOpenSpace}
             />
           </div>

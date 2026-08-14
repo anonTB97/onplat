@@ -92,7 +92,7 @@ export default function CascadeBoard({
   // Explorer draws). Fetched per chosen action; hops are deduped across the
   // affected set. These are the routes on file NOW — why the freed spaces are
   // held today — never an interpolation of the counterfactual.
-  const [routes, setRoutes] = useState<[string, string][]>([]);
+  const [routes, setRoutes] = useState<[string, string, string][]>([]);
   useEffect(() => {
     // Cleared before the fetch, not after: the previous action's routes must
     // not draw under this one's legend while the traces are in flight.
@@ -108,17 +108,19 @@ export default function CascadeBoard({
     ).then((results) => {
       if (stale) return;
       const seen = new Set<string>();
-      const edges: [string, string][] = [];
+      const edges: [string, string, string][] = [];
       for (const r of results) {
         for (const t of r?.decision.trace ?? []) {
           for (let i = 0; i + 1 < t.path.length; i += 1) {
             const a = t.path[i];
             const b = t.path[i + 1];
             if (a === undefined || b === undefined) continue;
-            const key = `${a}→${b}`;
+            // The coupling each hop rides — the physics the edge draws in.
+            const via = t.via[i] ?? "";
+            const key = `${a}→${b}·${via}`;
             if (seen.has(key)) continue;
             seen.add(key);
-            edges.push([a, b]);
+            edges.push([a, b, via]);
           }
         }
       }

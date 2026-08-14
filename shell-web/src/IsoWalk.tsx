@@ -22,6 +22,17 @@
 // shows deck adjacency — the two groupings the same 24 spaces are usually
 // forced to choose between.
 //
+// TIME is the fourth dimension, and it is not decoration. A compartment in a
+// package's footprint is not affected for the package's whole duration — a
+// trunk is worked before the branches hanging off it, so the disruption
+// moves through the hull. When the caller passes per-space windows, every
+// box is painted by its phase AT THE READING INSTANT (not touched yet /
+// being worked now / window passed with work unfinished / done), each box
+// carries a ribbon showing where its slice sits in the package's span, and
+// an occupancy strip under the scene shows the whole wave — which spaces
+// are lost, and exactly when. Scrubbing the global time control moves all
+// of it together.
+//
 // Three things make it an environment view rather than a diagram:
 //
 // * **Tilt.** Affected compartments are not necessarily adjacent — a bus or a
@@ -34,7 +45,14 @@
 //   routes, the hazard's actual hop-by-hop path is drawn through the scene —
 //   including the pass-through spaces it rides (a trunk, a bus run) that no
 //   effect list names. Non-adjacent consequence stops looking arbitrary: the
-//   wire that carries it is on screen.
+//   wire that carries it is on screen. And the wire is TYPED, because
+//   adjacency on a ship is physics, not proximity: heat conducts through
+//   structure (a deck penetration, a shared bulkhead — one hop, straight
+//   line), vapour follows the AIR (a vent or exhaust trunk reaches spaces
+//   frames away — drawn as the curved duct run it is), and energy follows
+//   the SYSTEM (a bus envelope). Each coupling code draws in its own stroke
+//   so a reader can tell "the wall is hot" from "the condition rides the
+//   ventilation" without opening a trace.
 // * **The cast.** Every space any step will visit is tinted from the first
 //   frame, so the full footprint of the consequence is visible before the
 //   telling reaches it; the stepper spotlights, it never reveals.
@@ -45,6 +63,7 @@
 
 import { useEffect, useState } from "react";
 import type { DeckStateRow } from "./api";
+import { fmtDay } from "./clock";
 import { C, mh, STATE_STYLE, zoneColour } from "./theme";
 
 const W = 1240;
@@ -96,20 +115,71 @@ interface BoxGeom {
   row: DeckStateRow;
 }
 
+/** One footprint space's slice of the package, in time. */
+export interface SpaceWindow {
+  space: string;
+  /** [start, end) epoch ms; null = undated — rides the whole span. */
+  window: { start: number; end: number } | null;
+  complete: boolean;
+  remaining_hours: number;
+}
+
+/** The temporal phase of a space at the reading instant. */
+type Phase = "future" | "active" | "overdue" | "done" | "undated";
+
+const PHASE_STYLE: Record<Phase, { fill: string; stroke: string; label: string }> = {
+  future: { fill: "rgba(61,107,255,0.10)", stroke: C.accent, label: "not touched yet" },
+  active: { fill: "rgba(61,107,255,0.85)", stroke: C.accent, label: "being worked NOW" },
+  overdue: { fill: "rgba(245,158,11,0.65)", stroke: C.warn, label: "window passed, work unfinished" },
+  done: { fill: "rgba(34,197,94,0.35)", stroke: C.ok, label: "done — space returned" },
+  undated: { fill: "rgba(148,163,184,0.30)", stroke: C.dim, label: "undated — assume affected throughout" },
+};
+
+function phaseOf(w: SpaceWindow, at: number | null): Phase {
+  if (w.complete) return "done";
+  if (!w.window) return "undated";
+  if (at === null) return "undated";
+  if (at < w.window.start) return "future";
+  if (at < w.window.end) return "active";
+  return "overdue";
+}
+
+/** How a coupling code draws — the physics, in the stroke. */
+function edgeStyle(via: string): { colour: string; dash: string; curved: boolean; label: string } {
+  if (via === "exhaust_trunk" || via.includes("vent") || via.includes("trunk")) {
+    // Vapour follows the air: a routed duct run, not a wall.
+    return { colour: STATE_STYLE.SUSPEND.fg, dash: "5 4", curved: true, label: "vapour · via the air" };
+  }
+  if (via === "deck_penetration") {
+    return { colour: STATE_STYLE.BLOCK.fg, dash: "", curved: false, label: "heat · through the deck" };
+  }
+  if (via === "shared_bulkhead") {
+    return { colour: STATE_STYLE.BLOCK.fg, dash: "2 3", curved: false, label: "heat · shared bulkhead" };
+  }
+  return { colour: STATE_STYLE.SUSPEND.fg, dash: "5 4", curved: false, label: via.replace(/_/g, " ") };
+}
+
 export function IsoWalk({
   spaces,
   steps,
   routes = [],
   cast = [],
+  windows = [],
+  at = null,
   onOpenSpace,
 }: {
   spaces: DeckStateRow[];
   steps: WalkStep[];
-  /** The engine's hop-by-hop hazard routes (decision-trace paths), drawn as
-   *  the cause layer. Pass the hops on file NOW — never an interpolation. */
-  routes?: [string, string][];
+  /** The engine's hop-by-hop hazard routes (decision-trace paths) with the
+   *  coupling code each hop rides — drawn as the TYPED cause layer. Pass the
+   *  hops on file NOW — never an interpolation. */
+  routes?: [string, string, string][];
   /** Every space the tour will touch, tinted from the first frame. */
   cast?: { space: string; tone: WalkTone }[];
+  /** Per-space slices of the package in time; empty = no temporal layer. */
+  windows?: SpaceWindow[];
+  /** The reading instant (the global time control's), epoch ms; null = no clock. */
+  at?: number | null;
   onOpenSpace: (compartment: string) => void;
 }) {
   const [idx, setIdx] = useState(0);
@@ -178,6 +248,13 @@ export function IsoWalk({
 
   // The whole footprint, tinted before the telling reaches it.
   const castTone = new Map(cast.map((c) => [c.space, c.tone]));
+  // The temporal layer: each footprint space's slice of the package, and its
+  // phase at the reading instant. The span is the union of the dated windows.
+  const winOf = new Map(windows.map((w) => [w.space, w]));
+  const dated = windows.filter((w) => w.window !== null);
+  const spanLo = dated.length > 0 ? Math.min(...dated.map((w) => (w.window as { start: number }).start)) : null;
+  const spanHi = dated.length > 0 ? Math.max(...dated.map((w) => (w.window as { end: number }).end)) : null;
+  const phase = new Map(windows.map((w) => [w.space, phaseOf(w, at)]));
   // Spaces the hazard rides THROUGH: on a route, but in nobody's effect list.
   const viaSpaces = new Set(
     routes
@@ -199,13 +276,21 @@ export function IsoWalk({
     const isCurrent = current.has(no);
     const walkedTone = walked.get(no);
     const heldNow = !g.row.permits_work;
-    const tone = isCurrent ? step?.tone : (walkedTone ?? castTone.get(no));
+    const ph = phase.get(no);
+    // Paint priority: the step spotlight speaks first (it is the telling),
+    // then the temporal phase (WHEN this space is lost), then the old
+    // authorization tint for scenes with no window data. A held space keeps
+    // its red regardless of phase — authorization is its own layer.
+    const tone = isCurrent ? step?.tone : (walkedTone ?? (ph === undefined ? castTone.get(no) : undefined));
     const front = tone
       ? TONE_FILL[tone]
-      : heldNow
-        ? "rgba(220,38,38,0.28)"
-        : "rgba(148,163,184,0.22)";
-    const dimmer = isCurrent ? 1 : walkedTone ? 0.8 : castTone.has(no) ? 0.62 : 0.55;
+      : ph !== undefined
+        ? (heldNow && (ph === "active" || ph === "overdue") ? "rgba(220,38,38,0.75)" : PHASE_STYLE[ph].fill)
+        : heldNow
+          ? "rgba(220,38,38,0.28)"
+          : "rgba(148,163,184,0.22)";
+    const outline = !tone && ph === "future";
+    const dimmer = isCurrent ? 1 : walkedTone ? 0.8 : ph === "active" ? 1 : castTone.has(no) || ph !== undefined ? 0.72 : 0.55;
     const { sx, sy } = g;
     return (
       <g
@@ -224,7 +309,14 @@ export function IsoWalk({
         opacity={dimmer}
       >
         <title>
-          {`${no} — ${g.row.compartment.name}\n${g.row.compartment.zone} · ${g.row.compartment.deck_code} deck · Fr ${g.row.compartment.frame} ${g.row.compartment.side}\n${heldNow ? "held now" : "permits work"} · ${mh(g.row.remaining_hours)} remaining${viaSpaces.has(no) ? "\nA hazard route on file passes through this space." : ""}\nClick to open on the deck plan.`}
+          {`${no} — ${g.row.compartment.name}\n${g.row.compartment.zone} · ${g.row.compartment.deck_code} deck · Fr ${g.row.compartment.frame} ${g.row.compartment.side}\n${heldNow ? "held now" : "permits work"} · ${mh(g.row.remaining_hours)} remaining${(() => {
+            const w = winOf.get(no);
+            if (!w) return "";
+            const phLabel = ph ? PHASE_STYLE[ph].label : "";
+            return w.window
+              ? `\naffected ${fmtDay(w.window.start)} → ${fmtDay(w.window.end)} — ${phLabel}`
+              : `\n${phLabel}`;
+          })()}${viaSpaces.has(no) ? "\nA hazard route on file passes through this space." : ""}\nClick to open on the deck plan.`}
         </title>
         {/* zone plinth: the grouping, worn at the base */}
         <path
@@ -232,8 +324,15 @@ export function IsoWalk({
           fill={zoneColour(g.row.compartment.zone)}
           opacity={0.55}
         />
-        {/* front */}
-        <rect x={sx} y={sy - boxH} width={BOX_W} height={boxH} fill={front} stroke="#00000055" strokeWidth={0.4} />
+        {/* front — a future box is an outline: present on the plates, not
+            yet taken from the ship */}
+        <rect
+          x={sx} y={sy - boxH} width={BOX_W} height={boxH}
+          fill={front}
+          stroke={outline ? C.accent : "#00000055"}
+          strokeWidth={outline ? 0.9 : 0.4}
+          strokeDasharray={outline ? "2.5 2" : undefined}
+        />
         {/* top */}
         <path
           d={`M ${sx} ${sy - boxH} l ${BOX_W} 0 l ${BOX_KX} ${-BOX_KY} l ${-BOX_W} 0 z`}
@@ -249,6 +348,31 @@ export function IsoWalk({
           fill="#000000"
           opacity={0.32}
         />
+        {/* the slice ribbon: this space's window placed inside the package's
+            span, with the reading instant ticked — WHEN, worn on the box */}
+        {(() => {
+          const w = winOf.get(no);
+          if (!w || spanLo === null || spanHi === null || spanHi <= spanLo || tilt < 0.35) return null;
+          const rw = BOX_W + BOX_KX;
+          const px = (t: number) => sx - 1 + Math.max(0, Math.min(1, (t - spanLo) / (spanHi - spanLo))) * rw;
+          const y = sy + 5.5;
+          return (
+            <g pointerEvents="none">
+              <rect x={sx - 1} y={y} width={rw} height={2.4} fill="rgba(148,163,184,0.18)" />
+              {w.window && (
+                <rect
+                  x={px(w.window.start)} y={y}
+                  width={Math.max(1.5, px(w.window.end) - px(w.window.start))} height={2.4}
+                  fill={ph ? PHASE_STYLE[ph].stroke : C.dim}
+                  opacity={0.95}
+                />
+              )}
+              {at !== null && at >= spanLo && at <= spanHi && (
+                <rect x={px(at) - 0.5} y={y - 1.2} width={1.2} height={4.8} fill={C.text} />
+              )}
+            </g>
+          );
+        })()}
         {/* the wire's waypoint: a hazard route rides through, says the trace */}
         {viaSpaces.has(no) && (
           <path
@@ -338,8 +462,9 @@ export function IsoWalk({
         />
         {routes.length > 0 && (
           <span style={{ marginLeft: "auto", color: C.dim }}>
-            <span style={{ color: routeColour }}>‒ ‒</span> hazard route on file ·{" "}
-            <span style={{ color: routeColour }}>◇</span> rides through
+            <span style={{ color: STATE_STYLE.BLOCK.fg }}>—</span> heat via structure ·{" "}
+            <span style={{ color: routeColour }}>⌒</span> vapour via the air ·{" "}
+            <span style={{ color: routeColour }}>◇</span> rides through — the condition follows the physics, not the deck plan
           </span>
         )}
       </div>
@@ -444,24 +569,37 @@ export function IsoWalk({
             This is why a consequence three decks away is not arbitrary — the
             trunk or bus that carries it is on screen. Hops landing on the
             current step's spaces speak loudest. */}
-        {routes.map(([from, to]) => {
+        {routes.map(([from, to, via]) => {
           const a = geom.get(from);
           const b = geom.get(to);
           if (!a || !b) return null;
+          const st = edgeStyle(via);
           const x1 = a.sx + BOX_W / 2;
           const y1 = a.sy - boxH / 2;
           const x2 = b.sx + BOX_W / 2;
           const y2 = b.sy - boxH / 2;
           const hot = current.has(to) || current.has(from);
+          // Vapour rides the air: drawn as the duct run it is, bowing away
+          // from the structure instead of cutting through it. Heat conducts
+          // through structure: a straight line, because the wall IS the path.
+          const d = st.curved
+            ? `M ${x1} ${y1} Q ${(x1 + x2) / 2 + 18} ${Math.min(y1, y2) - 22}, ${x2} ${y2}`
+            : `M ${x1} ${y1} L ${x2} ${y2}`;
           return (
-            <g key={`route-${from}-${to}`} pointerEvents="none">
-              <line
-                x1={x1} y1={y1} x2={x2} y2={y2}
-                stroke={routeColour}
+            <g key={`route-${from}-${to}-${via}`} pointerEvents="none">
+              <path
+                d={d}
+                fill="none"
+                stroke={st.colour}
                 strokeWidth={hot ? 1.7 : 1}
-                strokeDasharray="5 4"
-                opacity={hot ? 0.95 : 0.4}
-              />
+                strokeDasharray={st.dash || undefined}
+                opacity={hot ? 0.95 : 0.45}
+              >
+                {st.curved && st.dash && (
+                  <animate attributeName="stroke-dashoffset" values="18;0" dur="1.8s" repeatCount="indefinite" />
+                )}
+              </path>
+              <title>{st.label}</title>
             </g>
           );
         })}
@@ -488,6 +626,98 @@ export function IsoWalk({
           );
         })}
       </svg>
+
+      {/* WHEN, all at once: every footprint space against one time axis,
+          sorted by its start — so the disruption reads as the wave it is,
+          moving through the hull. The white line is the reading instant;
+          scrubbing the global time control moves it and repaints the boxes
+          above in the same breath. Click a lane to open the space. */}
+      {windows.length > 0 && spanLo !== null && spanHi !== null && spanHi > spanLo && (() => {
+        const laneH = 9;
+        const axisH = 16;
+        const stripW = W - 24;
+        const lanes = [...windows].sort((a, b) => {
+          const ka = a.window?.start ?? Number.MAX_SAFE_INTEGER;
+          const kb = b.window?.start ?? Number.MAX_SAFE_INTEGER;
+          return ka - kb || a.space.localeCompare(b.space);
+        });
+        const px = (t: number) => 92 + ((t - spanLo) / (spanHi - spanLo)) * (stripW - 104);
+        const stripH = axisH + lanes.length * laneH + 6;
+        // Week ticks, thinned so labels never collide.
+        const DAY = 86_400_000;
+        const ticks: number[] = [];
+        const step7 = Math.max(1, Math.round((spanHi - spanLo) / DAY / 7 / 8)) * 7 * DAY;
+        for (let t = Math.ceil(spanLo / DAY) * DAY; t <= spanHi; t += step7) ticks.push(t);
+        return (
+          <div style={{ borderTop: `1px solid ${C.line}`, padding: "6px 12px 2px" }}>
+            <div style={{ fontSize: 9, letterSpacing: 0.9, textTransform: "uppercase", color: C.subtle, marginBottom: 2 }}>
+              When each space is lost — the footprint in time
+            </div>
+            <svg viewBox={`0 0 ${stripW} ${stripH}`} style={{ width: "100%", display: "block" }}>
+              {ticks.map((t) => (
+                <g key={t}>
+                  <line x1={px(t)} y1={axisH - 4} x2={px(t)} y2={stripH - 4} stroke={C.hairline} strokeWidth={0.6} />
+                  <text x={px(t)} y={axisH - 7} fill={C.faint} fontSize={7.5} textAnchor="middle">{fmtDay(t)}</text>
+                </g>
+              ))}
+              {lanes.map((w, i) => {
+                const y = axisH + i * laneH;
+                const ph2 = phaseOf(w, at);
+                const stl = PHASE_STYLE[ph2];
+                // A held space's lane wears the red too: "you are losing this
+                // space now AND the engine refuses work in it" is one fact.
+                const heldLane =
+                  (ph2 === "active" || ph2 === "overdue") &&
+                  spaces.some((r) => r.compartment.compartment_no === w.space && !r.permits_work);
+                return (
+                  <g
+                    key={w.space}
+                    onClick={() => onOpenSpace(w.space)}
+                    style={{ cursor: "pointer" }}
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`${w.space} — ${stl.label}. Press Enter to open on the deck plan.`}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onOpenSpace(w.space);
+                      }
+                    }}
+                  >
+                    <title>
+                      {`${w.space} — ${w.window ? `affected ${fmtDay(w.window.start)} → ${fmtDay(w.window.end)}` : "undated — assume affected throughout"}\n${stl.label}${heldLane ? " · AND held by the engine — the space is lost twice over" : ""} · ${mh(w.remaining_hours)} remaining`}
+                    </title>
+                    <text x={88} y={y + laneH - 2.5} fill={C.dim} fontSize={7.5} fontFamily="monospace" textAnchor="end">
+                      {w.space}
+                    </text>
+                    {w.window ? (
+                      <rect
+                        x={px(w.window.start)} y={y + 1.2}
+                        width={Math.max(2, px(w.window.end) - px(w.window.start))} height={laneH - 3.4}
+                        rx={1.5}
+                        fill={heldLane ? "rgba(220,38,38,0.55)" : stl.fill}
+                        stroke={heldLane ? C.danger : stl.stroke}
+                        strokeWidth={heldLane ? 1.1 : 0.7}
+                        strokeDasharray={ph2 === "future" ? "2.5 2" : undefined}
+                      />
+                    ) : (
+                      <rect x={px(spanLo)} y={y + 1.2} width={px(spanHi) - px(spanLo)} height={laneH - 3.4} rx={1.5} fill="rgba(148,163,184,0.14)" stroke={C.faint} strokeWidth={0.6} strokeDasharray="1.5 2.5" />
+                    )}
+                  </g>
+                );
+              })}
+              {at !== null && at >= spanLo && at <= spanHi && (
+                <g pointerEvents="none">
+                  <line x1={px(at)} y1={axisH - 4} x2={px(at)} y2={stripH - 4} stroke={C.text} strokeWidth={1.1} />
+                  <text x={px(at)} y={stripH - 0.5} fill={C.text} fontSize={7.5} textAnchor="middle" fontWeight={700}>
+                    reading instant
+                  </text>
+                </g>
+              )}
+            </svg>
+          </div>
+        );
+      })()}
 
       {/* the telling: step controls and the step itself */}
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "9px 12px", borderTop: `1px solid ${C.line}` }}>
@@ -559,8 +789,17 @@ export function IsoWalk({
             <span style={{ color: zoneColour(z) }}>▬</span> {z}
           </span>
         ))}
+        {windows.length > 0 && (
+          <span style={{ display: "flex", gap: 10 }}>
+            <span><span style={{ color: C.accent }}>▢</span> not yet</span>
+            <span><span style={{ color: C.accent }}>■</span> worked now</span>
+            <span><span style={{ color: C.warn }}>■</span> window passed, unfinished</span>
+            <span><span style={{ color: C.ok }}>■</span> done</span>
+            <span><span style={{ color: C.danger }}>■</span> held</span>
+          </span>
+        )}
         <span style={{ marginLeft: "auto", color: C.faint }}>
-          plinth = zone · column = frame · lane = deck — adjacency reads in all three
+          plinth = zone · column = frame · lane = deck · ribbon = when — adjacency reads in all four
         </span>
       </div>
     </div>

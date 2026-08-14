@@ -31,6 +31,8 @@ import {
   type ReconciliationMismatch,
   type ScheduleEdge,
   type Window,
+  workConflicts,
+  type WorkConflicts,
 } from "./api";
 import { ActivityInspector } from "./ActivityInspector";
 import { Loading } from "./Loading";
@@ -115,6 +117,24 @@ export default function SequenceBoard({
   spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
 }) {
+
+  // The day's hot-vs-flammable pairs, served — a schedule that plans flame
+  // and vapour into each other should say so on the board that shows the plan.
+  const [conflicts, setConflicts] = useState<WorkConflicts | null>(null);
+  useEffect(() => {
+    let stale = false;
+    workConflicts(identity, vesselId, asOf)
+      .then((c) => {
+        if (!stale) setConflicts(c);
+      })
+      .catch(() => {
+        if (!stale) setConflicts(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, asOf]);
+
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
   const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes" | "digest">("register");
@@ -330,6 +350,10 @@ export default function SequenceBoard({
         stats={[
           { value: activities.length, label: "activities", title: "Every scheduled activity at the grain a crew is handed — the doing grain the six work orders are made of." },
           { value: inWindow, label: "in window now", title: "Planned for the instant on the time control. The instant marks rows, never filters them." },
+          (conflicts?.pairs.length ?? 0) > 0 && {
+            value: conflicts?.pairs.length ?? 0, label: "hot vs flammable today", tone: C.warn,
+            title: `${conflicts?.basis ?? ""}\n\n${(conflicts?.pairs ?? []).slice(0, 5).map((pr) => pr.reason).join("\n")}`,
+          },
           refused > 0 && {
             value: refused, label: "not executable", tone: C.danger,
             title: "The activity's space, evaluated over its planned window, refuses work during it — a fact neither the schedule nor the engine holds alone. Click any row or bar for the evidence and the proposal.",

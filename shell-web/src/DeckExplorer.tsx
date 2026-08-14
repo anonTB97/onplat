@@ -18,6 +18,8 @@ import {
   type Rollup,
   type ZoneBound,
   type ZoneChart,
+  workConflicts,
+  type WorkConflicts,
 } from "./api";
 import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
@@ -45,6 +47,15 @@ import { zoneBands, type ZoneGeometry } from "./zones";
 import { fmtDate, fmtDay } from "./clock";
 
 const DIM = C.dim;
+
+/**
+ * The occupancy planning tolerance: workers per space per day above which the
+ * plan itself is flagged. A PLANNING HEURISTIC seeded at 6 — the yard's own
+ * per-compartment occupancy limits (which depend on the space, the trade mix
+ * and the confined-space determination) belong in configuration when this
+ * leaves the demo; this constant exists so the flag has one definition.
+ */
+const CREW_TOLERANCE = 6;
 const LINE = C.line;
 const TEXT = C.text;
 
@@ -290,6 +301,25 @@ export default function DeckExplorer({
   // makes Shift / Week / Month change what this screen SAYS, not merely how
   // far the scrubber reaches — the schedule's reality for the chosen window,
   // pro-rated per space by the same rule as the Load digest.
+  // Scheduled-work conflicts for the day under the cursor — served business
+  // rules (hot-class vs flammable-class through the coupling graph), so the
+  // deck plan can draw the pairs and a worker at a kiosk sees them without
+  // opening anything.
+  const [conflicts, setConflicts] = useState<WorkConflicts | null>(null);
+  useEffect(() => {
+    let stale = false;
+    workConflicts(identity, vesselId, asOf)
+      .then((c) => {
+        if (!stale) setConflicts(c);
+      })
+      .catch(() => {
+        if (!stale) setConflicts(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, asOf]);
+
   const winStart = asOf ?? now ?? 0;
   const horizonSpan = HORIZONS[horizon].span;
   const winEnd =
@@ -607,6 +637,14 @@ export default function DeckExplorer({
               )}
               {loadTotal.unlocated > 0 && (
                 <span style={{ color: C.warn }}>{loadTotal.unlocated} unlocated</span>
+              )}
+              {conflicts !== null && conflicts.pairs.length > 0 && (
+                <b
+                  style={{ color: C.warn, cursor: "help" }}
+                  title={`${conflicts.basis}\n\n${conflicts.pairs.slice(0, 6).map((pr) => pr.reason).join("\n")}${conflicts.pairs.length > 6 ? `\n…and ${conflicts.pairs.length - 6} more` : ""}`}
+                >
+                  ⚡ {conflicts.pairs.length} hot-vs-flammable today
+                </b>
               )}
             </span>
           )}
@@ -949,6 +987,10 @@ export default function DeckExplorer({
                   // register's geometry, and a filter hiding half the zone
                   // would make the check pass vacuously.
                   zoneRows={rows.filter((r) => r.compartment.deck_code === selectedDeck)}
+                  load={spaceLoad}
+                  windowDays={(winEnd - winStart) / 86_400_000}
+                  horizonLabel={HORIZONS[horizon].label.toLowerCase()}
+                  conflicts={conflicts}
                 />
               ) : (
                 <PlanView
@@ -966,7 +1008,9 @@ export default function DeckExplorer({
                   deckLabel={deckLabel}
                   cascadeEdges={cascadeEdges}
                   load={spaceLoad}
+                  windowDays={(winEnd - winStart) / 86_400_000}
                   horizonLabel={HORIZONS[horizon].label.toLowerCase()}
+                  conflicts={conflicts}
                 />
               )}
 
@@ -1363,6 +1407,7 @@ function ReadinessAltitude({
 function SheetView({
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
   dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zones, zoneAlerts, zoneRows,
+  load, windowDays, horizonLabel, conflicts,
 }: {
   sheet: DeckSheet;
   rows: DeckStateRow[];
@@ -1393,6 +1438,13 @@ function SheetView({
   /** Every space on this deck, unfiltered — the shading verifies the register,
    *  and a filtered set would make the check pass vacuously. */
   zoneRows: DeckStateRow[];
+  /** Scheduled man-hours per space inside the reading window. */
+  load: Map<string, SpaceLoad>;
+  /** The reading window's length in days — the crew estimate's denominator. */
+  windowDays: number;
+  horizonLabel: string;
+  /** The day's served hot-vs-flammable pairs, drawn on the plate. */
+  conflicts: WorkConflicts | null;
 }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<string | null>(null);
@@ -1705,6 +1757,21 @@ function SheetView({
             </g>
           )}
 
+          {/* The day's hot-vs-flammable pairs, on the drawing itself. */}
+          {(conflicts?.pairs ?? []).map((pr, i) => {
+            const a = placed.get(pr.hot.space);
+            const b = placed.get(pr.flammable.space);
+            if (!a || !b || pr.hot.space === pr.flammable.space) return null;
+            return (
+              <g key={`cf-${i}`} pointerEvents="none">
+                <line
+                  x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                  stroke={C.warn} strokeWidth={2.2 * u} strokeDasharray={`${5 * u} ${5 * u}`} opacity={0.85}
+                />
+                <title>{pr.reason}</title>
+              </g>
+            );
+          })}
           {/* The hazard's path across this deck, drawn on the drawing itself. */}
           {cascadeEdges.map(([from, to]) => {
             const a = placed.get(from);
@@ -1726,7 +1793,24 @@ function SheetView({
             const tone = toneOf(r);
             const isSel = no === selected;
             const isHot = no === hovered;
-            const label = isSel || isHot || showLabels;
+            const l = load.get(no);
+            // The day-driven rule, same as the schematic: the schedule decides
+            // what the plate shows. Quiet open spaces recede to a dot.
+            const active = (l?.count ?? 0) > 0 && (l?.hours ?? 0) >= 1;
+            const heldQuiet = !active && (r.readiness === "held" || r.state !== "ALLOW");
+            const crew = active ? Math.max(1, Math.ceil((l?.hours ?? 0) / (8 * Math.max(1, windowDays)))) : 0;
+            const crowded = crew > CREW_TOLERANCE;
+            if (!active && !heldQuiet && !isSel && !isHot) {
+              return (
+                <g key={no} onClick={() => onSelect(no)} onPointerEnter={() => setHovered(no)} style={{ cursor: "pointer" }}>
+                  <title>
+                    {`${no} — ${r.compartment.name}\nno work this ${horizonLabel} · nothing refuses work here at this instant\nA candidate site for ad-hoc work — verify gas-free status with the certifying authority before hot work.`}
+                  </title>
+                  <circle cx={at.x} cy={at.y} r={3.4 * u} fill={OVERLAY_STYLE.go.fg} fillOpacity={0.4} stroke={OVERLAY_STYLE.go.fg} strokeWidth={1 * u} strokeOpacity={0.6} />
+                </g>
+              );
+            }
+            const label = isSel || isHot || (showLabels && (active || heldQuiet));
             const jump = deckJumps.get(no);
             const inViolation = involved.has(no);
             const dimmed = violationFocus && !inViolation;
@@ -1796,8 +1880,8 @@ function SheetView({
                         />
                       )}
                       <rect
-                        x={at.x - 44 * u} y={ly - 7.5 * u} width={88 * u} height={15 * u} rx={3 * u}
-                        fill="#0b0c0e" fillOpacity={0.92} stroke={tone.fg} strokeWidth={1 * u}
+                        x={at.x - (active ? 54 : 44) * u} y={ly - 7.5 * u} width={(active ? 108 : 88) * u} height={15 * u} rx={3 * u}
+                        fill="#0b0c0e" fillOpacity={0.92} stroke={crowded ? C.warn : tone.fg} strokeWidth={(crowded ? 1.6 : 1) * u}
                       />
                       {r.rules_fired.length > 0 && (
                         <text x={at.x - 38 * u} y={ly + 3.5 * u} fill={tone.fg} fontSize={9 * u}>
@@ -1808,7 +1892,7 @@ function SheetView({
                         x={at.x + (r.rules_fired.length > 0 ? 5 : 0) * u} y={ly + 3.5 * u}
                         fill={tone.fg} fontSize={9.5 * u} textAnchor="middle" fontFamily="monospace"
                       >
-                        {no}
+                        {active ? `${no} · ≈${crew}${crowded ? "⚠" : ""}` : no}
                       </text>
                     </g>
                   );
@@ -1896,7 +1980,8 @@ const presetBtn: React.CSSProperties = {
 /** The deck plan: compartments placed by frame and side, pannable and zoomable. */
 function PlanView({
   rows, selected, onSelect, toneOf, zoom, setZoom, pan, setPan, dragging,
-  hoverFrame, setHoverFrame, deckLabel, cascadeEdges, load, horizonLabel,
+  hoverFrame, setHoverFrame, deckLabel, cascadeEdges, load, windowDays,
+  horizonLabel, conflicts,
 }: {
   rows: DeckStateRow[];
   selected: string | null;
@@ -1913,13 +1998,21 @@ function PlanView({
   cascadeEdges: [string, string][];
   /** Scheduled man-hours per space inside the reading window. */
   load: Map<string, SpaceLoad>;
+  /** The reading window's length in days — the crew estimate's denominator. */
+  windowDays: number;
   /** "shift" | "week" | "month" | "availability", for the tooltips. */
   horizonLabel: string;
+  /** The day's served hot-vs-flammable pairs, drawn as links between pins. */
+  conflicts: WorkConflicts | null;
 }) {
   const W = 1000;
   const MARKER_W = 92;
   const MARKER_H = 26;
   const maxLoad = Math.max(0, ...rows.map((r) => load.get(r.compartment.compartment_no)?.hours ?? 0));
+  void maxLoad;
+  const conflictSpaces = new Set(
+    (conflicts?.pairs ?? []).flatMap((pr) => [pr.hot.space, pr.flammable.space]),
+  );
   // A lane is a marker plus enough gap that two stacked labels stay legible.
   const LANE_H = 34;
 
@@ -2075,6 +2168,22 @@ function PlanView({
             );
           })}
 
+          {/* The day's conflicts, drawn as links before the markers so the
+              pins overprint the wire that connects them. */}
+          {(conflicts?.pairs ?? []).map((pr, i) => {
+            const a = layout.positions.get(pr.hot.space);
+            const b = layout.positions.get(pr.flammable.space);
+            if (!a || !b || pr.hot.space === pr.flammable.space) return null;
+            return (
+              <g key={`cf-${i}`} pointerEvents="none">
+                <line
+                  x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                  stroke={C.warn} strokeWidth={1.8} strokeDasharray="3 4" opacity={0.8}
+                />
+                <title>{pr.reason}</title>
+              </g>
+            );
+          })}
           {rows.map((r) => {
             const at = layout.positions.get(r.compartment.compartment_no);
             if (!at) return null;
@@ -2084,6 +2193,32 @@ function PlanView({
             const inViolation = involved.has(no);
             const dimmed = violationFocus && !inViolation;
             const { x, y } = at;
+            const l = load.get(no);
+            // THE day-driven rule: the schedule decides what the plan shows.
+            // A space with work in the reading window is a full marker with
+            // its crew loading; a held-or-refusing space stays visible even
+            // when quiet (a hold matters to whoever walks past the door); a
+            // quiet, open space recedes to a small green dot — still there,
+            // still clickable, and exactly what an ad-hoc job goes looking
+            // for — instead of a labelled box shouting a name with nothing
+            // behind it.
+            const active = (l?.count ?? 0) > 0 && (l?.hours ?? 0) >= 1;
+            const heldQuiet = !active && (r.readiness === "held" || r.state !== "ALLOW");
+            const quiet = !active && !heldQuiet;
+            const crew = active ? Math.max(1, Math.ceil((l?.hours ?? 0) / (8 * Math.max(1, windowDays)))) : 0;
+            const crowded = crew > CREW_TOLERANCE;
+            const inConflict = conflictSpaces.has(no);
+            if (quiet && !isSel) {
+              return (
+                <g key={no} onClick={() => onSelect(no)} style={{ cursor: "pointer" }} opacity={dimmed ? 0.35 : 0.8}>
+                  <title>
+                    {`${no} — ${r.compartment.name}\nno work this ${horizonLabel} · nothing refuses work here at this instant\nA candidate site for ad-hoc work — verify gas-free status with the certifying authority before hot work.\nClick for the full picture.`}
+                  </title>
+                  <circle cx={x} cy={y} r={4} fill={OVERLAY_STYLE.go.fg} fillOpacity={0.35} stroke={OVERLAY_STYLE.go.fg} strokeWidth={1} strokeOpacity={0.6} />
+                </g>
+              );
+            }
+            const mh2 = MARKER_H + (active ? 8 : 0);
             return (
               <g
                 key={no}
@@ -2093,8 +2228,8 @@ function PlanView({
               >
                 {violationFocus && inViolation && (
                   <rect
-                    x={x - MARKER_W / 2 - 4} y={y - MARKER_H / 2 - 4}
-                    width={MARKER_W + 8} height={MARKER_H + 8} rx={6}
+                    x={x - MARKER_W / 2 - 4} y={y - mh2 / 2 - 4}
+                    width={MARKER_W + 8} height={mh2 + 8} rx={6}
                     fill="none" stroke={isSel ? C.accent : STATE_STYLE.SUSPEND.fg}
                     strokeWidth={1.6} opacity={0.75}
                   />
@@ -2102,50 +2237,47 @@ function PlanView({
                 {/* A leader back to the keel line: once a marker is fanned two
                     lanes out, the frame it actually sits at stops being obvious. */}
                 <line
-                  x1={x} y1={y < H / 2 ? y + MARKER_H / 2 : y - MARKER_H / 2}
+                  x1={x} y1={y < H / 2 ? y + mh2 / 2 : y - mh2 / 2}
                   x2={x} y2={H / 2}
                   stroke={tone.border} strokeWidth={0.75} strokeDasharray="3 3" opacity={0.55}
                 />
                 <rect
-                  x={x - MARKER_W / 2} y={y - MARKER_H / 2}
-                  width={MARKER_W} height={MARKER_H} rx={4}
-                  fill={tone.bg} stroke={isSel ? C.accent : tone.border}
-                  strokeWidth={isSel ? 2 : 1}
+                  x={x - MARKER_W / 2} y={y - mh2 / 2}
+                  width={MARKER_W} height={mh2} rx={4}
+                  fill={tone.bg} stroke={isSel ? C.accent : crowded ? C.warn : tone.border}
+                  strokeWidth={isSel || crowded ? 2 : 1}
                 />
-                <text x={x} y={y + 4} fill={tone.fg} fontSize={10} textAnchor="middle" fontFamily="monospace">
-                  {r.compartment.compartment_no}
+                <text x={x} y={y + (active ? -1 : 4)} fill={tone.fg} fontSize={10} textAnchor="middle" fontFamily="monospace">
+                  {no}
                 </text>
-                {/* The window's load, worn on the marker: an underline scaled
-                    to the busiest space on this deck. A space with nothing in
-                    the window wears nothing — a legible difference at a
-                    glance, which is what makes the horizon real here. */}
-                {(() => {
-                  const l = load.get(no);
-                  if (!l || l.hours < 1 || maxLoad < 1) return null;
-                  const w = Math.max(6, (MARKER_W - 10) * Math.min(1, l.hours / maxLoad));
-                  return (
-                    <g pointerEvents="none">
-                      <rect
-                        x={x - MARKER_W / 2 + 5} y={y + MARKER_H / 2 - 4}
-                        width={w} height={2.5} rx={1}
-                        fill={l.refused > 0 ? C.danger : C.accent}
-                        opacity={0.9}
-                      />
-                      <title>
-                        {`${no} this ${horizonLabel}: ${l.count} activit${l.count === 1 ? "y" : "ies"} · ${Math.round(l.hours).toLocaleString()} MH${l.refused > 0 ? ` · ${l.refused} refused` : ""}`}
-                      </title>
-                    </g>
-                  );
-                })()}
+                {/* The day's facts, on the marker: hours in the window and the
+                    crew it implies (MH ÷ 8-hour shift ÷ days) — the number a
+                    supervisor squares against the space's occupancy limit. */}
+                {active && (
+                  <text x={x} y={y + 11} fill={crowded ? C.warn : DIM} fontSize={8.5} textAnchor="middle">
+                    {`${Math.round(l?.hours ?? 0).toLocaleString()} MH · ≈${crew} ppl${crowded ? " ⚠" : ""}`}
+                  </text>
+                )}
+                <title>
+                  {`${no} — ${r.compartment.name}\nthis ${horizonLabel}: ${l?.count ?? 0} activit${(l?.count ?? 0) === 1 ? "y" : "ies"} · ${Math.round(l?.hours ?? 0).toLocaleString()} MH · ≈${crew} workers/day (MH ÷ 8-h shift)${crowded ? `\n⚠ over the ${CREW_TOLERANCE}-worker occupancy planning tolerance — stagger trades or shifts` : ""}${(l?.refused ?? 0) > 0 ? `\n${l?.refused} refused in this window` : ""}${inConflict ? "\n⚡ in a hot-vs-flammable pair today — see the link" : ""}`}
+                </title>
+                {(l?.refused ?? 0) > 0 && (
+                  <rect x={x - MARKER_W / 2 + 5} y={y + mh2 / 2 - 4} width={MARKER_W - 10} height={2.5} rx={1} fill={C.danger} opacity={0.9} />
+                )}
+                {inConflict && (
+                  <text x={x + MARKER_W / 2 - 8} y={y - mh2 / 2 + 9} fill={C.warn} fontSize={9} fontWeight={700}>
+                    ⚡
+                  </text>
+                )}
                 {r.rules_fired.length > 0 && (
-                  <circle cx={x + MARKER_W / 2 - 6} cy={y - MARKER_H / 2 + 3} r={5} fill={tone.fg} />
+                  <circle cx={x + MARKER_W / 2 - 6} cy={y - mh2 / 2 + 3} r={5} fill={tone.fg} />
                 )}
                 {/* Same advertisement as the plate view: held means a computed
                     route out exists, and the marker itself says so. */}
                 {r.readiness === "held" && (
                   <g>
                     <title>Held — mitigation options exist. Click for the fix.</title>
-                    <text x={x - MARKER_W / 2 + 8} y={y - MARKER_H / 2 - 2} fill={tone.fg} fontSize={9} textAnchor="middle">
+                    <text x={x - MARKER_W / 2 + 8} y={y - mh2 / 2 - 2} fill={tone.fg} fontSize={9} textAnchor="middle">
                       ⚒
                     </text>
                   </g>

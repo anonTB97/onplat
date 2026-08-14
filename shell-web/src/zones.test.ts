@@ -10,7 +10,7 @@ import { zoneBands, type ZoneSpace } from "./zones";
 const space = (no: string, zone: string, frame: number | null): ZoneSpace => ({ no, zone, frame });
 
 describe("zoneBands", () => {
-  it("a band is its zone's true extent, padded and clamped — never a claim beyond its spaces", () => {
+  it("inferred bands tile the hull — neighbours meet midway, the ends run out, raw extents survive", () => {
     const g = zoneBands(
       [
         space("a", "Z2", 40), space("b", "Z2", 70),
@@ -21,10 +21,12 @@ describe("zoneBands", () => {
     );
     expect(g.bands.map((b) => b.zone)).toEqual(["Z2", "Z4"]);
     const [z2, z4] = g.bands;
-    expect(z2).toMatchObject({ rawLo: 40, rawHi: 70, lo: 38, hi: 72, spaces: 2 });
-    expect(z4).toMatchObject({ rawLo: 110, rawHi: 140, lo: 108, hi: 142 });
-    // Disjoint zones: the audit finds nothing, and the gap between bands is
-    // honest — the register has nothing there.
+    // Coverage: Z2 takes the bow end, the pair meets at the midpoint between
+    // their raw extents (70 and 110 → 90), Z4 runs to the stern end. The
+    // whole hull belongs to somebody, the way a maintenance-zone chart reads.
+    expect(z2).toMatchObject({ rawLo: 40, rawHi: 70, lo: 0, hi: 90, spaces: 2 });
+    expect(z4).toMatchObject({ rawLo: 110, rawHi: 140, lo: 90, hi: 280 });
+    // The audit runs on RAW extents, so tiling manufactures no overlap.
     expect(g.overlaps).toEqual([]);
   });
 

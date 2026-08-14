@@ -3,14 +3,17 @@
 // single-deck plate and the whole-ship view can never disagree about where Z4
 // ends.
 //
-// The inferred mode is deliberately modest: a zone's band is the true extent
-// of its own spaces, padded a couple of frames — NOT a tiling of the hull. An
-// earlier cut tiled the bands edge to edge with midpoint boundaries, which
-// presumes zones partition the ship longitudinally. The demo register itself
-// refuted that: Z6 (command & surveillance) sits between Z5's clusters,
-// because zones here are functional, and forcing a partition painted
-// correctly-assigned spaces as errors. A view built to give confidence must
-// not manufacture doubt.
+// Inferred bands TILE the hull: sorted by cluster centre, each pair of
+// neighbouring bands meets at the midpoint between their raw extents, and the
+// outermost bands run to the hull's ends — so the ship is covered edge to
+// edge and bands never overlap or leave unexplained gaps. The boundaries
+// between clusters are honest guesses and the interiors are not: `rawLo`/
+// `rawHi` keep each zone's true extent, the views draw the raw extent
+// stronger than the fill, and — critically — the overlap audit runs on RAW
+// extents, never the tiled bounds, so tiling can never manufacture a
+// finding. (An earlier cut refused to tile at all; the maintenance-zone
+// reading won: a zone chart partitions the hull, and a band view with gaps
+// reads as missing data, not modesty.)
 //
 // Once a chart arrives through the import door, its bounds are drawn AS
 // AUTHORED — no padding, no inference — and the disagreement between chart
@@ -151,6 +154,22 @@ export function zoneBands(
     .sort(
       (a, b) => (a.rawLo + a.rawHi) / 2 - (b.rawLo + b.rawHi) / 2 || a.zone.localeCompare(b.zone),
     );
+
+  // Tile the inferred bands so the hull is covered end to end: neighbours
+  // meet at the midpoint between their RAW extents, outermost bands take the
+  // hull's ends. Authored bands are a chart's word and are never restated.
+  for (let i = 0; i < bands.length; i++) {
+    const b = bands[i];
+    if (b === undefined || b.authored) continue;
+    const prev = bands[i - 1];
+    const next = bands[i + 1];
+    b.lo = prev === undefined ? hullLo : prev.authored ? b.lo : Math.floor((prev.rawHi + b.rawLo) / 2);
+    b.hi = next === undefined ? hullHi : next.authored ? b.hi : Math.floor((b.rawHi + next.rawLo) / 2);
+    // Interleaved clusters can invert a midpoint; a band never claims less
+    // than its own spaces reach.
+    b.lo = Math.min(b.lo, b.rawLo);
+    b.hi = Math.max(b.hi, b.rawHi);
+  }
 
   // The extent audit: every pair of bands that share hull. Authored bands
   // audit on their authored bounds (the chart's own claim); inferred bands on

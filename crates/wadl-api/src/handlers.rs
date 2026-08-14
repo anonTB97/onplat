@@ -1907,3 +1907,137 @@ pub(crate) async fn whoami(Caller(scope): Caller) -> Json<Value> {
         "decision_support_only": true,
     }))
 }
+
+/// How a scheduled activity participates in a work-on-work conflict, judged
+/// from its trade and name. `None` = neither class.
+///
+/// This is a TRADE-CLASS HEURISTIC and says so on the wire: the authoritative
+/// refusal machinery is the rules engine over recorded hazards, and it stays
+/// so. What this classifier adds is the earlier warning — two activities the
+/// SCHEDULE already plans into each other (hot work while flammables flow a
+/// space away) before either becomes a recorded hazard. The word lists are
+/// deliberately small and visible here; a yard tunes them as data when this
+/// leaves the demo.
+fn work_class(trade: &str, name: &str) -> Option<&'static str> {
+    let t = trade.to_lowercase();
+    let n = name.to_lowercase();
+    let hot = ["weld", "burn", "hot work", "torch", "braz"];
+    if hot.iter().any(|w| t.contains(w) || n.contains(w)) {
+        return Some("hot");
+    }
+    let flam = [
+        "preserv",
+        "coat",
+        "paint",
+        "solvent",
+        "flush",
+        "fuel",
+        "flammable",
+        "lagging",
+    ];
+    if flam.iter().any(|w| t.contains(w) || n.contains(w)) {
+        return Some("flammable");
+    }
+    None
+}
+
+/// `GET /api/vessels/:id/work-conflicts` — scheduled work colliding with
+/// scheduled work on the DAY containing the reading instant.
+///
+/// A conflict pair is a hot-class activity and a flammable-class activity
+/// booked the same day in the same compartment, or in compartments the
+/// adjacency graph couples — because on a ship the flame and the vapour do
+/// not need to share a room, only a vent trunk, a penetration, or a bulkhead.
+/// Undated activities count (the product's standing convention: undated work
+/// rides every instant), and the response's `basis` says everything above so
+/// no screen has to re-explain it.
+pub(crate) async fn work_conflicts(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    const DAY_MS: i64 = 86_400_000;
+    const PAIR_CAP: usize = 200;
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+
+    let d0 = at.epoch_millis().div_euclid(DAY_MS) * DAY_MS;
+    let d1 = d0 + DAY_MS;
+    let in_day = |a: &wadl_store::model::ActivitySummary| {
+        a.planned
+            .is_none_or(|w| w.start.epoch_millis() < d1 && d0 < w.end.epoch_millis())
+    };
+
+    // The day's classed, located, unfinished work.
+    let mut hot: Vec<(&str, String, &wadl_store::model::ActivitySummary)> = Vec::new();
+    let mut flam: Vec<(&str, String, &wadl_store::model::ActivitySummary)> = Vec::new();
+    let mut scanned = 0usize;
+    for a in &activities {
+        let Some(space) = a.compartment_no.as_ref() else {
+            continue;
+        };
+        if a.is_milestone || a.status == wadl_store::model::ActivityStatus::Complete || !in_day(a) {
+            continue;
+        }
+        scanned += 1;
+        match work_class(&a.trade, &a.name) {
+            Some("hot") => hot.push(("hot", space.as_str().to_owned(), a)),
+            Some("flammable") => flam.push(("flammable", space.as_str().to_owned(), a)),
+            _ => {}
+        }
+    }
+
+    // Coupled lookup: either direction, with the coupling code that carries it.
+    let coupled = |x: &str, y: &str| -> Option<String> {
+        graph.edges().find_map(|e| {
+            let hit = (e.from.as_str() == x && e.to.as_str() == y)
+                || (e.from.as_str() == y && e.to.as_str() == x);
+            hit.then(|| e.code.as_str().to_owned())
+        })
+    };
+
+    let mut pairs: Vec<Value> = Vec::new();
+    let mut dropped = 0usize;
+    for (_, h_space, h) in &hot {
+        for (_, f_space, f) in &flam {
+            let via = if h_space == f_space {
+                Some("same space".to_owned())
+            } else {
+                coupled(h_space, f_space)
+            };
+            let Some(via) = via else { continue };
+            if pairs.len() >= PAIR_CAP {
+                dropped += 1;
+                continue;
+            }
+            let where_txt = if via == "same space" {
+                format!("both in {h_space}")
+            } else {
+                format!(
+                    "{h_space} and {f_space}, coupled by a {}",
+                    via.replace('_', " ")
+                )
+            };
+            pairs.push(json!({
+                "hot": { "code": h.code, "name": h.name, "space": h_space, "trade": h.trade },
+                "flammable": { "code": f.code, "name": f.name, "space": f_space, "trade": f.trade },
+                "via": via,
+                "reason": format!(
+                    "{} ({}) and {} ({}) are booked the same day — {}. Flame and vapour need only a path, not a shared room.",
+                    h.code, h.trade, f.code, f.trade, where_txt
+                ),
+            }));
+        }
+    }
+
+    Ok(Json(json!({
+        "day": { "start": d0, "end": d1 },
+        "pairs": pairs,
+        "dropped": dropped,
+        "scanned": scanned,
+        "basis": "Trade-class heuristic over the schedule of record: hot-class work (weld/burn/hot work/torch/braze) against flammable-class work (preservation/coating/paint/solvent/flush/fuel/lagging), booked the same day, in the same space or spaces the adjacency graph couples. Undated work counts at every instant. An early warning from the schedule — the rules engine over recorded hazards remains the refusal authority.",
+    })))
+}

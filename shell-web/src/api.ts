@@ -78,6 +78,40 @@ export interface WhoAmI {
   decision_support_only: boolean;
 }
 
+/** One end of a scheduled-work conflict pair. */
+export interface ConflictEnd {
+  code: string;
+  name: string;
+  space: string;
+  trade: string;
+}
+
+/**
+ * Scheduled work colliding with scheduled work on one day — hot-class against
+ * flammable-class, same space or coupled spaces. Served, not derived here:
+ * the trade classes and the coupling walk are the server's business rules,
+ * and `basis` carries its own honesty statement.
+ */
+export interface WorkConflicts {
+  day: Window;
+  pairs: { hot: ConflictEnd; flammable: ConflictEnd; via: string; reason: string }[];
+  dropped: number;
+  scanned: number;
+  basis: string;
+}
+
+export async function workConflicts(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<WorkConflicts> {
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/work-conflicts`, asOf), {
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`work-conflicts → ${res.status}`);
+  return (await res.json()) as WorkConflicts;
+}
+
 export async function whoami(id: Identity): Promise<WhoAmI> {
   const res = await fetch("/api/whoami", { headers: headers(id) });
   if (!res.ok) throw new Error(`GET /api/whoami → ${res.status}`);

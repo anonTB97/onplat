@@ -78,6 +78,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::schedule_alternatives),
         )
         .route(
+            "/api/vessels/:id/work-conflicts",
+            get(handlers::work_conflicts),
+        )
+        .route(
             "/api/vessels/:id/stranded-hours",
             get(handlers::stranded_hours),
         )

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%E2%9A%93%3C/text%3E%3C/svg%3E"
+    />
+    <title>Shipyard AI Onboard</title>
+    <style>
+      /* The two affordances inline styles cannot express, applied product-wide:
+         every control answers the pointer, and keyboard focus is visible.
+         Inline `style` attributes still win where a state (active chip,
+         selected row) needs its own look. */
+      button:hover:not(:disabled),
+      select:hover,
+      label:hover > input[type="file"],
+      summary:hover {
+        filter: brightness(1.22);
+      }
+      button:active:not(:disabled) {
+        filter: brightness(0.92);
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      :focus-visible {
+        outline: 2px solid #3d6bff;
+        outline-offset: 1px;
+        border-radius: 3px;
+      }
+      tbody tr:hover {
+        background: rgba(148, 163, 184, 0.05);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+[package]
+name = "wadl-ingest"
+description = "Batch ingest with its own schema and transaction scope. Provenance on every row."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wadl-domain.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+csv.workspace = true
+# Parses XER timestamps ("2026-08-10 03:00"). Never reads the clock — that door
+# stays wadl-domain's Clock.
+chrono.workspace = true
+
+[lints]
+workspace = true

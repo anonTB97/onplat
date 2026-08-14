@@ -44,6 +44,47 @@ impl Timestamp {
     }
 }
 
+/// A half-open interval of time, `[start, end)`.
+///
+/// Half-open on purpose. Work windows abut — a swing shift starts exactly when
+/// day shift ends — and a closed interval would count the hours in both, so
+/// "how many man-hours are booked at 1600" would answer with two shifts' worth.
+/// The same choice makes a hold that expires at `T` clear *at* `T`, not one
+/// millisecond after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Window {
+    /// First instant inside the window.
+    pub start: Timestamp,
+    /// First instant *after* the window.
+    pub end: Timestamp,
+}
+
+impl Window {
+    /// A window from `start` (inclusive) to `end` (exclusive).
+    #[must_use]
+    pub const fn new(start: Timestamp, end: Timestamp) -> Self {
+        Self { start, end }
+    }
+
+    /// Whether `at` falls inside the window.
+    ///
+    /// A window whose `end` is not after its `start` contains nothing. That is
+    /// the honest reading of reversed or empty bounds: a zero-length activity is
+    /// never in progress, and inverting the comparison to "helpfully" accept it
+    /// would make a mis-keyed schedule row look like work happening at every
+    /// instant.
+    #[must_use]
+    pub const fn contains(&self, at: Timestamp) -> bool {
+        at.0 >= self.start.0 && at.0 < self.end.0
+    }
+
+    /// Whether this window shares any instant with `other`.
+    #[must_use]
+    pub const fn overlaps(&self, other: Self) -> bool {
+        self.start.0 < other.end.0 && other.start.0 < self.end.0
+    }
+}
+
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}ms", self.0)
@@ -104,6 +145,24 @@ mod tests {
         assert_eq!(clock.now(), Timestamp::from_epoch_millis(0));
         clock.advance(Minutes::new(30));
         assert_eq!(clock.now(), Timestamp::from_epoch_millis(30 * 60_000));
+    }
+
+    #[test]
+    fn a_window_is_half_open_so_abutting_shifts_do_not_double_count() {
+        let t = Timestamp::from_epoch_millis;
+        let day = Window::new(t(0), t(8 * 3_600_000));
+        let swing = Window::new(t(8 * 3_600_000), t(16 * 3_600_000));
+        let changeover = t(8 * 3_600_000);
+        assert!(!day.contains(changeover));
+        assert!(swing.contains(changeover));
+        assert!(!day.overlaps(swing));
+    }
+
+    #[test]
+    fn an_empty_or_reversed_window_contains_nothing() {
+        let t = Timestamp::from_epoch_millis;
+        assert!(!Window::new(t(100), t(100)).contains(t(100)));
+        assert!(!Window::new(t(200), t(100)).contains(t(150)));
     }
 
     #[test]

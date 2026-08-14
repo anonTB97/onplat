@@ -1,0 +1,28 @@
+[package]
+name = "wadl-issues"
+description = "Typed issues derived from the register, the engine and the topology. Pure, no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Pure like wadl-engine, wadl-plan and wadl-mitigate: no I/O, no async, no clock.
+# An issue is a claim that planned work is in trouble — a claim a planner will
+# re-sequence real work over — so every one must be derivable and testable from
+# data alone. And being pure it builds for wasm32, like every other crate whose
+# answers a mechanic might need with no network on the ship.
+[dependencies]
+wadl-domain.workspace = true
+wadl-engine.workspace = true
+# For the compound-hold issue: whether one action opens a space is
+# wadl-mitigate's counterfactual question, and re-deriving it here would be a
+# second implementation destined to disagree with the options panel.
+wadl-mitigate.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+
+[lints]
+workspace = true

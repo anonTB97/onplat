@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5f63fa5c4080b3c81e758cc104fff1b08903242c667078fa31162fe0e5f21ad2 # shrinks to hazards = [Hazard { origin: CompartmentNo("3-160-2-Q"), kind: EnergisedBus, since: Timestamp(1778652900000), label: "H12 · generated" }, Hazard { origin: CompartmentNo("3-164-2-Q"), kind: CoatingOpen, since: Timestamp(1778649300000), label: "H40 · generated" }, Hazard { origin: CompartmentNo("2-160-2-Q"), kind: CoatingOpen, since: Timestamp(1778649300000), label: "H00 · generated" }], subject_idx = 1

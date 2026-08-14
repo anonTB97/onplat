@@ -1,0 +1,559 @@
+//! The mitigation endpoints, over the seeded demo hull.
+//!
+//! Run with `--nocapture` to print the leverage board, which is the fastest way
+//! to see what the crate actually proposes for a real hull.
+//!
+//! What is asserted here is the contract the shell will rely on: that an option's
+//! effect is a real re-evaluation (so the numbers move when the instant does),
+//! that the two endpoints agree, and that the demo hull's two hazards produce the
+//! two different KINDS of answer — one that clears itself, one that needs a person.
+
+#![allow(
+    missing_docs,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use serde_json::Value;
+use tower::ServiceExt;
+use wadl_domain::time::{TestClock, Timestamp};
+use wadl_store::memory::{DemoWorld, InMemoryStore, DEMO_ANCHOR_MS};
+
+const ANCHOR: i64 = DEMO_ANCHOR_MS;
+const HOUR: i64 = 3_600_000;
+
+fn app_at_anchor() -> (axum::Router, DemoWorld) {
+    let (store, world) = InMemoryStore::demo_at(Timestamp::from_epoch_millis(ANCHOR));
+    let clock = TestClock::new(Timestamp::from_epoch_millis(ANCHOR));
+    let state = wadl_api::AppState::new(Arc::new(store), Arc::new(clock));
+    (wadl_api::build_router(state), world)
+}
+
+async fn get(app: &axum::Router, world: &DemoWorld, path: &str) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("x-org-id", world.yard_org.as_uuid().to_string())
+        .header("x-assigned-vessels", world.cvn73.as_uuid().to_string())
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+fn hull(world: &DemoWorld) -> String {
+    world.cvn73.as_uuid().to_string()
+}
+
+fn describe(action: &Value) -> String {
+    match action["kind"].as_str().unwrap_or_default() {
+        "wait" => format!("WAIT until {}", action["until"]),
+        "discharge" => format!(
+            "DISCHARGE {} @ {} [{}]",
+            action["hazard"].as_str().unwrap_or_default(),
+            action["origin"].as_str().unwrap_or_default(),
+            action["actor"].as_str().unwrap_or_default()
+        ),
+        _ => format!(
+            "INTERRUPT {} {} -> {}",
+            action["coupling"].as_str().unwrap_or_default(),
+            action["from"].as_str().unwrap_or_default(),
+            action["to"].as_str().unwrap_or_default()
+        ),
+    }
+}
+
+/// The board a planner would read, printed. Also the smoke test for the endpoint.
+#[tokio::test]
+async fn the_leverage_board_ranks_the_hulls_actions() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, body) = get(&app, &world, &format!("/api/vessels/{id}/leverage")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let actions = body["actions"].as_array().expect("actions");
+    println!("\n=== CVN-73 leverage board at the anchor ===");
+    for m in actions {
+        let e = &m["effect"];
+        let harm = if e["closes"].as_array().is_some_and(|c| !c.is_empty()) {
+            format!("  CLOSES {}", e["closes"])
+        } else {
+            String::new()
+        };
+        println!(
+            "  {:<64} frees {} sp / {} MH   net {}   {}{}",
+            describe(&m["action"]),
+            e["frees"].as_array().map_or(0, Vec::len),
+            e["freed_hours"],
+            e["freed_hours"].as_i64().unwrap_or(0) - e["closed_hours"].as_i64().unwrap_or(0),
+            m["confidence"].as_str().unwrap_or_default(),
+            harm
+        );
+    }
+
+    assert!(!actions.is_empty(), "the seeded hull has held spaces");
+    // Ranked by net hours recovered, descending.
+    let nets: Vec<i64> = actions
+        .iter()
+        .map(|m| {
+            m["effect"]["freed_hours"].as_i64().unwrap_or(0)
+                - m["effect"]["closed_hours"].as_i64().unwrap_or(0)
+        })
+        .collect();
+    assert!(
+        nets.windows(2).all(|w| w[0] >= w[1]),
+        "not ranked: {nets:?}"
+    );
+    // Nothing on the board frees nothing.
+    for m in actions {
+        assert!(!m["effect"]["frees"].as_array().unwrap().is_empty());
+    }
+}
+
+/// The demo's two hazards are seeded to produce the two different kinds of answer,
+/// and that difference is the whole product. The coated cascade offers a wait; the
+/// switchgear room never can.
+#[tokio::test]
+async fn the_two_seeded_hazards_produce_the_two_kinds_of_answer() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+
+    // Below the curing coat: clears itself.
+    let (status, coat) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/mitigations"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let options = coat["options"].as_array().expect("options");
+    println!("\n=== 4-160-2-Q (below the curing coat) ===");
+    for m in options {
+        println!("  {}", describe(&m["action"]));
+    }
+    assert!(!options.is_empty());
+    assert_eq!(
+        options[0]["action"]["kind"], "wait",
+        "the cheapest thing that works is to wait"
+    );
+
+    // The switchgear room: a verified zero-energy state, never a clock.
+    let (status, bus) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/3-148-2-E/mitigations"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    println!("\n=== 3-148-2-E (energised bus) ===");
+    for m in bus["options"].as_array().expect("options") {
+        println!("  {}", describe(&m["action"]));
+    }
+    assert!(
+        !bus["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["action"]["kind"] == "wait"),
+        "nothing here clears on a clock"
+    );
+    for hold in bus["holds"].as_array().expect("holds") {
+        assert!(
+            hold["earliest_clear"].is_null(),
+            "a bus isolation has no expiry"
+        );
+    }
+}
+
+/// An open space is not an issue, and the endpoint says so rather than 404ing —
+/// "nothing to do here" and "no such compartment" are different answers.
+#[tokio::test]
+async fn an_open_space_returns_an_empty_option_list() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, body) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-110-2-W/mitigations"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "ALLOW");
+    assert!(body["options"].as_array().unwrap().is_empty());
+    assert!(body["holds"].as_array().unwrap().is_empty());
+}
+
+/// The effect is a re-evaluation, not a stored figure — so it must move when the
+/// instant does. Six hours on, the cure has elapsed and there is nothing left for
+/// the coating actions to free.
+#[tokio::test]
+async fn the_board_changes_with_the_instant() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+
+    let (_, now) = get(&app, &world, &format!("/api/vessels/{id}/leverage")).await;
+    let later = ANCHOR + 6 * HOUR;
+    let (status, after) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/leverage?as_of={later}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after["as_of"], Value::from(later));
+
+    let coating_actions = |b: &Value| -> usize {
+        b["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m["action"]["hazard"]
+                    .as_str()
+                    .is_some_and(|h| h.contains("final coat"))
+                    || m["action"]["kind"] == "wait"
+            })
+            .count()
+    };
+    assert!(
+        coating_actions(&now) > 0,
+        "the coat holds spaces at the anchor"
+    );
+    assert_eq!(
+        coating_actions(&after),
+        0,
+        "six hours on the cure has elapsed, so it holds nothing and needs no action"
+    );
+}
+
+/// An instant outside the availability is refused here on the same terms as
+/// everywhere else — the bound belongs to the hull, not to the endpoint.
+#[tokio::test]
+async fn an_out_of_range_instant_is_refused() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let far = ANCHOR + 400 * 24 * HOUR;
+    for path in [
+        format!("/api/vessels/{id}/leverage?as_of={far}"),
+        format!("/api/vessels/{id}/compartments/4-160-2-Q/mitigations?as_of={far}"),
+    ] {
+        let (status, _) = get(&app, &world, &path).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+    }
+}
+
+async fn post(
+    app: &axum::Router,
+    world: &DemoWorld,
+    path: &str,
+    body: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("x-org-id", world.yard_org.as_uuid().to_string())
+        .header("x-assigned-vessels", world.cvn73.as_uuid().to_string())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// A recorded decision lands in the ledger, chains to the one before it, and comes
+/// back with the options next time — which is the point. A planner opening a space
+/// needs to see what was already tried and why it was turned down.
+#[tokio::test]
+async fn a_decision_is_recorded_chained_and_returned_with_the_options() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let space = "4-160-2-Q";
+
+    let (_, before) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/{space}/mitigations"),
+    )
+    .await;
+    assert!(before["decisions"].as_array().unwrap().is_empty());
+    let option = &before["options"][0];
+
+    let body = serde_json::json!({
+        "disposition": "rejected",
+        "option": option,
+        "reason": "chemist unavailable before the back shift",
+        "as_of": ANCHOR,
+    });
+    let (status, first) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/{space}/decision"),
+        &body.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["action"], "MITIGATION_REJECTED");
+    assert_eq!(first["subject_ref"], space);
+    assert!(first["prev_hash"].is_null(), "first entry in the chain");
+    let first_hash = first["entry_hash"].as_str().unwrap().to_owned();
+    assert_eq!(first_hash.len(), 64, "a sha-256 in hex");
+
+    // The reason and the option as it was seen are inside the hashed detail, so
+    // neither can be altered without breaking the chain.
+    let detail = first["detail"].as_str().unwrap();
+    assert!(detail.contains("chemist unavailable"));
+    assert!(detail.contains("\"subject\":\"4-160-2-Q\""));
+
+    // A second decision chains onto the first.
+    let (status, second) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/{space}/decision"),
+        &serde_json::json!({
+            "disposition": "accepted",
+            "option": option,
+            "reason": "waiting it out",
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["action"], "MITIGATION_ACCEPTED");
+    assert_eq!(
+        second["prev_hash"].as_str().unwrap(),
+        first_hash,
+        "the chain links to the previous entry"
+    );
+
+    // And both come back with the options, newest first.
+    let (_, after) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/{space}/mitigations"),
+    )
+    .await;
+    let decisions = after["decisions"].as_array().unwrap();
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(
+        decisions[0]["action"], "MITIGATION_ACCEPTED",
+        "newest first"
+    );
+}
+
+/// Recording a decision about one space must not surface on another.
+#[tokio::test]
+async fn decisions_are_scoped_to_their_space() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    // A real option: the server verifies the submitted action is one it offers, so a
+    // placeholder is (correctly) refused.
+    let (_, offered) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/mitigations"),
+    )
+    .await;
+    let (status, _) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        &serde_json::json!({
+            "disposition": "rejected",
+            "option": offered["options"][0],
+            "reason": "x",
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, other) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/3-148-2-E/mitigations"),
+    )
+    .await;
+    assert!(other["decisions"].as_array().unwrap().is_empty());
+}
+
+/// A disposition the platform does not understand is refused with the reason,
+/// rather than recorded as something it is not.
+#[tokio::test]
+async fn an_unknown_disposition_is_refused() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, body) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        &serde_json::json!({"disposition": "maybe", "option": {}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("maybe"));
+}
+
+// ---------------------------------------------------- regressions from review
+
+/// An option the engine does not offer cannot be recorded.
+///
+/// The whole value of putting decisions in a tamper-evident ledger is that the
+/// content can be trusted, and hashing whatever a client posted would have let the
+/// chain attest — unfalsifiably — to an option with an invented effect that the
+/// engine never produced. The hash would verify perfectly and the record would be
+/// fiction.
+#[tokio::test]
+async fn an_option_the_engine_never_offered_is_refused() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let fabricated = serde_json::json!({
+        "disposition": "accepted",
+        "reason": "looks cheap",
+        "option": {
+            "action": { "kind": "discharge", "origin": "3-148-2-E",
+                        "hazard": "a hazard nobody raised", "actor": "me" },
+            "effect": { "frees": ["everything"], "closes": [],
+                        "freed_hours": 99999, "closed_hours": 0 },
+            "confidence": "computed",
+            "subject_state": "ALLOW"
+        }
+    });
+    let (status, body) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        &fabricated.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not on offer"));
+
+    // And nothing reached the ledger.
+    let (_, after) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/mitigations"),
+    )
+    .await;
+    assert!(after["decisions"].as_array().unwrap().is_empty());
+}
+
+/// The recorded effect is the server's, not the client's — even when the action is
+/// genuinely on offer and only the numbers were tampered with.
+#[tokio::test]
+async fn the_recorded_effect_is_the_servers_own() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (_, before) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/mitigations"),
+    )
+    .await;
+    let mut option = before["options"][0].clone();
+    option["effect"]["freed_hours"] = serde_json::json!(999_999);
+
+    let (status, record) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        &serde_json::json!({"disposition": "accepted", "option": option, "reason": "r"})
+            .to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let detail = record["detail"].as_str().unwrap();
+    assert!(
+        !detail.contains("999999"),
+        "the client's figure was hashed into the ledger: {detail}"
+    );
+    assert!(detail.contains("decided_by_org"), "who decided is recorded");
+}
+
+/// A placard the register does not contain is not-found, not a confident ALLOW about
+/// a space that does not exist — and it must not be writable into an append-only
+/// ledger.
+#[tokio::test]
+async fn an_unknown_placard_is_not_found() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, _) = get(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/9-999-9-Z/mitigations"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/9-999-9-Z/decision"),
+        &serde_json::json!({"disposition": "accepted", "option": {}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A malformed body reports what was actually wrong with it, rather than claiming a
+/// body was missing.
+#[tokio::test]
+async fn a_malformed_body_says_what_is_wrong() {
+    let (app, world) = app_at_anchor();
+    let id = hull(&world);
+    let (status, body) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{id}/compartments/4-160-2-Q/decision"),
+        "{not json at all",
+    )
+    .await;
+    assert!(status.is_client_error());
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        !detail.contains("needs a body"),
+        "a malformed body is not an absent one: {detail}"
+    );
+}
+
+/// Scope is still resolved before the body, so a foreign hull cannot be told apart
+/// from a bad request.
+#[tokio::test]
+async fn a_foreign_hull_is_refused_before_the_body_is_read() {
+    let (app, world) = app_at_anchor();
+    let foreign = world.navy_hull.as_uuid();
+    let (status, _) = post(
+        &app,
+        &world,
+        &format!("/api/vessels/{foreign}/compartments/4-160-2-Q/decision"),
+        "{not json at all",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

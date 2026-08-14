@@ -19,24 +19,34 @@ use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::CouplingTypeId;
 use wadl_domain::units::HopDepth;
 
-use crate::coupling::{AdjacencyGraph, CouplingEdge, Propagation};
+use crate::coupling::{AdjacencyGraph, CouplingCode, CouplingEdge};
 
 /// The limits a rule places on a traversal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraversalBound {
     /// The maximum hop depth the hazard may reach.
     pub max_hops: HopDepth,
-    /// If set, only couplings that carry this kind are walked (e.g. a coating
-    /// cascade follows ventilation, not load paths). `None` walks every
-    /// coupling.
-    pub required: Option<Propagation>,
+    /// If set, only couplings of this type code are walked — mirroring
+    /// `rule_version.coupling_type_id`, since a rule binds to a *kind* of
+    /// coupling (a coating cascade follows ventilation, not load paths).
+    /// `None` walks every coupling.
+    pub code: Option<CouplingCode>,
 }
 
 impl TraversalBound {
-    /// A bound of `max_hops` over couplings carrying `required`.
+    /// A bound of `max_hops` over couplings of type `code`.
     #[must_use]
-    pub const fn new(max_hops: HopDepth, required: Option<Propagation>) -> Self {
-        Self { max_hops, required }
+    pub const fn new(max_hops: HopDepth, code: Option<CouplingCode>) -> Self {
+        Self { max_hops, code }
+    }
+
+    /// A bound of `max_hops` over every coupling type.
+    #[must_use]
+    pub const fn any(max_hops: HopDepth) -> Self {
+        Self {
+            max_hops,
+            code: None,
+        }
     }
 }
 
@@ -85,8 +95,8 @@ pub fn cascade_from(
             if next_depth.get() > edge.max_reach.get() {
                 continue;
             }
-            if let Some(required) = bound.required {
-                if !edge.carries(required) {
+            if let Some(required) = bound.code.as_ref() {
+                if &edge.code != required {
                     continue;
                 }
             }
@@ -122,6 +132,7 @@ pub fn affected_compartments(hits: &[CascadeHit]) -> Vec<CompartmentNo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coupling::Propagation;
     use proptest::prelude::*;
 
     fn edge(from: &str, to: &str, ty: u128, reach: u8) -> CouplingEdge {
@@ -129,13 +140,26 @@ mod tests {
             from: CompartmentNo::new(from),
             to: CompartmentNo::new(to),
             coupling_type: CouplingTypeId::from_uuid(uuid::Uuid::from_u128(ty)),
+            code: CouplingCode::new(format!("type{ty}")),
             propagates: vec![Propagation::Heat],
             max_reach: HopDepth::new(reach),
         }
     }
 
     fn bound(hops: u8) -> TraversalBound {
-        TraversalBound::new(HopDepth::new(hops), None)
+        TraversalBound::any(HopDepth::new(hops))
+    }
+
+    #[test]
+    fn only_the_bound_coupling_code_is_walked() {
+        // A is coupled to B by type1 and to C by type2. A rule bound to type1
+        // must reach B and not C — a coating cascade follows ventilation, not
+        // every coupling that happens to exist.
+        let g = AdjacencyGraph::new(vec![edge("A", "B", 1, 3), edge("A", "C", 2, 3)]);
+        let only_type1 = TraversalBound::new(HopDepth::new(3), Some(CouplingCode::new("type1")));
+        let reached =
+            affected_compartments(&cascade_from(&g, &CompartmentNo::new("A"), &only_type1));
+        assert_eq!(reached, vec![CompartmentNo::new("B")]);
     }
 
     #[test]

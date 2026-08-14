@@ -1,0 +1,29 @@
+---
+source: crates/wadl-engine/tests/golden_cascade.rs
+expression: "decide(\"2-160-2-Q\")"
+---
+{
+  "state": "BLOCK",
+  "trace": [
+    {
+      "rule_code": "R03",
+      "rule_version": "00000000-0000-0000-0000-000000000301",
+      "state": "BLOCK",
+      "source": "3-160-2-Q",
+      "hazard": "CT-3160-4 · final coat, curing",
+      "depth": 1,
+      "path": [
+        "3-160-2-Q",
+        "2-160-2-Q"
+      ],
+      "via": [
+        "deck_penetration"
+      ],
+      "authority": "NSTM Ch. 074 Vol. 1; NFPA 306",
+      "clearing_authority": "marine_chemist",
+      "earliest_clear": 1778678100000,
+      "reason": "CT-3160-4 · final coat, curing in 3-160-2-Q — reached via deck_penetration (1 hop)."
+    }
+  ],
+  "earliest_clear": 1778678100000
+}

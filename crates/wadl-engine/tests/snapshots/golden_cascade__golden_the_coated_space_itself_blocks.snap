@@ -1,0 +1,26 @@
+---
+source: crates/wadl-engine/tests/golden_cascade.rs
+expression: "decide(\"3-160-2-Q\")"
+---
+{
+  "state": "BLOCK",
+  "trace": [
+    {
+      "rule_code": "R03",
+      "rule_version": "00000000-0000-0000-0000-000000000300",
+      "state": "BLOCK",
+      "source": "3-160-2-Q",
+      "hazard": "CT-3160-4 · final coat, curing",
+      "depth": 0,
+      "path": [
+        "3-160-2-Q"
+      ],
+      "via": [],
+      "authority": "NFPA 306; NSTM Ch. 074 Vol. 1",
+      "clearing_authority": "marine_chemist",
+      "earliest_clear": 1778678100000,
+      "reason": "CT-3160-4 · final coat, curing in this space."
+    }
+  ],
+  "earliest_clear": 1778678100000
+}

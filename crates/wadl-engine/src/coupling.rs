@@ -56,6 +56,11 @@ pub struct CouplingEdge {
     /// The coupling type this edge came from — part of the traversal's visited
     /// key, so a space may be reached again via a *different* coupling type.
     pub coupling_type: CouplingTypeId,
+    /// The coupling type's stable code (`deck_penetration`, `shared_bulkhead`,
+    /// `exhaust_trunk`, …). Carried alongside the id because rules bind to the
+    /// *kind* of coupling, and a rule set authored as data must be matchable
+    /// without a second lookup into the coupling-type table.
+    pub code: CouplingCode,
     /// What this coupling carries.
     pub propagates: Vec<Propagation>,
     /// Hop budget for this coupling type.
@@ -67,6 +72,37 @@ impl CouplingEdge {
     #[must_use]
     pub fn carries(&self, propagation: Propagation) -> bool {
         self.propagates.contains(&propagation)
+    }
+}
+
+/// A coupling type's stable code, as stored in `coupling_type.code`.
+///
+/// A string newtype rather than an enum: coupling types are **tenant
+/// configurable** (what counts as coupled is a safety judgement), so the engine
+/// must not close the set. Rules match on this code.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct CouplingCode(String);
+
+impl CouplingCode {
+    /// Wraps a coupling-type code.
+    #[must_use]
+    pub fn new(code: impl Into<String>) -> Self {
+        Self(code.into())
+    }
+
+    /// The code.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for CouplingCode {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
     }
 }
 
@@ -96,5 +132,16 @@ impl AdjacencyGraph {
     #[must_use]
     pub fn edge_count(&self) -> usize {
         self.edges.len()
+    }
+
+    /// Every edge, in authored order.
+    ///
+    /// Exposed so a caller can build a *variant* of this graph — the engine still
+    /// treats what it is handed as immutable. `wadl_mitigate` uses it to model an
+    /// engineering mitigation: blanking a duct or closing a penetration is the
+    /// removal of a coupling, and the only honest way to price that is to rebuild
+    /// the graph without it and evaluate for real.
+    pub fn edges(&self) -> impl Iterator<Item = &CouplingEdge> {
+        self.edges.iter()
     }
 }

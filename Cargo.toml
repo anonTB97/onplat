@@ -12,6 +12,9 @@ resolver = "2"
 members = [
   "crates/wadl-domain",
   "crates/wadl-engine",
+  "crates/wadl-plan",
+  "crates/wadl-mitigate",
+  "crates/wadl-issues",
   "crates/wadl-store",
   "crates/wadl-api",
   "crates/wadl-ingest",
@@ -39,6 +42,9 @@ uuid = { version = "1", default-features = false, features = ["serde", "std"] }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 thiserror = "1"
+# Already in the tree via axum; used to make the Repositories trait async while
+# staying dyn-compatible (native async fn in trait is not object-safe).
+async-trait = "0.1"
 
 # Internal crates
 wadl-domain = { path = "crates/wadl-domain" }
@@ -46,15 +52,22 @@ wadl-engine = { path = "crates/wadl-engine" }
 wadl-store = { path = "crates/wadl-store" }
 wadl-ingest = { path = "crates/wadl-ingest" }
 wadl-api = { path = "crates/wadl-api" }
+wadl-plan = { path = "crates/wadl-plan" }
+wadl-mitigate = { path = "crates/wadl-mitigate" }
+wadl-issues = { path = "crates/wadl-issues" }
 
 # Backend (never pulled into wadl-engine or wadl-domain)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "tower-log"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "tower-log"] }
+# Test-only (ServiceExt::oneshot in the API tests). Runtime middleware is
+# hand-rolled on tokio primitives — see wadl-api::hardening — so the deploy
+# surface carries no tower-http and no tower service stack of its own.
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "timeout", "limit"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros", "migrate"] }
+# No tracing stack: the audit and diagnostic streams are hand-rolled JSON
+# lines (wadl-api::hardening and error.rs) — the one tracing::error! call the
+# tree ever had was silently dropped for want of a subscriber, which is the
+# failure mode a framework invites and a println cannot have.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,40 @@
+[package]
+name = "wadl-api"
+description = "axum handlers, extractors, and authorization middleware. Thin."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wadl-domain.workspace = true
+wadl-engine.workspace = true
+wadl-plan.workspace = true
+wadl-mitigate.workspace = true
+wadl-issues.workspace = true
+wadl-ingest.workspace = true
+wadl-store.workspace = true
+axum.workspace = true
+# sync + time carry the hardening layer (semaphore shed, request timeout) on
+# the runtime we already ship instead of adding a middleware crate.
+tokio = { workspace = true, features = ["sync", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true, features = ["v7"] }
+
+[features]
+# The production serving path: compiles the PostgreSQL store into the binary.
+# Activated at runtime by DATABASE_URL (see the serve binary's doc header);
+# without the feature the binary cannot open a database at all, which keeps
+# the demo artifact's dependency tree free of the driver (CM-7).
+postgres = ["wadl-store/postgres"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true

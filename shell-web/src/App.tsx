@@ -25,6 +25,7 @@ import {
   type Persona,
 } from "./Chrome";
 import DailyOps from "./DailyOps";
+import { JobCard } from "./JobCard";
 import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
 import DistributedPackages from "./DistributedPackages";
@@ -110,6 +111,9 @@ export default function App() {
   // admitted the request. Fetched once; null renders as "identity unknown"
   // rather than guessing from the headers the shell itself sent.
   const [who, setWho] = useState<WhoAmI | null>(null);
+  // The job card: one work order's whole story, opened from any board where
+  // its code appears. App-owned so every surface opens the SAME card.
+  const [jobCode, setJobCode] = useState<string | null>(null);
 
   useEffect(() => {
     listVessels(DEMO_IDENTITY)
@@ -166,6 +170,7 @@ export default function App() {
   // each availability has its own bounds, and scrubbing one hull's window over
   // another's data is how a projection ends up outside the range the API accepts.
   useEffect(() => {
+    setJobCode(null);
     if (!selected) {
       setFrame(null);
       return;
@@ -293,6 +298,22 @@ export default function App() {
       {/* Time applies to every module, so the control sits in the chrome rather
           than inside one screen. Rendered only once a hull is picked: its bounds
           are that hull's availability. */}
+      {jobCode && selected && (
+        <JobCard
+          identity={DEMO_IDENTITY}
+          vesselId={selected}
+          code={jobCode}
+          asOf={asOf}
+          now={frame?.now ?? null}
+          spaces={rows}
+          onOpenSpace={(no) => {
+            setJobCode(null);
+            jump(no);
+          }}
+          onClose={() => setJobCode(null)}
+        />
+      )}
+
       {selected && frame && (
         <TimeControl
           now={frame.now}
@@ -425,6 +446,7 @@ export default function App() {
           {!error && selected && module.id === "workOrders" && (
             <WorkOrders
               identity={DEMO_IDENTITY}
+              onOpenJob={setJobCode}
               vesselId={selected}
               hullLabel={hullLabel}
               spaces={rows}
@@ -436,6 +458,7 @@ export default function App() {
           {!error && selected && module.id === "dailyOps" && (
             <DailyOps
               identity={DEMO_IDENTITY}
+              onOpenJob={setJobCode}
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
@@ -447,6 +470,7 @@ export default function App() {
           {!error && selected && module.id === "sequenceBoard" && (
             <SequenceBoard
               identity={DEMO_IDENTITY}
+              onOpenJob={setJobCode}
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}

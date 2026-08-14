@@ -80,6 +80,7 @@ export default function DailyOps({
   asOf,
   spaces,
   onOpenSpace,
+  onOpenJob,
 }: {
   identity: Identity;
   vesselId: string;
@@ -88,6 +89,8 @@ export default function DailyOps({
   /** The hull's per-space verdicts at the same instant, from the app shell. */
   spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
+  /** Opens the job card for a work-order code. */
+  onOpenJob: (code: string) => void;
 }) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
@@ -358,7 +361,20 @@ export default function DailyOps({
                     key={a.activity_id}
                     style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "6px 12px", borderBottom: `1px solid ${C.hairline}`, fontSize: 12 }}
                   >
-                    <span style={{ fontFamily: "monospace", color: C.accent, whiteSpace: "nowrap" }}>{a.code}</span>
+                    {a.work_order_code ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenJob(a.work_order_code ?? "");
+                        }}
+                        title={`Open the job card for ${a.work_order_code} — the whole order this activity belongs to`}
+                        style={{ font: "inherit", fontFamily: "monospace", cursor: "pointer", color: C.accent, whiteSpace: "nowrap", background: "transparent", border: "none", padding: 0, textDecoration: "underline", textUnderlineOffset: 2 }}
+                      >
+                        {a.code}
+                      </button>
+                    ) : (
+                      <span style={{ fontFamily: "monospace", color: C.accent, whiteSpace: "nowrap" }}>{a.code}</span>
+                    )}
                     <span style={{ flex: 1, minWidth: 120 }}>
                       {a.name}
                       <span style={{ color: C.dim, marginLeft: 8, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>

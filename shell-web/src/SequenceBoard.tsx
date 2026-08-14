@@ -109,6 +109,7 @@ export default function SequenceBoard({
   asOf,
   spaces,
   onOpenSpace,
+  onOpenJob,
 }: {
   identity: Identity;
   vesselId: string;
@@ -117,6 +118,8 @@ export default function SequenceBoard({
   /** Per-space verdicts at the same instant — the zone lanes' gutters read them. */
   spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
+  /** Opens the job card for a work-order code. */
+  onOpenJob: (code: string) => void;
 }) {
 
   // The day's hot-vs-flammable pairs, served — a schedule that plans flame
@@ -992,6 +995,7 @@ export default function SequenceBoard({
 
       {inspect && (
         <ActivityInspector
+              onOpenJob={onOpenJob}
           a={inspect}
           alt={altByCode.get(inspect.code)}
           altsSettled={altsSettled}

@@ -37,6 +37,7 @@ export default function WorkOrders({
   hullLabel,
   spaces,
   onOpenSpace,
+  onOpenJob,
   asOf,
 }: {
   identity: Identity;
@@ -52,6 +53,8 @@ export default function WorkOrders({
    */
   spaces: DeckStateRow[];
   onOpenSpace: (compartment: string) => void;
+  /** Opens the job card — the order's whole story in one drawer. */
+  onOpenJob: (code: string) => void;
   /** The instant the list is read at; `null` is live. */
   asOf: AsOf;
 }) {
@@ -463,7 +466,15 @@ export default function WorkOrders({
           <tbody>
             {rows.map((w) => (
               <tr key={w.work_order_id} style={{ opacity: w.in_window ? 1 : 0.62 }}>
-                <td style={{ ...td, fontFamily: "monospace", color: C.accent }}>{w.code}</td>
+                <td style={{ ...td, fontFamily: "monospace" }}>
+                  <button
+                    onClick={() => onOpenJob(w.code)}
+                    title="Open the job card — this order's plan, spaces, problems and fixes in one place"
+                    style={{ font: "inherit", cursor: "pointer", color: C.accent, background: "transparent", border: "none", padding: 0, textDecoration: "underline", textUnderlineOffset: 2 }}
+                  >
+                    {w.code}
+                  </button>
+                </td>
                 <td style={td}>
                   {w.title}
                   <div style={{ fontSize: 11, color: C.dim }}>{w.system}</div>

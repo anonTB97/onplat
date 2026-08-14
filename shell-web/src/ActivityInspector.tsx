@@ -43,6 +43,7 @@ export function ActivityInspector({
   asOf,
   onClose,
   onOpenSpace,
+  onOpenJob,
 }: {
   a: Activity;
   /** The engine's re-sequence proposal for this activity, when it is refused. */
@@ -55,6 +56,8 @@ export function ActivityInspector({
   asOf: AsOf;
   onClose: () => void;
   onOpenSpace: (compartment: string) => void;
+  /** Opens the job card for this activity's work item. */
+  onOpenJob?: (code: string) => void;
 }) {
   const [assessment, setAssessment] = useState<Assessment | null>(null);
   const [optionsError, setOptionsError] = useState(false);
@@ -173,7 +176,19 @@ export function ActivityInspector({
             </div>
             <div>
               <div style={label}>Work item</div>
-              {a.work_order_code ?? (
+              {a.work_order_code ? (
+                onOpenJob ? (
+                  <button
+                    onClick={() => onOpenJob(a.work_order_code ?? "")}
+                    title="Open the job card — the whole order this activity belongs to"
+                    style={{ font: "inherit", fontSize: "inherit", cursor: "pointer", color: C.accent, background: "transparent", border: "none", padding: 0, textDecoration: "underline", textUnderlineOffset: 2 }}
+                  >
+                    {a.work_order_code}
+                  </button>
+                ) : (
+                  a.work_order_code
+                )
+              ) : (
                 <span style={{ color: a.is_milestone ? C.dim : C.warn }}>unmapped</span>
               )}
             </div>

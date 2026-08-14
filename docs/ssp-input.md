@@ -111,7 +111,10 @@ Status vocabulary: **Implemented** (in this tree, verified), **Hybrid**
   *Verified by:* generated leak tests; `pg_rls` on live PostgreSQL;
   WADL-SA-03/04.
 - **AC-6 (Implemented).** Assignment is per hull; `GET /api/whoami` serves
-  the caller's resolved scope so the shell shows only openable doors.
+  the caller's resolved scope and trust mode, and the shell wears both in
+  its chrome — the signed-in block shows the scope the server resolved, and
+  a session admitted by the dev shim is marked with an amber `DEV ID` badge
+  so it can never pass for an authenticated one in a screenshot.
   *Verified by:* WADL-SA-06.
 - **AC-11 / AC-12 (Hybrid).** Session locking, idle timeout, and
   re-authentication are the identity terminator/broker's share, with the

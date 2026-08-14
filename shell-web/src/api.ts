@@ -64,6 +64,26 @@ export async function listVessels(id: Identity): Promise<VesselSummary[]> {
   return (await res.json()) as VesselSummary[];
 }
 
+/**
+ * The caller's identity as the SERVER resolved it — not an echo of the headers
+ * the shell sent. `identity_mode` names the trust boundary that admitted the
+ * request (`dev-headers` or `proxy-asserted`), which is how the shell can tell
+ * the operator whether they are on the development shim or behind the
+ * accredited proxy.
+ */
+export interface WhoAmI {
+  org: string;
+  assigned_vessels: string[];
+  identity_mode: string;
+  decision_support_only: boolean;
+}
+
+export async function whoami(id: Identity): Promise<WhoAmI> {
+  const res = await fetch("/api/whoami", { headers: headers(id) });
+  if (!res.ok) throw new Error(`GET /api/whoami → ${res.status}`);
+  return (await res.json()) as WhoAmI;
+}
+
 export type DecisionState = "ALLOW" | "WARN" | "BLOCK" | "SUSPEND";
 
 export interface TraceStep {

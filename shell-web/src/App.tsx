@@ -4,11 +4,13 @@ import {
   listIssues,
   listVessels,
   timeframe,
+  whoami,
   type AsOf,
   type DeckStateRow,
   type Issue,
   type Timeframe,
   type VesselSummary,
+  type WhoAmI,
 } from "./api";
 import {
   ClassificationBanner,
@@ -104,11 +106,29 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [wall, setWall] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The server-resolved identity — org, assignments, and which trust mode
+  // admitted the request. Fetched once; null renders as "identity unknown"
+  // rather than guessing from the headers the shell itself sent.
+  const [who, setWho] = useState<WhoAmI | null>(null);
 
   useEffect(() => {
     listVessels(DEMO_IDENTITY)
       .then(setVessels)
       .catch((e: unknown) => setError(String(e)));
+  }, []);
+
+  useEffect(() => {
+    let stale = false;
+    whoami(DEMO_IDENTITY)
+      .then((w) => {
+        if (!stale) setWho(w);
+      })
+      .catch(() => {
+        if (!stale) setWho(null);
+      });
+    return () => {
+      stale = true;
+    };
   }, []);
 
   // The hull's spaces, held at this level so the top bar can search and alert on
@@ -245,6 +265,7 @@ export default function App() {
         selected={selected}
         onSelectVessel={pickHull}
         hullLabel={hullLabel}
+        who={who}
         persona={persona}
         onPersona={(p) => {
           setPersona(p);

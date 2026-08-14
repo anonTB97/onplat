@@ -9,7 +9,7 @@
 // screenshot in the wrong hands or a decision taken against the wrong hull.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DeckStateRow, Issue, VesselSummary } from "./api";
+import type { DeckStateRow, Issue, VesselSummary, WhoAmI } from "./api";
 import { claim, fixSpace, KIND } from "./IssuesBoard";
 import type { Horizon } from "./TimeControl";
 import { C, mh } from "./theme";
@@ -235,6 +235,7 @@ export function TopBar({
   onJump,
   onOpenIssues,
   outOfScope,
+  who,
 }: {
   onCollapse: () => void;
   hulls: HullChoice[];
@@ -250,6 +251,8 @@ export function TopBar({
   /** Opens the Issues board (Conflicts & Risk). */
   onOpenIssues: () => void;
   outOfScope: boolean;
+  /** Server-resolved identity; null while loading or if the read failed. */
+  who: WhoAmI | null;
 }) {
   const [menu, setMenu] = useState<"context" | "persona" | "alerts" | null>(null);
   const [query, setQuery] = useState("");
@@ -485,12 +488,49 @@ export function TopBar({
             <span style={{ display: "block", fontSize: 8.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM }}>
               Persona
             </span>
-            <span style={{ display: "block", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>{persona.name}</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+              {persona.name}
+              {/* The trust boundary, worn on the sleeve: development identity
+                  is amber and says so, so a screenshot can never pass a shim
+                  session off as an authenticated one. Proxy mode shows nothing
+                  here — authenticated is the unremarkable state. */}
+              {who?.identity_mode === "dev-headers" && (
+                <span
+                  title="Development identity shim — headers trusted as given. In production this session would come through the CAC-authenticated proxy."
+                  style={{ fontSize: 8, fontWeight: 700, letterSpacing: 0.6, padding: "1.5px 5px", borderRadius: 3, color: C.warn, background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.5)" }}
+                >
+                  DEV ID
+                </span>
+              )}
+            </span>
           </span>
           <Chevron />
         </button>
         {menu === "persona" && (
           <div style={menuPanel}>
+            {/* Who the SERVER says you are — the resolved scope every query
+                actually runs under, not an echo of what the shell sent. */}
+            <div style={{ padding: "9px 12px", borderBottom: `1px solid ${LINE}` }}>
+              <div style={{ fontSize: 9.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM, marginBottom: 4 }}>
+                Signed in — as the server resolves it
+              </div>
+              {who ? (
+                <>
+                  <div style={{ fontSize: 11, color: C.bright }}>
+                    org <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>…{who.org.slice(-12)}</span>
+                    {" · "}
+                    {who.assigned_vessels.length} hull{who.assigned_vessels.length === 1 ? "" : "s"} assigned
+                  </div>
+                  <div style={{ fontSize: 10.5, marginTop: 3, color: who.identity_mode === "dev-headers" ? C.warn : C.ok }}>
+                    {who.identity_mode === "dev-headers"
+                      ? "dev header shim — identity trusted as given (development only)"
+                      : `identity ${who.identity_mode.replace(/-/g, " ")} by the authenticated proxy`}
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 11, color: DIM }}>identity unavailable — /api/whoami did not answer</div>
+              )}
+            </div>
             <div style={menuHead}>Switch persona — sets the landing altitude</div>
             {PERSONAS.map((p) => (
               <button

@@ -809,14 +809,14 @@ export async function importSchedule(
   vesselId: string,
   label: string,
   xer: string,
-): Promise<{ label: string; activities: number; edges: number }> {
+): Promise<{ label: string; activities: number; edges: number; delta: ScheduleDelta }> {
   const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record`, {
     method: "POST",
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, xer }),
   });
   if (!res.ok) throw new Error(`import → ${res.status}: ${await res.text()}`);
-  return (await res.json()) as { label: string; activities: number; edges: number };
+  return (await res.json()) as { label: string; activities: number; edges: number; delta: ScheduleDelta };
 }
 
 /**
@@ -838,12 +838,40 @@ export interface MappingReport {
 }
 
 /** Everything a schedule import would claim — the dry run and the confirm alike. */
+/** One activity named in the delta's constraint shift. */
+export interface DeltaExample {
+  code: string;
+  space: string;
+  rule: string;
+}
+
+/**
+ * What an incoming schedule CHANGES against the register currently served —
+ * counts of moved work, and the constraint shift only this platform can
+ * compute (which moves land work inside a refusal, under the same hazards
+ * and rules). Served at the import door so the consequences are on the
+ * table before Confirm; recorded in the ledger at commit.
+ */
+export interface ScheduleDelta {
+  baseline: string;
+  added: number;
+  removed: number;
+  retimed: number;
+  rehoused: number;
+  rebudgeted: number;
+  refused_before: number;
+  refused_after: number;
+  newly_refused: { count: number; examples: DeltaExample[] };
+  newly_clear: { count: number; examples: DeltaExample[] };
+}
+
 export interface ImportPreview {
   label: string;
   activities: number;
   edges: number;
   reconciliation: { mismatches: ReconciliationMismatch[]; unmapped_budget_hours: number };
   mapping: MappingReport;
+  delta: ScheduleDelta;
 }
 
 /** Dry-runs an import: everything the import would say, nothing it would do. */

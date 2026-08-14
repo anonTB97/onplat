@@ -31,7 +31,7 @@ import {
 } from "./api";
 import { DiscardButton } from "./DiscardButton";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
-import { fmtBytes, parseBudgetCsv, parseZoneCsv } from "./ingest";
+import { fmtBytes, parseBudgetCsv, parseZoneCsv, deltaSummary } from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { commitBtnStyle, C, errText, mh, msgColor } from "./theme";
@@ -92,7 +92,8 @@ export default function SourcesBoard({
             (m.unlocated.length > 0 ? ` / ${m.unlocated.length} unlocated` : "") +
             (p.reconciliation.mismatches.length > 0
               ? ` · hours disagree on ${p.reconciliation.mismatches.map((x) => x.code).join(", ")}`
-              : " · hours reconcile"),
+              : " · hours reconcile") +
+            ` — ${deltaSummary(p.delta)}`,
           commit: () =>
             importSchedule(identity, vesselId, file.name, xer).then(
               (r) => `✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`,

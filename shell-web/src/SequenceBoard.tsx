@@ -41,6 +41,7 @@ import { ModuleHeader } from "./ModuleHeader";
 import { ZoneLanes } from "./ZoneLanes";
 import { tdStyle, thStyle, chipStyle, commitBtnStyle, C, errText, mh, msgColor } from "./theme";
 import { DiscardButton } from "./DiscardButton";
+import { deltaSummary } from "./ingest";
 
 type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
 
@@ -529,6 +530,9 @@ export default function SequenceBoard({
               <span style={{ fontSize: 11.5, color: C.dim }}>
                 {p.activities} activities · {p.edges} edges · {m.milestones} key events — previewed,
                 nothing stored.{" "}
+                <span style={{ color: p.delta.newly_refused.count > 0 ? C.warn : C.ok }}>
+                  {deltaSummary(p.delta)}.
+                </span>{" "}
                 <b style={{ color: C.warn }}>
                   Confirm replaces the current register ({activities.length} activities) on every screen.
                 </b>

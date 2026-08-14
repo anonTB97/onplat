@@ -44,3 +44,31 @@ export function parseBudgetCsv(text: string): BudgetItem[] {
  *  deserves to see that the door knows it. */
 export const fmtBytes = (n: number): string =>
   n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : `${Math.max(1, Math.ceil(n / 1024))} KB`;
+
+/** The re-import delta, as one sentence a planner reads before Confirm. */
+export function deltaSummary(d: {
+  baseline: string;
+  added: number;
+  removed: number;
+  retimed: number;
+  rehoused: number;
+  newly_refused: { count: number; examples: { code: string; space: string; rule: string }[] };
+  newly_clear: { count: number };
+}): string {
+  const moves = [
+    d.added > 0 ? `+${d.added} new` : null,
+    d.removed > 0 ? `−${d.removed} gone` : null,
+    d.retimed > 0 ? `${d.retimed} retimed` : null,
+    d.rehoused > 0 ? `${d.rehoused} moved space` : null,
+  ].filter(Boolean).join(" · ");
+  const ex = d.newly_refused.examples
+    .slice(0, 3)
+    .map((e) => `${e.code}${e.space ? ` in ${e.space}` : ""} by ${e.rule}`)
+    .join(", ");
+  const shift =
+    d.newly_refused.count > 0
+      ? `⚠ ${d.newly_refused.count} newly NOT executable (${ex}${d.newly_refused.count > 3 ? ", …" : ""})`
+      : "no work moved into a refusal";
+  const clears = d.newly_clear.count > 0 ? ` · ${d.newly_clear.count} refusal${d.newly_clear.count === 1 ? "" : "s"} cleared` : "";
+  return `vs ${d.baseline}: ${moves || "no rows changed"} — ${shift}${clears}`;
+}

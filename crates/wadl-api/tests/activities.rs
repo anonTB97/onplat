@@ -642,3 +642,95 @@ async fn an_alien_file_is_refused_not_previewed() {
     assert!(detail.contains("no activities"), "{detail}");
     assert!(detail.contains("P6 XER"), "{detail}");
 }
+
+/// The import door answers "what does this reissue change" BEFORE Confirm,
+/// and the commit leaves a chained ledger record of the answer. First import:
+/// everything differs from the generated register. Re-import of the same
+/// file: a delta of zeroes — the door can tell "new baseline" from "no-op".
+#[tokio::test]
+async fn the_reimport_delta_is_served_and_ledgered() {
+    let (app, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let hull = w.cvn73.as_uuid().to_string();
+    let body = serde_json::json!({ "label": "CVN73-PIA26.xer", "xer": SAMPLE_XER }).to_string();
+
+    let post = |dry: bool, body: String| {
+        let uri = format!(
+            "/api/vessels/{hull}/schedule-of-record{}",
+            if dry { "?dry_run=true" } else { "" }
+        );
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("x-org-id", &org)
+            .header("x-assigned-vessels", &hull)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+
+    // Dry run against the generated register: the whole file is new, the
+    // whole register would go, and the answer names its baseline.
+    let res = app.clone().oneshot(post(true, body.clone())).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let d = &v["delta"];
+    assert_eq!(d["baseline"], "the generated demo register");
+    assert!(d["added"].as_u64().unwrap() > 0, "{d}");
+    assert!(d["removed"].as_u64().unwrap() > 0, "{d}");
+
+    // Commit, then dry-run the SAME file: a delta of zero movement.
+    let res = app
+        .clone()
+        .oneshot(post(false, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.clone().oneshot(post(true, body)).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let d = &v["delta"];
+    assert_eq!(d["baseline"], "CVN73-PIA26.xer");
+    assert_eq!(d["added"], 0, "{d}");
+    assert_eq!(d["removed"], 0, "{d}");
+    assert_eq!(d["retimed"], 0, "{d}");
+    assert_eq!(d["newly_refused"]["count"], 0, "{d}");
+
+    // The commit is on the ledger, delta and all.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/vessels/{hull}/ledger"))
+                .header("x-org-id", &org)
+                .header("x-assigned-vessels", &hull)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let entries = v["entries"].as_array().unwrap();
+    let replaced = entries
+        .iter()
+        .find(|e| e["action"] == "SCHEDULE_REPLACED")
+        .expect("SCHEDULE_REPLACED on the ledger");
+    assert!(
+        replaced["detail"].as_str().unwrap().contains("\"delta\""),
+        "the ledger record carries the delta"
+    );
+}

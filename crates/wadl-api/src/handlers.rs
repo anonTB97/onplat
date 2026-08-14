@@ -1299,6 +1299,126 @@ pub(crate) async fn acknowledge_issue(
     Ok(Json(json!({ "recorded": record })))
 }
 
+/// The re-import delta: what an incoming schedule changes against the
+/// register currently served — the question a weekly re-baseline actually
+/// raises. P6's own compare tools can say which dates moved; only this
+/// platform can say which moves land work inside a constraint, because that
+/// answer takes the coupling graph, the live hazards and the rules in force —
+/// none of which are in the file. Computed at the import door so the
+/// consequences are on the table BEFORE Confirm, and recorded in the ledger
+/// at commit so "what did the week-34 reissue change" stays answerable.
+async fn schedule_delta(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    incoming: &[wadl_store::model::ActivitySummary],
+) -> Result<Value, ApiError> {
+    use std::collections::{BTreeMap, BTreeSet};
+    const EXAMPLES: usize = 6;
+    let current = state.store.list_activities(scope, vessel).await?;
+    let baseline = state
+        .store
+        .schedule_source(scope, vessel)
+        .await?
+        .unwrap_or_else(|| "the generated demo register".to_owned());
+
+    let old: BTreeMap<&str, &wadl_store::model::ActivitySummary> =
+        current.iter().map(|a| (a.code.as_str(), a)).collect();
+    let new: BTreeMap<&str, &wadl_store::model::ActivitySummary> =
+        incoming.iter().map(|a| (a.code.as_str(), a)).collect();
+
+    let mut added = 0usize;
+    let mut retimed = 0usize;
+    let mut rehoused = 0usize;
+    let mut rebudgeted = 0usize;
+    for (code, a) in &new {
+        match old.get(code) {
+            None => added += 1,
+            Some(o) => {
+                if o.planned != a.planned {
+                    retimed += 1;
+                }
+                if o.compartment_no != a.compartment_no {
+                    rehoused += 1;
+                }
+                if o.budget_hours != a.budget_hours {
+                    rebudgeted += 1;
+                }
+            }
+        }
+    }
+    let removed = old.keys().filter(|c| !new.contains_key(*c)).count();
+
+    // The constraint half: executability under the SAME hull inputs, before
+    // and after — so any shift is the schedule's doing, not the hazards'.
+    let graph = state.store.adjacency_graph(scope, vessel).await?;
+    let hazards = state.store.live_hazards(scope, vessel).await?;
+    let rules = state.store.rules_in_force(scope, vessel).await?;
+    let hull = wadl_issues::Hull {
+        graph: &graph,
+        rules: &rules,
+        hazards: &hazards,
+    };
+    let refused =
+        |acts: &[wadl_store::model::ActivitySummary]| -> BTreeMap<String, (String, String)> {
+            acts.iter()
+                .filter(|a| !a.is_milestone)
+                .filter_map(|a| {
+                    match wadl_issues::executability(&hull, a.compartment_no.as_ref(), a.planned) {
+                        wadl_issues::Executability::NotExecutable(r) => Some((
+                            a.code.clone(),
+                            (
+                                a.compartment_no
+                                    .as_ref()
+                                    .map_or_else(String::new, |c| c.as_str().to_owned()),
+                                r.rule_code,
+                            ),
+                        )),
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+    let before = refused(&current);
+    let after = refused(incoming);
+    let before_keys: BTreeSet<&String> = before.keys().collect();
+    let after_keys: BTreeSet<&String> = after.keys().collect();
+
+    let newly_refused: Vec<Value> = after
+        .iter()
+        .filter(|(code, _)| !before_keys.contains(code))
+        .take(EXAMPLES)
+        .map(|(code, (space, rule))| json!({ "code": code, "space": space, "rule": rule }))
+        .collect();
+    let newly_refused_count = after_keys.difference(&before_keys).count();
+    // Cleared = was refused, still present, no longer refused. A refusal that
+    // vanished because its activity was deleted is the `removed` column's
+    // story, not a constraint clearing.
+    let newly_clear: Vec<Value> = before
+        .iter()
+        .filter(|(code, _)| !after_keys.contains(code) && new.contains_key(code.as_str()))
+        .take(EXAMPLES)
+        .map(|(code, (space, rule))| json!({ "code": code, "space": space, "rule": rule }))
+        .collect();
+    let newly_clear_count = before
+        .keys()
+        .filter(|code| !after_keys.contains(code) && new.contains_key(code.as_str()))
+        .count();
+
+    Ok(json!({
+        "baseline": baseline,
+        "added": added,
+        "removed": removed,
+        "retimed": retimed,
+        "rehoused": rehoused,
+        "rebudgeted": rebudgeted,
+        "refused_before": before.len(),
+        "refused_after": after.len(),
+        "newly_refused": { "count": newly_refused_count, "examples": newly_refused },
+        "newly_clear": { "count": newly_clear_count, "examples": newly_clear },
+    }))
+}
+
 /// The import half of the schedule-of-record area: a P6 XER export, posted as
 /// text, becomes the hull's served register.
 ///
@@ -1338,6 +1458,7 @@ pub(crate) async fn import_schedule(
     let reconciliation = reconcile(&state, &scope, vessel, &sor.activities).await?;
     let compartments = state.store.list_compartments(&scope, vessel).await?;
     let mapping = mapping_report(&sor.activities, &compartments);
+    let delta = schedule_delta(&state, &scope, vessel, &sor.activities).await?;
     if dry.dry_run.unwrap_or(false) {
         return Ok(Json(json!({
             "dry_run": true,
@@ -1346,11 +1467,33 @@ pub(crate) async fn import_schedule(
             "edges": edges,
             "reconciliation": reconciliation,
             "mapping": mapping,
+            "delta": delta,
         })));
     }
     state
         .store
         .set_schedule_of_record(&scope, vessel, sor)
+        .await?;
+    // The reissue's record: what replaced what, and what the replacement did
+    // to the constraints — hash-chained, so the answer to "what did that
+    // re-baseline change" cannot be quietly rewritten later.
+    let detail = serde_json::to_string(&json!({
+        "label": body.label,
+        "activities": activities,
+        "edges": edges,
+        "delta": delta,
+    }))
+    .unwrap_or_else(|_| format!("{{\"label\":\"{}\"}}", body.label));
+    state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "SCHEDULE_REPLACED",
+            &detail,
+            None,
+            state.clock.now().epoch_millis(),
+        )
         .await?;
     Ok(Json(json!({
         "label": body.label,
@@ -1358,6 +1501,7 @@ pub(crate) async fn import_schedule(
         "edges": edges,
         "reconciliation": reconciliation,
         "mapping": mapping,
+        "delta": delta,
     })))
 }
 

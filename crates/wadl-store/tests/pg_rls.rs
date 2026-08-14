@@ -33,6 +33,7 @@
     clippy::panic
 )]
 
+use sqlx::Row as _;
 use uuid::Uuid;
 use wadl_domain::ids::{OrgId, VesselId};
 use wadl_store::pg::PgStore;
@@ -458,4 +459,106 @@ async fn the_ledger_chains_and_filters_in_postgres() {
             .await,
         Err(StoreError::NotFound)
     ));
+}
+
+#[tokio::test]
+async fn a_clearance_closes_the_row_and_respects_both_gates() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN71);
+
+    // A transient hazard on CVN-71, so this test's mutation is disjoint from
+    // the CVN-73 facts the other tests read. Inserted as the migration owner
+    // (this pool), which bypasses RLS the same way the seed does.
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM hazard WHERE vessel_id = $1 AND compartment_no = '2-100-0-E'")
+        .bind(Uuid::from_u128(CVN71))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO hazard (org_id, vessel_id, compartment_no, kind, raised_at, label)
+         VALUES ($1, $2, '2-100-0-E', 'hot_work_live', now(), 'transient test hazard')",
+    )
+    .bind(Uuid::from_u128(YARD_ORG))
+    .bind(Uuid::from_u128(CVN71))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Another tenant cannot clear it — the hull itself is not-found.
+    let foreign = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store
+            .clear_hazard(
+                &foreign,
+                hull,
+                "2-100-0-E",
+                wadl_engine::HazardKind::HotWorkLive,
+                "x",
+                0
+            )
+            .await,
+        Err(StoreError::NotFound)
+    ));
+
+    // The owning scope clears it: served live before, closed after, and the
+    // row keeps when and why (0012's pairing constraint holds them together).
+    let before = store.live_hazards(&scope, hull).await.unwrap();
+    assert!(before.iter().any(|h| h.origin.as_str() == "2-100-0-E"));
+    let cleared = store
+        .clear_hazard(
+            &scope,
+            hull,
+            "2-100-0-E",
+            wadl_engine::HazardKind::HotWorkLive,
+            "tags verified by test",
+            1_778_649_300_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.len(), 1);
+    assert_eq!(
+        cleared.first().map(|h| h.label.as_str()),
+        Some("transient test hazard")
+    );
+    let after = store.live_hazards(&scope, hull).await.unwrap();
+    assert!(!after.iter().any(|h| h.origin.as_str() == "2-100-0-E"));
+
+    // A repeat clearance matches nothing — closure is not restampable.
+    let again = store
+        .clear_hazard(
+            &scope,
+            hull,
+            "2-100-0-E",
+            wadl_engine::HazardKind::HotWorkLive,
+            "double click",
+            1_778_649_300_001,
+        )
+        .await
+        .unwrap();
+    assert!(again.is_empty());
+
+    // The closed row still exists with its basis — closure, not deletion.
+    let row = sqlx::query(
+        "SELECT cleared_basis FROM hazard
+          WHERE vessel_id = $1 AND compartment_no = '2-100-0-E'",
+    )
+    .bind(Uuid::from_u128(CVN71))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.get::<Option<String>, _>("cleared_basis").as_deref(),
+        Some("tags verified by test")
+    );
+
+    // Leave nothing behind for other runs.
+    sqlx::query("DELETE FROM hazard WHERE vessel_id = $1 AND compartment_no = '2-100-0-E'")
+        .bind(Uuid::from_u128(CVN71))
+        .execute(&pool)
+        .await
+        .unwrap();
 }

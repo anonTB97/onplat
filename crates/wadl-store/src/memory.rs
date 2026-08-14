@@ -311,6 +311,19 @@ pub struct InMemoryStore {
     /// An ingested budget book per hull. When present, reconciliation holds
     /// the register's hours to ITS budgets instead of the seeded work items'.
     budget_book: std::sync::RwLock<BTreeMap<VesselId, BudgetBook>>,
+    /// Administrative clearances recorded against the seeded hazards, keyed by
+    /// what the API clears with: hull, origin space, hazard kind. The seed rows
+    /// stay immutable — a clearance is a second fact laid over the first, which
+    /// is the same shape the PostgreSQL store gives it (`cleared_at` set,
+    /// nothing deleted). A `Vec` because the whole hull carries a handful.
+    cleared_hazards: std::sync::Mutex<Vec<HazardClearance>>,
+}
+
+/// One recorded administrative clearance (see [`InMemoryStore::cleared_hazards`]).
+struct HazardClearance {
+    vessel: VesselId,
+    origin: String,
+    kind: HazardKind,
 }
 
 /// An ingested schedule of record, in the store's own read models.
@@ -451,6 +464,7 @@ impl InMemoryStore {
             schedule_of_record: std::sync::RwLock::new(BTreeMap::new()),
             zone_register: std::sync::RwLock::new(BTreeMap::new()),
             budget_book: std::sync::RwLock::new(BTreeMap::new()),
+            cleared_hazards: std::sync::Mutex::new(Vec::new()),
         };
         (store, world)
     }
@@ -1937,10 +1951,22 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<Vec<Hazard>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
+        // Same read contract as the PostgreSQL store's `WHERE cleared_at IS
+        // NULL`: an administratively cleared hazard stops being served, and
+        // its record lives on in the clearance list and the ledger.
+        let cleared = self
+            .cleared_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
         Ok(self
             .hazards
             .iter()
             .filter(|h| h.vessel == vessel)
+            .filter(|h| {
+                !cleared
+                    .iter()
+                    .any(|c| c.vessel == h.vessel && c.origin == h.origin && c.kind == h.kind)
+            })
             .map(|h| Hazard {
                 origin: CompartmentNo::new(h.origin),
                 kind: h.kind,
@@ -1948,6 +1974,49 @@ impl Repositories for InMemoryStore {
                 label: h.label.to_owned(),
             })
             .collect())
+    }
+
+    async fn clear_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: HazardKind,
+        _basis: &str,
+        _cleared_at_ms: i64,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        // The basis and instant are recorded by the caller's ledger entry;
+        // this store only needs to stop serving the hazard. The PostgreSQL
+        // store additionally stamps them onto the row (`cleared_basis`).
+        let mut cleared = self
+            .cleared_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
+        let closing: Vec<Hazard> = self
+            .hazards
+            .iter()
+            .filter(|h| h.vessel == vessel && h.origin == compartment && h.kind == kind)
+            .filter(|h| {
+                !cleared
+                    .iter()
+                    .any(|c| c.vessel == h.vessel && c.origin == h.origin && c.kind == h.kind)
+            })
+            .map(|h| Hazard {
+                origin: CompartmentNo::new(h.origin),
+                kind: h.kind,
+                since: self.at_minutes(h.since_min),
+                label: h.label.to_owned(),
+            })
+            .collect();
+        if !closing.is_empty() {
+            cleared.push(HazardClearance {
+                vessel,
+                origin: compartment.to_owned(),
+                kind,
+            });
+        }
+        Ok(closing)
     }
 
     async fn rules_in_force(

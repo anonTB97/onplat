@@ -232,6 +232,30 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<Vec<Hazard>, StoreError>;
 
+    /// Administratively clears the live hazards of `kind` originating in
+    /// `compartment` — the recorded fact verified ended by its clearing
+    /// authority ("tags hung, zero energy confirmed"), as distinct from a
+    /// rule's hold expiring on its own clock. Returns the hazards actually
+    /// closed, as they were, for the caller's ledger entry; an empty return
+    /// means nothing matched and the caller should say so rather than record
+    /// a clearance of nothing.
+    ///
+    /// Closure, not deletion: implementations mark the hazard cleared (the
+    /// PostgreSQL store sets `cleared_at`/`cleared_basis`; nothing is
+    /// deleted) and every live-hazard read stops serving it.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: wadl_engine::HazardKind,
+        basis: &str,
+        cleared_at_ms: i64,
+    ) -> Result<Vec<Hazard>, StoreError>;
+
     /// The rules in force for the hull at the evaluation instant. Rules are
     /// versioned data (ADR 0002); the engine is handed them, never hard-codes
     /// them.

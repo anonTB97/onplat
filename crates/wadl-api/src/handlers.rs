@@ -1299,6 +1299,105 @@ pub(crate) async fn acknowledge_issue(
     Ok(Json(json!({ "recorded": record })))
 }
 
+/// The live hazards on a hull — the recorded field conditions the engine
+/// evaluates, served raw so the surface can show WHAT is shut (the fact)
+/// alongside the trace's WHY (the consequences). Each carries its origin
+/// space, kind, when it was raised, and its label.
+pub(crate) async fn list_hazards(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    Ok(Json(json!({ "hazards": hazards })))
+}
+
+/// An administrative clearance, as posted: which recorded fact is verified
+/// ended, and on what basis.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ClearHazardBody {
+    /// The hazard's origin space.
+    compartment: String,
+    /// The hazard kind, in the engine's serde names (`energised_bus`, …).
+    kind: wadl_engine::HazardKind,
+    /// What was verified and by whom — "tags hung, zero energy confirmed by
+    /// shift electrician". Required: a clearance without its basis is a
+    /// silent delete.
+    basis: String,
+}
+
+/// Administratively clears a hazard: the crew verified the field condition
+/// ended (tags hung, gas-free sighted), someone with the authority records
+/// that here, and every verdict the hazard was driving re-derives clean on
+/// the next read — same space, coupled spaces, refused activities alike.
+/// That cascade is not this handler's doing: verdicts are computed from live
+/// hazards on every read, so ending the fact IS the cascade.
+///
+/// The clearance happens at the wall clock, not the scrubbed instant — it is
+/// a real recorded event, and it lands in the ledger (`HAZARD_CLEARED`,
+/// basis in the hashed detail) before the response returns.
+pub(crate) async fn clear_hazard(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<ClearHazardBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    // Scope first, body second: a foreign hull is not-found before a malformed
+    // body can say anything else (see `record_decision`).
+    state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let basis = body.basis.trim();
+    if basis.is_empty() {
+        return Err(ApiError::OutOfRange(
+            "a clearance needs its basis — what was verified, and by whom. \
+             Without it this would be a silent delete, not a record."
+                .to_owned(),
+        ));
+    }
+
+    let now_ms = state.clock.now().epoch_millis();
+    let cleared = state
+        .store
+        .clear_hazard(&scope, vessel, &body.compartment, body.kind, basis, now_ms)
+        .await?;
+    if cleared.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "no live {} hazard originates in {} — either it was already \
+             cleared, or the fact was never recorded here",
+            json!(body.kind).as_str().unwrap_or("?"),
+            body.compartment,
+        )));
+    }
+
+    let detail = json!({
+        "compartment": body.compartment,
+        "kind": body.kind,
+        "basis": basis,
+        "cleared": cleared.iter().map(|h| h.label.clone()).collect::<Vec<_>>(),
+        "cleared_by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "HAZARD_CLEARED",
+            &detail,
+            Some(&body.compartment),
+            now_ms,
+        )
+        .await?;
+    Ok(Json(json!({ "cleared": cleared, "recorded": record })))
+}
+
 /// The re-import delta: what an incoming schedule changes against the
 /// register currently served — the question a weekly re-baseline actually
 /// raises. P6's own compare tools can say which dates moved; only this

@@ -482,6 +482,18 @@ fn hazard_kind(raw: &str) -> Result<HazardKind, StoreError> {
     }
 }
 
+/// A hazard kind's stored name — the inverse of [`hazard_kind`], kept beside
+/// it so the pair diverging is visible in one screenful.
+const fn kind_name(kind: HazardKind) -> &'static str {
+    match kind {
+        HazardKind::CoatingOpen => "coating_open",
+        HazardKind::HotWorkLive => "hot_work_live",
+        HazardKind::EnergisedBus => "energised_bus",
+        HazardKind::FlammableStow => "flammable_stow",
+        HazardKind::StopWork => "stop_work",
+    }
+}
+
 impl PgStore {
     /// One ingested document for a hull, already scope-gated by the caller.
     async fn document(
@@ -1049,6 +1061,50 @@ impl Repositories for PgStore {
               ORDER BY raised_at",
         )
         .bind(vessel.as_uuid())
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(Hazard {
+                    origin: CompartmentNo::new(row.get::<String, _>("compartment_no")),
+                    kind: hazard_kind(&row.get::<String, _>("kind"))?,
+                    since: ts(row.get("raised_at")),
+                    label: row.get("label"),
+                })
+            })
+            .collect()
+    }
+
+    async fn clear_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: HazardKind,
+        basis: &str,
+        cleared_at_ms: i64,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        // Closure, not deletion (0011's contract): the row keeps its identity
+        // and gains when and on what basis its clearing authority ended it
+        // (0012). The `cleared_at IS NULL` guard makes a repeat clear return
+        // nothing rather than restamp history.
+        let cleared_at = chrono::DateTime::from_timestamp_millis(cleared_at_ms)
+            .ok_or_else(|| StoreError::Backend("cleared_at out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "UPDATE hazard
+                SET cleared_at = $4, cleared_basis = $5
+              WHERE vessel_id = $1 AND compartment_no = $2 AND kind = $3
+                AND cleared_at IS NULL
+              RETURNING compartment_no, kind, raised_at, label",
+        )
+        .bind(vessel.as_uuid())
+        .bind(compartment)
+        .bind(kind_name(kind))
+        .bind(cleared_at)
+        .bind(basis)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;

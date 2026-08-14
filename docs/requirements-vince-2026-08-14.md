@@ -71,7 +71,7 @@ blockers" rollup.
 
 ## 2. Clearing constraints — the core loop
 
-### VR-05 — Administrative clear, ledgered (New — top priority)
+### VR-05 — Administrative clear, ledgered (Implemented 2026-08-14)
 > "Get the tags hung, come back and tell me they're hung. We'll
 > administratively remove that. But if hot work is live, soon as you guys
 > are done, that's going to clear." (3:23)
@@ -82,7 +82,7 @@ basis). Constraints backed by a live feed clear themselves when the feed
 says done. Nothing today lets a user resolve a hazard — this is the missing
 leg of the morning-meeting loop.
 
-### VR-06 — A clear must cascade, visibly and immediately (New)
+### VR-06 — A clear must cascade, visibly and immediately (Implemented 2026-08-14)
 > "When we clear that red X, does that clear all the other red?" (3:38)
 
 Clearing one constraint re-evaluates everything it was refusing — same
@@ -91,7 +91,7 @@ activities — and the screen flips within one refresh. The engine already
 recomputes verdicts on every read; what's missing is the clear action and
 the guarantee the user *sees* the flip (see DEF-1).
 
-### VR-07 — Drill until the path is clear (Supported once VR-05 exists)
+### VR-07 — Drill until the path is clear (Implemented 2026-08-14)
 > "If there's other pink or red, I'd go OK, what's that? Why is that red?
 > We would just drill down until we cleared the path to go back to work." (4:10)
 
@@ -295,7 +295,7 @@ integration problem restated.
 
 ## Defect observed live
 
-### DEF-1 — A clear that doesn't clear (from 3:47)
+### DEF-1 — A clear that doesn't clear (from 3:47) — CLOSED
 During the session, clearing the red X on `3-148-2-E` was acknowledged
 ("accepted") but the space stayed red. Whatever the click did, the screen
 must never accept a clear and keep showing the old verdict. Acceptance
@@ -303,13 +303,20 @@ criteria: an administrative clear (VR-05) flips every marker that hazard was
 refusing within one refresh, and the ledger shows the clear entry. This is
 the concrete test case for VR-05 + VR-06.
 
+Closed 2026-08-14: `POST /api/vessels/:id/hazards/clear` closes the fact
+(`cleared_at`/`cleared_basis`, nothing deleted), appends `HAZARD_CLEARED` to
+the ledger, and the Deck Explorer's trace panel carries the clear action on
+the hazard itself — basis required, every read refetched on success.
+`crates/wadl-api/tests/clear_loop.rs` holds the scenario, including the
+cross-space cascade, and the demo moment is re-runnable live: `3-148-2-E`
+goes BLOCK → ALLOW on the clearance, options and refusal counts moving in
+the same refresh.
+
 ---
 
 ## Recommended order of work
 
-1. **The clear loop** — DEF-1, VR-05, VR-06, VR-07. The morning meeting is
-   the tool's daily reason to exist and it cannot complete without a clear
-   action.
+1. **The clear loop** — DEF-1, VR-05, VR-06, VR-07. ✅ Done 2026-08-14.
 2. **Give nobody away** — VR-08. Turns every blocked constraint into
    redeployment instead of dead time; the data is already served.
 3. **Emergent work** — VR-14, VR-15, VR-16. Persistent NEW badges, put-back

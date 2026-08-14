@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { clampZoom, planZoomAt, sheetZoomAt, wheelFactor } from "./camera";
 import {
+  clearHazard,
   compartmentState,
   deckStates,
   getZoneChart,
   importZoneChart,
   listActivities,
   listDecks,
+  listHazards,
   readiness,
   revertZoneChart,
   type Activity,
@@ -15,6 +17,7 @@ import {
   type DeckStateRow,
   type Decision,
   type Identity,
+  type LiveHazard,
   type Rollup,
   type ZoneBound,
   type ZoneChart,
@@ -126,6 +129,7 @@ export default function DeckExplorer({
   asOf,
   horizon,
   now,
+  onMutated,
 }: {
   identity: Identity;
   vesselId: string;
@@ -153,6 +157,9 @@ export default function DeckExplorer({
   horizon: Horizon;
   /** The server's now, for the live (asOf = null) case. */
   now: number | null;
+  /** Something on this screen changed the hull's served facts (an
+   *  administrative clearance) — the shell should refetch what it shares. */
+  onMutated?: () => void;
 }) {
   const [decks, setDecks] = useState<Deck[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
@@ -161,6 +168,12 @@ export default function DeckExplorer({
   const [selectedDeck, setSelectedDeck] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [decision, setDecision] = useState<Decision | null>(null);
+  // The raw live facts, joined to the trace so a refusing step can carry the
+  // clear action for the hazard behind it. Bumping `epoch` refetches every
+  // read on this screen — how a clearance's cascade becomes visible without
+  // waiting for the next scrub.
+  const [hazards, setHazards] = useState<LiveHazard[]>([]);
+  const [epoch, setEpoch] = useState(0);
   // Two error slots, because the two fetches fail for different reasons and need
   // different words. The register is scope-gated: failing it means this hull is
   // not yours. The states are instant-gated too: failing those can just mean the
@@ -295,7 +308,12 @@ export default function DeckExplorer({
     listActivities(identity, vesselId, asOf)
       .then((r) => setActivities(r.activities))
       .catch(() => setActivities([]));
-  }, [identity, vesselId, asOf]);
+    // The live facts are not instant-scoped: a hazard is on the hull or it is
+    // not. (History lives in the ledger, not this list.)
+    listHazards(identity, vesselId)
+      .then(setHazards)
+      .catch(() => setHazards([]));
+  }, [identity, vesselId, asOf, epoch]);
 
   // The reading window: from the instant, one horizon forward. This is what
   // makes Shift / Week / Month change what this screen SAYS, not merely how
@@ -318,7 +336,7 @@ export default function DeckExplorer({
     return () => {
       stale = true;
     };
-  }, [identity, vesselId, asOf]);
+  }, [identity, vesselId, asOf, epoch]);
 
   const winStart = asOf ?? now ?? 0;
   const horizonSpan = HORIZONS[horizon].span;
@@ -350,7 +368,7 @@ export default function DeckExplorer({
     compartmentState(identity, vesselId, selected, asOf)
       .then((r) => setDecision(r.decision))
       .catch(() => setDecision(null));
-  }, [identity, vesselId, selected, asOf]);
+  }, [identity, vesselId, selected, asOf, epoch]);
 
   // A compartment handed in by the chrome — the global search or an alert. Doing
   // this here rather than in the shell keeps one place that knows a compartment's
@@ -373,6 +391,14 @@ export default function DeckExplorer({
     // The callback identity is the shell's concern, not a reason to re-report.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
+
+  // A clearance changed the hull's facts: refetch everything on this screen,
+  // and tell the shell so its shared reads (top-bar rows, the alert bell)
+  // move in the same breath. VR-06: the flip must be one refresh, not a scrub.
+  const handleCleared = () => {
+    setEpoch((n) => n + 1);
+    onMutated?.();
+  };
 
   // Esc backs out one layer at a time: the drawer first, then full screen.
   // Expected of anything that takes over the viewport, and the only way out if
@@ -1113,6 +1139,9 @@ export default function DeckExplorer({
               reveal={revealNonce}
               spaceLoad={spaceLoad}
               horizonLabel={HORIZONS[horizon].label.toLowerCase()}
+              hazards={hazards}
+              onCleared={handleCleared}
+              epoch={epoch}
             />
           </aside>
         )}
@@ -1161,6 +1190,9 @@ export default function DeckExplorer({
               reveal={revealNonce}
               spaceLoad={spaceLoad}
               horizonLabel={HORIZONS[horizon].label.toLowerCase()}
+              hazards={hazards}
+              onCleared={handleCleared}
+              epoch={epoch}
             />
           </div>
         )}
@@ -1169,6 +1201,126 @@ export default function DeckExplorer({
   );
 }
 
+
+/**
+ * The administrative clearance, where the refusal is (VR-05).
+ *
+ * The crew verifies the field condition ended — tag-out log sighted, gas-free
+ * certificate in hand — and the manager records that here with its basis. The
+ * server closes the fact, writes `HAZARD_CLEARED` to the ledger, and every
+ * verdict it was driving re-derives on the refetch this triggers. Live-fed
+ * conditions (hot work in progress) end themselves; this door is for the ones
+ * that end on a person's verification.
+ */
+function ClearControl({
+  identity, vesselId, hazard, onCleared,
+}: {
+  identity: Identity;
+  vesselId: string;
+  hazard: LiveHazard;
+  onCleared: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [basis, setBasis] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = () => {
+    if (busy || basis.trim().length === 0) return;
+    setBusy(true);
+    setError(null);
+    clearHazard(identity, vesselId, {
+      compartment: hazard.origin,
+      kind: hazard.kind,
+      basis: basis.trim(),
+    })
+      .then(() => {
+        // No local repaint: the fact is closed server-side and the refetch
+        // re-derives every verdict it was driving. Painting green here and
+        // being contradicted by the server is exactly DEF-1.
+        onCleared();
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+      });
+  };
+
+  return (
+    <div style={{ marginTop: 8, border: `1px solid ${LINE}`, borderRadius: 6, padding: "8px 10px" }}>
+      <div style={{ fontSize: 12, color: C.bright }}>{hazard.label}</div>
+      <div style={{ fontSize: 11, color: DIM, marginTop: 2 }}>
+        <span style={{ fontFamily: "monospace" }}>{hazard.origin}</span> · raised {fmtDate(hazard.since)}
+      </div>
+      {!open && (
+        <button
+          onClick={() => setOpen(true)}
+          style={{
+            marginTop: 6, font: "inherit", fontSize: 11.5, cursor: "pointer",
+            background: "transparent", color: C.accent, border: `1px solid ${LINE}`,
+            borderRadius: 5, padding: "3px 9px",
+          }}
+        >
+          Record administrative clearance…
+        </button>
+      )}
+      {open && (
+        <div style={{ marginTop: 7 }}>
+          <div style={{ fontSize: 11, color: DIM, lineHeight: 1.45 }}>
+            Only once the field condition is verified ended — tag-out log sighted,
+            gas-free certificate in hand. This writes a ledger entry with your
+            basis, and every space this fact is holding re-derives immediately.
+          </div>
+          <input
+            value={basis}
+            onChange={(e) => setBasis(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            placeholder="Basis — what was verified, and by whom"
+            autoFocus
+            style={{
+              marginTop: 6, width: "100%", boxSizing: "border-box", font: "inherit",
+              fontSize: 12, padding: "5px 8px", background: "#0d0e11", color: C.bright,
+              border: `1px solid ${LINE}`, borderRadius: 5,
+            }}
+          />
+          <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={submit}
+              disabled={busy || basis.trim().length === 0}
+              style={{
+                font: "inherit", fontSize: 11.5, fontWeight: 700,
+                cursor: busy || basis.trim().length === 0 ? "default" : "pointer",
+                background: basis.trim().length === 0 ? "transparent" : "#173322",
+                color: basis.trim().length === 0 ? DIM : "#4ade80",
+                border: `1px solid ${basis.trim().length === 0 ? LINE : "#2c5c3c"}`,
+                borderRadius: 5, padding: "3px 10px",
+              }}
+            >
+              {busy ? "Recording…" : "Clear — write the ledger entry"}
+            </button>
+            <button
+              onClick={() => {
+                setOpen(false);
+                setError(null);
+              }}
+              style={{
+                font: "inherit", fontSize: 11.5, cursor: "pointer", background: "transparent",
+                color: DIM, border: `1px solid ${LINE}`, borderRadius: 5, padding: "3px 9px",
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {error && (
+            <div style={{ marginTop: 6, fontSize: 11.5, color: C.danger }}>{error}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * The decision trace and its options — why the space is in its state, and what
@@ -1180,7 +1332,7 @@ export default function DeckExplorer({
  */
 function TracePanel({
   row, decision, asOf, identity, vesselId, rows, onOpenSpace, reveal,
-  spaceLoad, horizonLabel,
+  spaceLoad, horizonLabel, hazards, onCleared, epoch,
 }: {
   row: DeckStateRow | null;
   decision: Decision | null;
@@ -1193,6 +1345,13 @@ function TracePanel({
   /** Scheduled load per space inside the reading window. */
   spaceLoad: Map<string, SpaceLoad>;
   horizonLabel: string;
+  /** The hull's live recorded facts, for the clear affordance. */
+  hazards: LiveHazard[];
+  /** A clearance was recorded — refetch, the verdicts have moved. */
+  onCleared: () => void;
+  /** Bumped per mutation; keys the options panel so its proposals re-derive
+   *  too — an options card still offering to clear a cleared bus is stale. */
+  epoch: number;
 }) {
   return (
     <>
@@ -1296,12 +1455,42 @@ function TracePanel({
                     </div>
                   );
                 })}
+                {/* The facts behind the trace, with the clear action. The trace
+                    above answers WHY the space is shut; each entry here is the
+                    ONE recorded fact driving those steps, and clearing it is how
+                    the whole set flips — "when we clear that red X, does that
+                    clear all the other red?" It must. */}
+                {(() => {
+                  const steps = decision?.trace ?? [];
+                  const facts = hazards.filter((h) =>
+                    steps.some((st) => st.source === h.origin && st.hazard === h.label),
+                  );
+                  if (facts.length === 0) return null;
+                  return (
+                    <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
+                      <div style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>
+                        Field conditions holding this space
+                      </div>
+                      {facts.map((f) => (
+                        <ClearControl
+                          key={`${f.origin}:${f.kind}`}
+                          identity={identity}
+                          vesselId={vesselId}
+                          hazard={f}
+                          onCleared={onCleared}
+                        />
+                      ))}
+                    </div>
+                  );
+                })()}
+
                 {/* Directly under the trace, because the two answer consecutive
                     questions: the trace says why the space is shut, and this says
                     what would open it. Splitting them across screens would make a
                     planner hold the first in their head while looking for the
                     second. */}
                 <Mitigations
+                  key={`${row.compartment.compartment_no}:${epoch}`}
                   identity={identity}
                   vesselId={vesselId}
                   compartment={row.compartment.compartment_no}

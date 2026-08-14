@@ -69,6 +69,13 @@ pub fn inventory() -> Vec<RouteSpec> {
             Some(r#"{"key":"issue:held:0-000-0-X","note":"leak test"}"#),
         ),
         ("GET", "/api/vessels/:id/ledger", true, None),
+        ("GET", "/api/vessels/:id/hazards", true, None),
+        (
+            "POST",
+            "/api/vessels/:id/hazards/clear",
+            true,
+            Some(r#"{"compartment":"3-148-2-E","kind":"energised_bus","basis":"leak test"}"#),
+        ),
         ("GET", "/api/vessels/:id/zones", true, None),
         (
             "POST",

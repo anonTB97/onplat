@@ -417,6 +417,53 @@ export async function compartmentState(
   return (await res.json()) as { compartment: string; decision: Decision };
 }
 
+/* ----------------------------------------------------------------- hazards */
+
+/** A live recorded field condition — the fact behind the trace's verdicts. */
+export interface LiveHazard {
+  /** The origin space. */
+  origin: string;
+  /** The engine's kind name, e.g. `energised_bus`. */
+  kind: string;
+  /** When it was raised, epoch ms. */
+  since: number;
+  /** Human label, e.g. `Bus 3-SG-2 energised — no verified zero-energy state`. */
+  label: string;
+}
+
+// The raw live hazards on a hull. Served separately from the traces so the
+// surface can show WHAT is shut (the fact) alongside WHY (its consequences).
+export async function listHazards(id: Identity, vesselId: string): Promise<LiveHazard[]> {
+  const res = await fetch(`/api/vessels/${vesselId}/hazards`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`hazards → ${res.status}`);
+  const body = (await res.json()) as { hazards: LiveHazard[] };
+  return body.hazards;
+}
+
+/**
+ * Records an administrative clearance: the crew verified the field condition
+ * ended (tags hung, gas-free sighted) and someone with the authority says so,
+ * with the basis. The server closes the fact, appends `HAZARD_CLEARED` to the
+ * ledger, and every verdict the hazard drove re-derives clean on the next
+ * read — the caller's job is to refetch, not to repaint.
+ */
+export async function clearHazard(
+  id: Identity,
+  vesselId: string,
+  input: { compartment: string; kind: string; basis: string },
+): Promise<{ cleared: LiveHazard[] }> {
+  const res = await fetch(`/api/vessels/${vesselId}/hazards/clear`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(body?.detail ?? `clearance → ${res.status}`);
+  }
+  return (await res.json()) as { cleared: LiveHazard[] };
+}
+
 /* ------------------------------------------------------------- mitigations */
 
 /**

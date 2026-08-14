@@ -104,6 +104,11 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::acknowledge_issue),
         )
         .route("/api/vessels/:id/ledger", get(handlers::ledger))
+        .route("/api/vessels/:id/hazards", get(handlers::list_hazards))
+        .route(
+            "/api/vessels/:id/hazards/clear",
+            post(handlers::clear_hazard),
+        )
         .route(
             "/api/vessels/:id/zones",
             get(handlers::zones).post(handlers::import_zones),

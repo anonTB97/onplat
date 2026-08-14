@@ -114,6 +114,10 @@ export default function App() {
   // The job card: one work order's whole story, opened from any board where
   // its code appears. App-owned so every surface opens the SAME card.
   const [jobCode, setJobCode] = useState<string | null>(null);
+  // Bumped when a module changes the hull's served facts (an administrative
+  // clearance). The shared reads below are keyed on it, so the top bar and the
+  // alert bell move in the same refresh as the screen that made the change.
+  const [dataEpoch, setDataEpoch] = useState(0);
 
   useEffect(() => {
     listVessels(DEMO_IDENTITY)
@@ -164,7 +168,7 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [selected, asOf]);
+  }, [selected, asOf, dataEpoch]);
 
   // The hull's time frame. Re-read on hull change and never cached across hulls:
   // each availability has its own bounds, and scrubbing one hull's window over
@@ -440,6 +444,7 @@ export default function App() {
               asOf={asOf}
               horizon={horizon}
               now={frame?.now ?? null}
+              onMutated={() => setDataEpoch((n) => n + 1)}
             />
           )}
 

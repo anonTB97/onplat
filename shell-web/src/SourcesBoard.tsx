@@ -28,10 +28,14 @@ import {
   type AsOf,
   type Identity,
   type ZoneChart,
+  getManningBook,
+  importManningBook,
+  revertManningBook,
+  type ManningBook,
 } from "./api";
 import { DiscardButton } from "./DiscardButton";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
-import { fmtBytes, parseBudgetCsv, parseZoneCsv, deltaSummary } from "./ingest";
+import { fmtBytes, parseBudgetCsv, parseManningCsv, parseZoneCsv, deltaSummary } from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { commitBtnStyle, C, errText, mh, msgColor } from "./theme";
@@ -65,6 +69,7 @@ export default function SourcesBoard({
   const [msg, setMsg] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const [staged, setStaged] = useState<Staged | null>(null);
+  const [manning, setManning] = useState<ManningBook | null>(null);
   /** What the door is doing right now — a P6 export is megabytes, and reading
    *  or ingesting one deserves a visible verb rather than a frozen screen. */
   const [busy, setBusy] = useState<string | null>(null);
@@ -175,6 +180,42 @@ export default function SourcesBoard({
       });
   };
 
+  const stageManning = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const crews = parseManningCsv(text);
+        return importManningBook(identity, vesselId, file.name, crews, true).then((r) => {
+          setBusy(null);
+          const unmatched = r.coverage.book_trades_matching_no_register_trade;
+          const uncovered = r.coverage.register_trades_with_no_manning_line;
+          setStaged({
+            kind: "Manning book",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              `${r.crews} trades` +
+              (unmatched.length > 0
+                ? ` · ⚠ match no register trade: ${unmatched.join(", ")}`
+                : "") +
+              (uncovered.length > 0
+                ? ` · no manning line for: ${uncovered.join(", ")}`
+                : " · every register trade covered"),
+            commit: () =>
+              importManningBook(identity, vesselId, file.name, crews, false).then(
+                (x) => `✓ ${x.label}: crew supply loaded (${x.crews} trades)`,
+              ),
+          });
+        });
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
+
   const confirmStaged = () => {
     const p = staged;
     if (!p) return;
@@ -196,11 +237,16 @@ export default function SourcesBoard({
     setError(null);
     // Guarded against reordering under a playing time control.
     let stale = false;
-    Promise.all([listActivities(identity, vesselId, asOf), getZoneChart(identity, vesselId)])
-      .then(([r, z]) => {
+    Promise.all([
+      listActivities(identity, vesselId, asOf),
+      getZoneChart(identity, vesselId),
+      getManningBook(identity, vesselId).catch(() => null),
+    ])
+      .then(([r, z, m]) => {
         if (stale) return;
         setRegister(r);
         setZones(z);
+        setManning(m);
       })
       .catch((e: unknown) => {
         if (stale) return;
@@ -439,6 +485,46 @@ export default function SourcesBoard({
                   void revertBudgetBook(identity, vesselId)
                     .then(() => {
                       setMsg("✓ back to the seeded budgets");
+                      setNonce((n) => n + 1);
+                    })
+                    .catch((e: unknown) => setMsg(errText(e)));
+                }
+              : undefined
+          }
+        />
+
+        <SourceCard
+          kind="Manning book"
+          status={manning ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "NOT LOADED", tone: "#94a3b8" }}
+          name={manning?.label ?? "no manning book — boards show demand only"}
+          lines={[
+            {
+              text: manning
+                ? `${manning.crews.length} trades · ${manning.crews.reduce((n, c) => n + c.headcount, 0)} people per half-shift`
+                : "Demand is computed from the register; supply is a yard's claim and only enters here.",
+              gloss:
+                "The supply side of crew planning: people per trade, per half-shift. The Deck Explorer's Manning lens compares the schedule's demand against this book.",
+            },
+            ...(manning
+              ? [{ text: manning.crews.map((c) => `${c.trade} ${c.headcount}`).join(" · "), tone: C.dim }]
+              : []),
+          ]}
+          upload={{
+            label: "⭱ Upload manning CSV",
+            accept: ".csv,text/csv,text/plain",
+            title:
+              "Ingest the yard's manning book (CSV: trade,headcount — people per half-shift). The preview names any trade that matches nothing in the register. All-or-nothing; previews before storing.",
+            onFile: stageManning,
+          }}
+          importHint="Read by the Deck Explorer's Manning lens"
+          onOpenHome={() => onOpenModule("deckExplorer")}
+          onRevert={
+            manning
+              ? () => {
+                  setMsg("⏳ discarding the manning book…");
+                  void revertManningBook(identity, vesselId)
+                    .then(() => {
+                      setMsg("✓ back to demand only");
                       setNonce((n) => n + 1);
                     })
                     .catch((e: unknown) => setMsg(errText(e)));

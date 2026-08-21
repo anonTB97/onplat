@@ -8,7 +8,7 @@
 // header row is left for the server to refuse — the all-or-nothing verdict,
 // with every rejection reason, is the server's to give.
 
-import type { BudgetItem, ZoneBound } from "./api";
+import type { BudgetItem, ZoneBound , ManningCrew } from "./api";
 
 /** CSV: `zone,lo_frame,hi_frame` — the yard's zone chart. */
 export function parseZoneCsv(text: string): ZoneBound[] {
@@ -38,6 +38,18 @@ export function parseBudgetCsv(text: string): BudgetItem[] {
     });
   }
   return items;
+}
+
+/** CSV: `trade,headcount` — the yard's manning book, per half-shift. */
+export function parseManningCsv(text: string): ManningCrew[] {
+  const crews: ManningCrew[] = [];
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const [trade, headcount] = t.split(",").map((x) => x.trim());
+    crews.push({ trade: trade ?? "", headcount: Number(headcount) });
+  }
+  return crews;
 }
 
 /** A file size a human reads: a real P6 export is megabytes, and the reader

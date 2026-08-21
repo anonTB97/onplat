@@ -36,6 +36,8 @@
 use sqlx::Row as _;
 use uuid::Uuid;
 use wadl_domain::ids::{OrgId, VesselId};
+use wadl_store::memory::ManningBook;
+use wadl_store::model::ManningCrewSummary;
 use wadl_store::pg::PgStore;
 use wadl_store::StoreError;
 use wadl_store::TenantScope;
@@ -410,6 +412,45 @@ async fn ingested_documents_are_all_or_nothing_and_tenant_scoped() {
         Some("test.xer")
     );
     store.clear_schedule_of_record(&scope, hull).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_manning_book_round_trips_and_stays_in_tenant() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN73);
+
+    store.clear_manning_book(&scope, hull).await.unwrap();
+    assert!(store.manning_book(&scope, hull).await.unwrap().is_none());
+
+    store
+        .set_manning_book(
+            &scope,
+            hull,
+            ManningBook {
+                label: "CVN73-manning.csv".to_owned(),
+                crews: vec![ManningCrewSummary {
+                    trade: "Electrical".to_owned(),
+                    headcount: 12,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let book = store.manning_book(&scope, hull).await.unwrap().unwrap();
+    assert_eq!(book.label, "CVN73-manning.csv");
+    assert_eq!(book.crews.len(), 1);
+    assert_eq!(book.crews.first().map(|c| c.headcount), Some(12));
+
+    // Another tenant cannot see the book — the hull itself is not-found.
+    let foreign = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.manning_book(&foreign, hull).await,
+        Err(StoreError::NotFound)
+    ));
+
+    store.clear_manning_book(&scope, hull).await.unwrap();
+    assert!(store.manning_book(&scope, hull).await.unwrap().is_none());
 }
 
 #[tokio::test]

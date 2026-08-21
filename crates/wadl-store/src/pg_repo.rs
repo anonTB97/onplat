@@ -426,7 +426,7 @@ use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
 use wadl_plan::{Package, Segment, SpaceWork};
 
-use crate::memory::{BudgetBook, ScheduleOfRecord, ZoneRegister};
+use crate::memory::{BudgetBook, ManningBook, ScheduleOfRecord, ZoneRegister};
 use crate::model::{
     ActivitySummary, AuditRecord, PackageSummary, ScheduleEdgeSummary, StrandedItem,
     StrandedReport, WorkOrderSummary,
@@ -900,6 +900,47 @@ impl Repositories for PgStore {
     ) -> Result<(), StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         self.delete_document(scope.org, vessel, "budget_book").await
+    }
+
+    async fn manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ManningBook>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "manning_book")
+            .await?
+            .map(|(label, doc)| {
+                Ok(ManningBook {
+                    label,
+                    crews: serde_json::from_value(doc)
+                        .map_err(|e| StoreError::Backend(format!("manning_book doc: {e}")))?,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        book: ManningBook,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let doc = serde_json::to_value(&book.crews)
+            .map_err(|e| StoreError::Backend(format!("manning_book doc: {e}")))?;
+        self.put_document(scope.org, vessel, "manning_book", &book.label, doc)
+            .await
+    }
+
+    async fn clear_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "manning_book")
+            .await
     }
 
     async fn stranded_hours(

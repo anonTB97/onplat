@@ -311,6 +311,8 @@ pub struct InMemoryStore {
     /// An ingested budget book per hull. When present, reconciliation holds
     /// the register's hours to ITS budgets instead of the seeded work items'.
     budget_book: std::sync::RwLock<BTreeMap<VesselId, BudgetBook>>,
+    /// An ingested manning book per hull — the supply side of crew planning.
+    manning_book: std::sync::RwLock<BTreeMap<VesselId, ManningBook>>,
     /// Administrative clearances recorded against the seeded hazards, keyed by
     /// what the API clears with: hull, origin space, hazard kind. The seed rows
     /// stay immutable — a clearance is a second fact laid over the first, which
@@ -369,6 +371,19 @@ pub struct BudgetBook {
     pub label: String,
     /// One line per work item.
     pub items: Vec<crate::model::BudgetItemSummary>,
+}
+
+/// An ingested manning book: the crews the yard actually has, per trade.
+///
+/// Deliberately NOT seeded, same as the zone chart: without one the boards
+/// show demand only and say so. A headcount is a yard's claim, and it arrives
+/// through the import door or not at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManningBook {
+    /// Where it came from, e.g. `CVN73-manning.csv`.
+    pub label: String,
+    /// One line per trade.
+    pub crews: Vec<crate::model::ManningCrewSummary>,
 }
 
 /// The identifiers of the seeded demo world, handed back so the API and tests
@@ -464,6 +479,7 @@ impl InMemoryStore {
             schedule_of_record: std::sync::RwLock::new(BTreeMap::new()),
             zone_register: std::sync::RwLock::new(BTreeMap::new()),
             budget_book: std::sync::RwLock::new(BTreeMap::new()),
+            manning_book: std::sync::RwLock::new(BTreeMap::new()),
             cleared_hazards: std::sync::Mutex::new(Vec::new()),
         };
         (store, world)
@@ -1732,6 +1748,47 @@ impl Repositories for InMemoryStore {
     ) -> Result<(), StoreError> {
         self.scoped_vessel(scope, vessel)?;
         self.budget_book
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ManningBook>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .manning_book
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned())
+    }
+
+    async fn set_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        book: ManningBook,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.manning_book
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, book);
+        Ok(())
+    }
+
+    async fn clear_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.manning_book
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&vessel);

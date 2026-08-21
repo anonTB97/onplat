@@ -8,6 +8,7 @@ import {
   importZoneChart,
   listActivities,
   listDecks,
+  getManningBook,
   listHazards,
   readiness,
   revertZoneChart,
@@ -18,6 +19,7 @@ import {
   type Decision,
   type Identity,
   type LiveHazard,
+  type ManningBook,
   type Rollup,
   type ZoneBound,
   type ZoneChart,
@@ -47,8 +49,9 @@ import { HORIZONS, type Horizon } from "./TimeControl";
 import { windowLoadBySpace, windowLoadTotal, type SpaceLoad } from "./windowLoad";
 import { DiscardButton } from "./DiscardButton";
 import { zoneBands, type ZoneGeometry } from "./zones";
-import { fmtDate, fmtDay } from "./clock";
-import { utcDayStart } from "./watch";
+import { fmtDate, fmtDay, fmtMonth } from "./clock";
+import { blockLabel, blockStart, utcDayStart } from "./watch";
+import { demandByTrade, demandByZone, zoneInteractions } from "./manning";
 
 const DIM = C.dim;
 
@@ -175,6 +178,11 @@ export default function DeckExplorer({
   // waiting for the next scrub.
   const [hazards, setHazards] = useState<LiveHazard[]>([]);
   const [epoch, setEpoch] = useState(0);
+  // The manning strip: crew demand for the current step against the imported
+  // supply. A panel toggle rather than a colour lens — it ADDS numbers to
+  // whatever the map is already showing.
+  const [showManning, setShowManning] = useState(false);
+  const [manningBook, setManningBook] = useState<ManningBook | null>(null);
   // Two error slots, because the two fetches fail for different reasons and need
   // different words. The register is scope-gated: failing it means this hull is
   // not yours. The states are instant-gated too: failing those can just mean the
@@ -314,6 +322,9 @@ export default function DeckExplorer({
     listHazards(identity, vesselId)
       .then(setHazards)
       .catch(() => setHazards([]));
+    getManningBook(identity, vesselId)
+      .then(setManningBook)
+      .catch(() => setManningBook(null));
   }, [identity, vesselId, asOf, epoch]);
 
   // The reading window: from the instant, one horizon forward. This is what
@@ -704,6 +715,17 @@ export default function DeckExplorer({
           >
             Readiness overlay
           </button>
+          <button
+            style={{
+              ...seg(showManning),
+              borderColor: showManning ? C.accent : LINE,
+              color: showManning ? TEXT : DIM,
+            }}
+            onClick={() => setShowManning(!showManning)}
+            title="Crews for the current step — demand from the schedule, supply from the manning book, zones interacting"
+          >
+            Manning
+          </button>
         </div>
 
         {zoneFilter && (
@@ -712,6 +734,17 @@ export default function DeckExplorer({
           </button>
         )}
       </div>
+
+      {showManning && (
+        <ManningPanel
+          activities={activities}
+          rows={rows}
+          conflicts={conflicts}
+          book={manningBook}
+          horizon={horizon}
+          at={asOf ?? now ?? 0}
+        />
+      )}
 
       {/* Wraps. Rail + canvas + trace is about 900px of hard minimum, so on a
           1100px laptop the trace was being pushed past the right edge and the
@@ -1207,6 +1240,174 @@ export default function DeckExplorer({
   );
 }
 
+
+/** The manning strip's step: what one click of the clicker covers. */
+function manningStep(horizon: Horizon, at: number): { start: number; end: number; noun: string; label: string } {
+  const step = HORIZONS[horizon].step;
+  if (horizon === "day") {
+    const start = blockStart(at);
+    return { start, end: start + step, noun: "half-shift", label: `${fmtDay(start)} · ${blockLabel(start)}` };
+  }
+  if (horizon === "week") return { start: at, end: at + step, noun: "day", label: fmtDay(at) };
+  if (horizon === "month") return { start: at, end: at + step, noun: "week", label: `wk of ${fmtDay(at)}` };
+  return { start: at, end: at + step, noun: "month", label: fmtMonth(at) };
+}
+
+/**
+ * Crews, superimposed on the reading. One step of the clicker — a half-shift,
+ * a day, a week — priced in PEOPLE: demand from the register by the shared
+ * pro-rating rule, supply from the imported manning book (or "demand only",
+ * said out loud), zones rolled up with their trade mix, and the zones that
+ * are colliding through the hull's physics named as pairs. Everything here is
+ * arithmetic over data the screen already fetched; the panel cannot disagree
+ * with the map above it.
+ */
+function ManningPanel({
+  activities, rows, conflicts, book, horizon, at,
+}: {
+  activities: Activity[];
+  rows: DeckStateRow[];
+  conflicts: WorkConflicts | null;
+  book: ManningBook | null;
+  horizon: Horizon;
+  at: number;
+}) {
+  const step = manningStep(horizon, at);
+  const spaceZone = useMemo(
+    () => new Map(rows.map((r) => [r.compartment.compartment_no, r.compartment.zone])),
+    [rows],
+  );
+  const trades = useMemo(
+    () => demandByTrade(activities, step.start, step.end),
+    [activities, step.start, step.end],
+  );
+  const { zones, unzonedHours } = useMemo(
+    () => demandByZone(activities, spaceZone, step.start, step.end, CREW_TOLERANCE),
+    [activities, spaceZone, step.start, step.end],
+  );
+  const interactions = useMemo(
+    () => zoneInteractions(conflicts, spaceZone),
+    [conflicts, spaceZone],
+  );
+  const have = new Map((book?.crews ?? []).map((c) => [c.trade, c.headcount]));
+  const totalPeople = trades.reduce((n, t) => n + t.people, 0);
+  const ppl = (n: number) => `≈${Math.ceil(n)}`;
+
+  const chipBase: React.CSSProperties = {
+    border: `1px solid ${LINE}`, borderRadius: 5, padding: "3px 8px",
+    fontSize: 11, whiteSpace: "nowrap",
+  };
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 14px",
+        marginBottom: 12, background: "#121316",
+        display: "flex", flexDirection: "column", gap: 8,
+      }}
+    >
+      <div style={{ display: "flex", gap: 12, alignItems: "baseline", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: DIM }}>
+          Manning — this {step.noun}
+        </span>
+        <span style={{ fontFamily: "monospace", color: C.bright, fontSize: 12 }}>{step.label}</span>
+        <b style={{ color: C.bright }}>{ppl(totalPeople)} people on the hull</b>
+        <span style={{ color: DIM, fontSize: 11 }}>
+          {book
+            ? `supply: ${book.label}`
+            : "demand only — no manning book loaded (Data Sources → Manning book)"}
+        </span>
+        {unzonedHours > 0 && (
+          <span style={{ color: C.warn, fontSize: 11 }} title="Scheduled hours whose space maps to no zone — counted, never hidden.">
+            {mh(Math.round(unzonedHours))} unzoned
+          </span>
+        )}
+      </div>
+
+      {/* Trades: need vs have. The shortfall is the headline, not the list. */}
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: C.subtle, minWidth: 48 }}>
+          Trades
+        </span>
+        {trades.length === 0 && <span style={{ color: DIM, fontSize: 11 }}>nothing scheduled this {step.noun}</span>}
+        {trades.map((t) => {
+          const supply = have.get(t.trade);
+          const short = supply !== undefined && Math.ceil(t.people) > supply;
+          return (
+            <span
+              key={t.trade}
+              title={`${t.trade}: ${Math.round(t.hours)} MH this ${step.noun} → ${ppl(t.people)} people${supply !== undefined ? ` · book says ${supply} available per half-shift` : " · no manning line"}`}
+              style={{
+                ...chipBase,
+                color: short ? "#fca5a5" : TEXT,
+                borderColor: short ? "rgba(239,68,68,0.6)" : LINE,
+                background: short ? "rgba(239,68,68,0.08)" : "transparent",
+              }}
+            >
+              {t.trade} <b>{ppl(t.people)}</b>
+              {supply !== undefined && (
+                <span style={{ color: short ? "#fca5a5" : C.ok }}> / {supply}{short ? " SHORT" : ""}</span>
+              )}
+            </span>
+          );
+        })}
+      </div>
+
+      {/* Zones: where those people stand. Crowded = some single space in the
+          zone implies more people than the working tolerance. */}
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: C.subtle, minWidth: 48 }}>
+          Zones
+        </span>
+        {zones.length === 0 && <span style={{ color: DIM, fontSize: 11 }}>no zoned work this {step.noun}</span>}
+        {zones.map((z) => {
+          const mix = [...z.byTrade.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([t, h]) => `${t} ${ppl(h / ((step.end - step.start) / 3_600_000))}`)
+            .join(" · ");
+          return (
+            <span
+              key={z.zone}
+              title={`${z.zone}: ${Math.round(z.hours)} MH this ${step.noun} → ${ppl(z.people)} people\n${mix}${z.crowded ? `\n⚠ a space in this zone implies more than ${CREW_TOLERANCE} people at once` : ""}`}
+              style={{
+                ...chipBase,
+                color: TEXT,
+                borderColor: z.crowded ? "rgba(245,158,11,0.65)" : LINE,
+                background: z.crowded ? "rgba(245,158,11,0.08)" : "transparent",
+              }}
+            >
+              {z.zone} <b>{ppl(z.people)}</b>{z.crowded ? " ⚠" : ""}
+              <span style={{ color: DIM }}> · {mix}</span>
+            </span>
+          );
+        })}
+      </div>
+
+      {/* Zones against zones: the day's served hot-vs-flammable pairs, rolled
+          up to the zone grain — "which sections are fighting each other". */}
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: C.subtle, minWidth: 48 }}>
+          Zone ⚡ zone
+        </span>
+        {interactions.length === 0 && (
+          <span style={{ color: DIM, fontSize: 11 }}>
+            no zones colliding today{conflicts === null ? " (conflicts unavailable)" : ""}
+          </span>
+        )}
+        {interactions.map((x) => (
+          <span
+            key={`${x.a}-${x.b}`}
+            title={x.reasons.join("\n")}
+            style={{ ...chipBase, color: C.warn, borderColor: "rgba(245,158,11,0.5)" }}
+          >
+            {x.a === x.b ? `${x.a} internal` : `${x.a} ⚡ ${x.b}`} · {x.pairs} pair{x.pairs === 1 ? "" : "s"}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /**
  * The administrative clearance, where the refusal is (VR-05).

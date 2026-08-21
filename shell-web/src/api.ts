@@ -1096,3 +1096,58 @@ export async function revertBudgetBook(id: Identity, vesselId: string): Promise<
   });
   if (!res.ok) throw new Error(`budget book revert → ${res.status}`);
 }
+
+/** One line of the manning book: people a trade has, per half-shift. */
+export interface ManningCrew {
+  trade: string;
+  headcount: number;
+}
+
+/** The supply side of crew planning — imported, never invented. */
+export interface ManningBook {
+  label: string;
+  crews: ManningCrew[];
+}
+
+/** Which register trades a candidate book does and does not cover. */
+export interface ManningCoverage {
+  book_trades_matching_no_register_trade: string[];
+  register_trades_with_no_manning_line: string[];
+}
+
+// The hull's manning book, or null — in which case every crew read shows
+// demand only and says so.
+export async function getManningBook(id: Identity, vesselId: string): Promise<ManningBook | null> {
+  const res = await fetch(`/api/vessels/${vesselId}/manning-book`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`manning book → ${res.status}`);
+  const body = (await res.json()) as { book: ManningBook | null };
+  return body.book;
+}
+
+/** Ingests a manning book, all-or-nothing. `dryRun` previews trade coverage. */
+export async function importManningBook(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  crews: ManningCrew[],
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; crews: number; coverage: ManningCoverage }> {
+  const res = await fetch(
+    `/api/vessels/${vesselId}/manning-book${dryRun ? "?dry_run=true" : ""}`,
+    {
+      method: "POST",
+      headers: { ...headers(id), "content-type": "application/json" },
+      body: JSON.stringify({ label, crews }),
+    },
+  );
+  if (!res.ok) throw new Error(`manning book → ${res.status}: ${await res.text()}`);
+  return (await res.json()) as never;
+}
+
+export async function revertManningBook(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/manning-book/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`manning book revert → ${res.status}`);
+}

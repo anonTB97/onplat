@@ -1999,6 +1999,126 @@ pub(crate) async fn revert_budgets(
     Ok(Json(json!({ "reverted": true })))
 }
 
+/// The body of a manning-book import: one line per trade.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportManning {
+    /// Where the book came from, named wherever its numbers are used.
+    pub(crate) label: String,
+    /// The crew lines.
+    pub(crate) crews: Vec<wadl_store::model::ManningCrewSummary>,
+}
+
+/// The hull's manning book, or `null` when none is loaded — in which case the
+/// boards show demand only and say so.
+pub(crate) async fn get_manning(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let book = state.store.manning_book(&scope, vessel).await?;
+    Ok(Json(json!({
+        "book": book.map(|b| json!({ "label": b.label, "crews": b.crews })),
+    })))
+}
+
+/// Ingests a manning book as the hull's crew-supply authority.
+///
+/// The demand side of crew planning is computed from the register (a window's
+/// scheduled hours over the window). This door is the SUPPLY side — the people
+/// the yard actually has per trade, per half-shift — and it is the only way a
+/// headcount enters: the platform never invents one. All-or-nothing, same as
+/// every document door: refused whole, previewed with `?dry_run=true`,
+/// reverted whole.
+pub(crate) async fn import_manning(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportManning = read_import_body(req).await?;
+
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the book carries no label".to_owned());
+    }
+    if body.crews.is_empty() {
+        rejections.push("the book carries no crews".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for crew in &body.crews {
+        if crew.trade.trim().is_empty() {
+            rejections.push("a line names no trade".to_owned());
+        }
+        if crew.headcount < 0 {
+            rejections.push(format!("{}: negative headcount", crew.trade));
+        }
+        if !seen.insert(crew.trade.as_str()) {
+            rejections.push(format!("{} is manned twice", crew.trade));
+        }
+    }
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the book was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    // The preview names which register trades the book does and does not
+    // cover — a book that spells "Electrical" as "ELEC" would otherwise store
+    // cleanly and then match nothing, which is worse than a refusal.
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let register_trades: std::collections::BTreeSet<&str> = activities
+        .iter()
+        .filter(|a| !a.is_milestone)
+        .map(|a| a.trade.as_str())
+        .collect();
+    let book_trades: std::collections::BTreeSet<&str> =
+        body.crews.iter().map(|c| c.trade.as_str()).collect();
+    let unmatched_book: Vec<&&str> = book_trades.difference(&register_trades).collect();
+    let uncovered_register: Vec<&&str> = register_trades.difference(&book_trades).collect();
+    let coverage = json!({
+        "book_trades_matching_no_register_trade": unmatched_book,
+        "register_trades_with_no_manning_line": uncovered_register,
+    });
+
+    let book = wadl_store::memory::ManningBook {
+        label: body.label,
+        crews: body.crews,
+    };
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": book.label,
+            "crews": book.crews.len(),
+            "coverage": coverage,
+        })));
+    }
+    let label = book.label.clone();
+    let crews = book.crews.len();
+    state.store.set_manning_book(&scope, vessel, book).await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "crews": crews,
+        "coverage": coverage,
+    })))
+}
+
+/// Discards the ingested manning book; the boards return to demand only.
+pub(crate) async fn revert_manning(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_manning_book(&scope, vessel).await?;
+    Ok(Json(json!({ "reverted": true })))
+}
+
 /// Discards the ingested zone chart; the views return to inferred bands.
 pub(crate) async fn revert_zones(
     State(state): State<AppState>,

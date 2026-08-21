@@ -93,6 +93,14 @@ pub fn inventory() -> Vec<RouteSpec> {
             ),
         ),
         ("POST", "/api/vessels/:id/budget-book/revert", true, None),
+        ("GET", "/api/vessels/:id/manning-book", true, None),
+        (
+            "POST",
+            "/api/vessels/:id/manning-book",
+            true,
+            Some(r#"{"label":"leak test","crews":[{"trade":"Electrical","headcount":1}]}"#),
+        ),
+        ("POST", "/api/vessels/:id/manning-book/revert", true, None),
         (
             "POST",
             "/api/vessels/:id/schedule-of-record",

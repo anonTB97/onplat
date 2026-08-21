@@ -328,6 +328,19 @@ pub struct ZoneBoundSummary {
 
 /// One work item's budget line from an ingested budget book.
 ///
+/// One line of a manning book: the people a trade actually has for this
+/// availability, per half-shift. The demand side (people a window's scheduled
+/// hours imply) is computed from the register; THIS is the supply side, and it
+/// only enters through the import door — the platform never invents a
+/// headcount.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ManningCrewSummary {
+    /// The trade, spelled the way the schedule spells it.
+    pub trade: String,
+    /// People available per half-shift.
+    pub headcount: i64,
+}
+
 /// The reconciliation target, once a book is ingested: register hours are
 /// compared against THESE budgets instead of the seeded work items'. The book
 /// is the hours authority, not a work-order register — it does not replace

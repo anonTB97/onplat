@@ -126,6 +126,14 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::revert_budgets),
         )
         .route(
+            "/api/vessels/:id/manning-book",
+            get(handlers::get_manning).post(handlers::import_manning),
+        )
+        .route(
+            "/api/vessels/:id/manning-book/revert",
+            post(handlers::revert_manning),
+        )
+        .route(
             "/api/vessels/:id/schedule-of-record",
             post(handlers::import_schedule),
         )

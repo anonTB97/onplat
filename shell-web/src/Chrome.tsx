@@ -105,7 +105,7 @@ export interface Persona {
 export const PERSONAS: Persona[] = [
   { name: "Planner", focus: "Conflicts & sequence", altitude: "compartment", horizon: "week" },
   { name: "Zone Manager", focus: "Your zone's muster", altitude: "zone", horizon: "week" },
-  { name: "Production Super", focus: "Shift plan", altitude: "zone", horizon: "shift" },
+  { name: "Production Super", focus: "Shift plan", altitude: "zone", horizon: "day" },
   { name: "Project Super", focus: "Availability health", altitude: "ship", horizon: "month" },
   { name: "IPT", focus: "Mitigation decisions", altitude: "compartment", horizon: "month" },
   {

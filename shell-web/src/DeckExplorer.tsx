@@ -48,6 +48,7 @@ import { windowLoadBySpace, windowLoadTotal, type SpaceLoad } from "./windowLoad
 import { DiscardButton } from "./DiscardButton";
 import { zoneBands, type ZoneGeometry } from "./zones";
 import { fmtDate, fmtDay } from "./clock";
+import { utcDayStart } from "./watch";
 
 const DIM = C.dim;
 
@@ -338,7 +339,12 @@ export default function DeckExplorer({
     };
   }, [identity, vesselId, asOf, epoch]);
 
-  const winStart = asOf ?? now ?? 0;
+  // At the Day horizon the reading window is the CALENDAR day under the
+  // clicker, not [instant, +24h): picking the 08–12Z block must not slide the
+  // "this day" numbers into tomorrow morning. Same day-identity the ops board
+  // and the work-conflicts endpoint already use.
+  const winStart =
+    horizon === "day" ? utcDayStart(asOf ?? now ?? 0) : (asOf ?? now ?? 0);
   const horizonSpan = HORIZONS[horizon].span;
   const winEnd =
     horizonSpan !== null
@@ -2189,7 +2195,7 @@ function PlanView({
   load: Map<string, SpaceLoad>;
   /** The reading window's length in days — the crew estimate's denominator. */
   windowDays: number;
-  /** "shift" | "week" | "month" | "availability", for the tooltips. */
+  /** "day" | "week" | "month" | "availability", for the tooltips. */
   horizonLabel: string;
   /** The day's served hot-vs-flammable pairs, drawn as links between pins. */
   conflicts: WorkConflicts | null;

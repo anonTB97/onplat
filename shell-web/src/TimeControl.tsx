@@ -4,20 +4,30 @@
 // a supervisor actually asks is "can I get into 4-164-2-Q at 1400", and nothing
 // in the product could answer it.
 //
-// Why this is not one slider. The range asked for — hour to month — is about a
-// 700:1 spread in resolution, and a single control spanning it is unusable at
-// both ends: a pixel is four hours at the month end, and the month end is five
-// hundred screens wide at the hour end. Three audiences are hiding inside that
-// one request, each with its own horizon AND its own step:
+// Two decisions shape this control:
 //
-//   mechanic     this shift        hour     can I get in there at 1400?
+// **The floor of resolution is the 4-hour watch block** (`watch.ts`). The finest
+// instant a reader can pick is the start of a UTC-aligned block — 00–04Z,
+// 04–08Z, … — because that is the lowest level anything on this hull is planned
+// at. An hour-grain scrubber claimed a precision no schedule carries.
+//
+// **Dates are clicked, not only scrubbed.** The primary gesture is the day
+// clicker — step a day back or forward, then pick the watch block — because
+// "show me Thursday" is a discrete question and a slider makes the reader aim
+// for it. The scrubber remains for sweeping a window continuously.
+//
+// Why this is still not one slider. The range asked for — watch to month — is a
+// large spread in resolution, and a single control spanning it is unusable at
+// both ends. Three audiences are hiding inside the one request, each with its
+// own horizon AND its own step:
+//
+//   mechanic     this day          watch    can I get in there at 1400?
 //   supervisor   this week         day      what frees up before Thursday?
 //   planner      the availability  month    where does the work pile up?
 //
-// So the horizon sets the window and the step together, and the scrubber moves
-// inside it. That pairs with the altitude control the Deck Explorer already has:
-// personas carry the altitude they open at, and now the horizon too, so a foreman
-// lands on the shift and an executive on the availability.
+// So the horizon sets the window and the step together, and the clicker and
+// scrubber move inside it. Personas carry the horizon they open at, pairing
+// with the altitude control the Deck Explorer already has.
 //
 // The instant is fed to the API as `?as_of=` and evaluated by the engine, which
 // takes the instant as data and reads no clock. Nothing here interpolates a
@@ -28,13 +38,20 @@
 import { useEffect } from "react";
 import type { AsOf, Window as TimeWindow } from "./api";
 import { C } from "./theme";
+import {
+  blockLabel,
+  blockStart,
+  DAY_MS as DAY,
+  utcDayStart,
+  WATCH_MS,
+  watchBlocksOf,
+} from "./watch";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
-const DAY = 24 * HOUR;
 
 /** The four resolutions the work was asked for, each with the step that names it. */
-export type Horizon = "shift" | "week" | "month" | "availability";
+export type Horizon = "day" | "week" | "month" | "availability";
 
 interface HorizonDef {
   label: string;
@@ -42,23 +59,33 @@ interface HorizonDef {
   step: number;
   /** How wide a window to open, or `null` for the whole availability. */
   span: number | null;
+  /** How far the day clicker's ◀ ▶ move, and what to call that unit. */
+  click: { step: number; unit: string };
+  /** Within this distance of now, an instant reads as the present (see
+   *  `isProjection`). The day horizon's blocks are calendar-aligned, so almost
+   *  no block start IS now — a tight tolerance keeps "live" meaning live. */
+  liveTolerance: number;
   /** What the step means in words, and who reads at this resolution. */
   gloss: string;
   who: string;
 }
 
 export const HORIZONS: Record<Horizon, HorizonDef> = {
-  shift: {
-    label: "Shift",
-    step: HOUR,
-    span: 12 * HOUR,
-    gloss: "hour by hour",
+  day: {
+    label: "Day",
+    step: WATCH_MS,
+    span: DAY,
+    click: { step: DAY, unit: "day" },
+    liveTolerance: MIN,
+    gloss: "watch by watch — 4-hour blocks, the lowest level of planning",
     who: "Mechanic · can I get in there at 1400?",
   },
   week: {
     label: "Week",
     step: DAY,
     span: 7 * DAY,
+    click: { step: DAY, unit: "day" },
+    liveTolerance: DAY / 2,
     gloss: "day by day",
     who: "Supervisor · what frees up before Thursday?",
   },
@@ -66,6 +93,8 @@ export const HORIZONS: Record<Horizon, HorizonDef> = {
     label: "Month",
     step: 7 * DAY,
     span: 35 * DAY,
+    click: { step: 7 * DAY, unit: "week" },
+    liveTolerance: (7 * DAY) / 2,
     gloss: "week by week",
     who: "Zone manager · which weeks are over-committed?",
   },
@@ -73,24 +102,24 @@ export const HORIZONS: Record<Horizon, HorizonDef> = {
     label: "Availability",
     step: 28 * DAY,
     span: null,
+    click: { step: 28 * DAY, unit: "month" },
+    liveTolerance: 14 * DAY,
     gloss: "month by month",
     who: "Planner · where does the work pile up?",
   },
 };
 
-export const HORIZON_ORDER: Horizon[] = ["shift", "week", "month", "availability"];
+export const HORIZON_ORDER: Horizon[] = ["day", "week", "month", "availability"];
 
 /**
  * Moves a window's start onto the step grid that runs through `anchor`.
  *
  * This is load-bearing, not tidiness. `<input type="range">` only reaches
- * `min + k*step`, so unless `min` is congruent to `now` modulo the step, **no
- * reachable notch is `now`** — and the nearest one can sit closer than half a
- * step, which is the tolerance `isProjection` uses to decide whether to warn.
- * At the Week horizon that put a reachable instant 9.6 h away inside the "this is
- * live" band: the boards were evaluated 9.6 h out, the coating cascade had flipped
- * BLOCK to ALLOW, and the chrome said `evaluated live`. Aligning the grid means
- * every reachable notch is either exactly `now` or a full step away from it.
+ * `min + k*step`, so unless `min` is congruent to the anchor modulo the step,
+ * no reachable notch sits on the instants the readout names. At the Week
+ * horizon a mis-anchored grid once put a reachable instant 9.6 h inside the
+ * "this is live" band: the boards were evaluated 9.6 h out, the coating cascade
+ * had flipped BLOCK to ALLOW, and the chrome said `evaluated live`.
  *
  * Shifted forward only, so an aligned window never reaches back outside the
  * availability it was just clamped into.
@@ -120,15 +149,37 @@ export function clampInto(at: number, w: TimeWindow, step: number): number {
 /**
  * The scrubbable window for a horizon.
  *
- * Opened with a fifth of its span behind `now`, because a shift that starts at
- * the present moment hides the thing a supervisor most often wants — what has
- * just happened. Then clamped into the availability, sliding rather than
- * truncating so the window keeps its full span near either end. The result is
- * always inside the availability, which is what the API will accept.
+ * The day horizon's window is the UTC calendar day containing `focus` — the
+ * day the clicker has walked to — aligned to the watch grid, so the scrubber
+ * sweeps the six blocks of THAT day and stepping a day moves the window
+ * wholesale. Slid, not truncated, at the availability's edges so it keeps its
+ * span.
+ *
+ * The wider horizons stay anchored on `now` (their grid runs through the
+ * present, so "live" is a reachable notch) and open with a fifth of their span
+ * behind it, because a window that starts at the present hides the thing a
+ * supervisor most often wants — what has just happened. The clicker is not
+ * limited to this window: it walks the whole availability, and the scrubber
+ * covers the near term.
  */
-export function windowFor(horizon: Horizon, now: number, availability: TimeWindow): TimeWindow {
+export function windowFor(
+  horizon: Horizon,
+  now: number,
+  availability: TimeWindow,
+  focus: number = now,
+): TimeWindow {
   const { span, step } = HORIZONS[horizon];
   const whole = availability.end - availability.start;
+  if (horizon === "day") {
+    let start = utcDayStart(focus);
+    if (start < availability.start) start = availability.start;
+    if (start + DAY > availability.end) start = Math.max(availability.start, availability.end - DAY);
+    // Anchor on the UTC day, so the notches ARE the watch blocks.
+    return {
+      start: alignStart(start, utcDayStart(focus), step),
+      end: Math.min(start + DAY, availability.end),
+    };
+  }
   if (span === null || span >= whole) {
     return { start: alignStart(availability.start, now, step), end: availability.end };
   }
@@ -138,7 +189,7 @@ export function windowFor(horizon: Horizon, now: number, availability: TimeWindo
   return { start: alignStart(start, now, step), end: start + span };
 }
 
-/** Snaps an instant to the horizon's step grid, which runs through `now`. */
+/** Snaps an instant to the horizon's step grid inside `w`. */
 function snap(ms: number, w: TimeWindow, step: number): number {
   return clampInto(w.start + Math.round((ms - w.start) / step) * step, w, step);
 }
@@ -150,18 +201,14 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
  * An instant at the resolution the horizon claims.
  *
  * A month-resolution readout that printed minutes would be claiming a precision
- * the step cannot deliver, and a shift-resolution readout without a clock time is
- * useless. Everything is UTC and says so — a yard runs on Zulu and a local
- * rendering would be a different instant to different readers.
+ * the step cannot deliver; the day horizon names the watch block, because the
+ * block is the resolution. Everything is UTC and says so — a yard runs on Zulu
+ * and a local rendering would be a different instant to different readers.
  */
 export function fmtInstant(ms: number, horizon: Horizon): string {
   const d = new Date(ms);
   const day = `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
-  if (horizon === "shift") {
-    const hh = String(d.getUTCHours()).padStart(2, "0");
-    const mm = String(d.getUTCMinutes()).padStart(2, "0");
-    return `${day} · ${hh}${mm}Z`;
-  }
+  if (horizon === "day") return `${day} · ${blockLabel(ms)}`;
   if (horizon === "availability") return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
   return day;
 }
@@ -172,7 +219,7 @@ export function fmtOffset(ms: number, now: number, horizon: Horizon): string {
   if (Math.abs(delta) < HOUR) return "now";
   const sign = delta < 0 ? "−" : "+";
   const abs = Math.abs(delta);
-  if (horizon === "shift") return `${sign}${Math.round(abs / HOUR)} h`;
+  if (horizon === "day") return `${sign}${Math.round(abs / HOUR)} h`;
   if (abs < 2 * DAY) return `${sign}${Math.round(abs / HOUR)} h`;
   if (horizon === "availability" && abs >= 28 * DAY) {
     return `${sign}${Math.round(abs / (28 * DAY))} mo`;
@@ -183,11 +230,15 @@ export function fmtOffset(ms: number, now: number, horizon: Horizon): string {
 /**
  * How far from now counts as "not now".
  *
- * Half a step: inside that the scrubber cannot distinguish the instant from the
- * present, so calling it a projection would put a warning on the live board.
+ * Per-horizon: the wide horizons use half a step (inside that the scrubber
+ * cannot distinguish the instant from the present), and the day horizon uses a
+ * minute — its blocks are calendar names, and calling "08–12Z" live at 0930
+ * would put a live badge on an evaluation from ninety minutes ago. The one
+ * instant that is genuinely live is the unset one (`asOf === null`), which the
+ * block chips emit for the block containing now.
  */
 export function isProjection(asOf: AsOf, now: number, horizon: Horizon): boolean {
-  return asOf !== null && Math.abs(asOf - now) >= HORIZONS[horizon].step / 2;
+  return asOf !== null && Math.abs(asOf - now) >= HORIZONS[horizon].liveTolerance;
 }
 
 export function TimeControl({
@@ -212,11 +263,11 @@ export function TimeControl({
   onPlaying: (p: boolean) => void;
 }) {
   const def = HORIZONS[horizon];
-  const w = availability ? windowFor(horizon, now, availability) : null;
   // The instant actually on screen. Not clamped: this is what the boards were
   // evaluated at, and a readout that clamped it would name an instant nobody
   // asked for.
   const at = asOf ?? now;
+  const w = availability ? windowFor(horizon, now, availability, at) : null;
   const projecting = isProjection(asOf, now, horizon);
   // A hull whose availability has not opened (or has closed) has no notch on
   // `now`. Live still works — no parameter is sent and the server answers from
@@ -251,14 +302,34 @@ export function TimeControl({
   }, [playing, at, def.step, onAsOf, onPlaying, w]);
 
   // Changing horizon must leave the instant inside the new window, and re-snap it
-  // to the new step. Scrubbing to Thursday at Week and switching to Shift would
-  // otherwise leave an instant the shift window cannot represent.
+  // to the new step. Scrubbing to Thursday at Week and switching to Day would
+  // otherwise leave an instant that is not a watch block.
   const pickHorizon = (h: Horizon) => {
     onPlaying(false);
     onHorizon(h);
     if (asOf === null || !availability) return;
-    const next = windowFor(h, now, availability);
+    const next = windowFor(h, now, availability, asOf);
     onAsOf(snap(clampInto(asOf, next, HORIZONS[h].step), next, HORIZONS[h].step));
+  };
+
+  /**
+   * The day clicker's step. Walks the WHOLE availability, not just the
+   * scrubber's window — "show me next Tuesday" must not stop at a window edge —
+   * and clamps to the availability's own grid notches at the ends. Emits a
+   * dated instant even when it lands near now; ⟲ Now is the way back to live.
+   */
+  const click = (dir: 1 | -1) => {
+    if (!availability) return;
+    onPlaying(false);
+    const base = horizon === "day" ? blockStart(at) : at;
+    const next = base + dir * def.click.step;
+    const nw = windowFor(horizon, now, availability, next);
+    const whole: TimeWindow = { start: nw.start, end: availability.end };
+    if (horizon === "day") {
+      onAsOf(clampInto(next, nw, def.step));
+    } else {
+      onAsOf(clampInto(next, whole, def.step));
+    }
   };
 
   const chip = (active: boolean): React.CSSProperties => ({
@@ -272,6 +343,11 @@ export function TimeControl({
     cursor: "pointer",
     whiteSpace: "nowrap",
   });
+
+  // The six watch blocks of the day on screen, for the day horizon's chip row.
+  // A block outside the availability is shown disabled rather than hidden: the
+  // day still has six blocks, this hull just isn't in the yard for all of them.
+  const blocks = horizon === "day" && availability ? watchBlocksOf(at) : null;
 
   return (
     <div
@@ -291,7 +367,7 @@ export function TimeControl({
     >
       <span
         style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.dim }}
-        title="The horizon sets both the window and the step. A single control spanning an hour to a month is unusable at both ends."
+        title="The horizon sets both the window and the step. The floor is the 4-hour watch block — the lowest level anything here is planned at."
       >
         Horizon
       </span>
@@ -323,6 +399,78 @@ export function TimeControl({
             {playing ? "❙❙" : "▶"}
           </button>
 
+          {/* The date clicker: the primary gesture. Steps the horizon's clicking
+              unit and walks the whole availability. */}
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <button
+              onClick={() => click(-1)}
+              title={`Back one ${def.click.unit}`}
+              aria-label={`Back one ${def.click.unit}`}
+              style={{ ...chip(false), padding: "3px 7px" }}
+            >
+              ◀
+            </button>
+            <span
+              style={{
+                fontFamily: "monospace",
+                color: projecting ? C.warn : C.bright,
+                minWidth: horizon === "day" ? 168 : 92,
+                textAlign: "center",
+              }}
+            >
+              {fmtInstant(at, horizon)}
+            </span>
+            <button
+              onClick={() => click(1)}
+              title={`Forward one ${def.click.unit}`}
+              aria-label={`Forward one ${def.click.unit}`}
+              style={{ ...chip(false), padding: "3px 7px" }}
+            >
+              ▶
+            </button>
+          </div>
+
+          {/* The watch blocks: the day horizon's floor of resolution, clickable.
+              The block containing now emits live (asOf null) — the present
+              watch's truth is the present. */}
+          {blocks && availability && (
+            <div style={{ display: "flex", gap: 3 }}>
+              {blocks.map((b) => {
+                const holdsNow = now >= b.start && now < b.start + WATCH_MS;
+                const active = at >= b.start && at < b.start + WATCH_MS;
+                const outside = b.start >= availability.end || b.start + WATCH_MS <= availability.start;
+                return (
+                  <button
+                    key={b.start}
+                    disabled={outside}
+                    onClick={() => {
+                      onPlaying(false);
+                      onAsOf(holdsNow ? null : Math.max(b.start, w.start));
+                    }}
+                    title={
+                      outside
+                        ? `${b.label} — outside this availability`
+                        : holdsNow
+                          ? `${b.label} — the current watch (reads live)`
+                          : `Read the hull at ${b.label}`
+                    }
+                    style={{
+                      ...chip(active),
+                      padding: "3px 6px",
+                      fontFamily: "monospace",
+                      fontSize: 10,
+                      opacity: outside ? 0.35 : 1,
+                      cursor: outside ? "default" : "pointer",
+                      borderStyle: holdsNow ? "double" : "solid",
+                    }}
+                  >
+                    {b.label.replace("Z", "")}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           <input
             type="range"
             min={w.start}
@@ -334,19 +482,16 @@ export function TimeControl({
               onPlaying(false);
               onAsOf(snap(Number(e.target.value), w, def.step));
             }}
-            style={{ flex: 1, minWidth: 180, accentColor: projecting ? C.warn : C.accent }}
+            style={{ flex: 1, minWidth: 140, accentColor: projecting ? C.warn : C.accent }}
           />
 
-          <span style={{ fontFamily: "monospace", color: projecting ? C.warn : C.bright }}>
-            {fmtInstant(at, horizon)}
-          </span>
           <span style={{ fontFamily: "monospace", color: C.dim, minWidth: 42 }}>
             {fmtOffset(at, now, horizon)}
           </span>
 
           {nowOutside && asOf === null && (
             <span
-              title="Now falls outside this hull's availability, so the scrubber cannot point at the present. The boards are live; scrub to read a date inside the availability."
+              title="Now falls outside this hull's availability, so the scrubber cannot point at the present. The boards are live; click a date inside the availability to read it."
               style={{ color: C.dim }}
             >
               · now is outside this availability

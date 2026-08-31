@@ -161,7 +161,7 @@ async fn overlay_geometry(
             c.frame = Some(g.fwd_frame);
             c.fwd_frame = Some(g.fwd_frame);
             c.aft_frame = Some(g.aft_frame);
-            c.geometry_source = "surveyed".to_owned();
+            "surveyed".clone_into(&mut c.geometry_source);
         }
     }
     Ok(())

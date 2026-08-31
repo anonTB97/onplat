@@ -274,32 +274,26 @@ export function TimeControl({
   // its own clock — but the slider cannot point at the present, so it says so
   // rather than sitting at one end implying it does.
   const nowOutside = w !== null && (now < w.start || now >= w.end);
-  // What the slider is allowed to show. `<input type="range">` silently coerces
-  // an out-of-range value to a bound, so feeding it `now` on a future
-  // availability made the thumb read as an instant it was not at — and playback
-  // then stepped from `now`, requesting instants the API refuses with a 422 that
-  // surfaced as a bogus "out of scope" on every module.
-  const knob = w ? clampInto(at, w, def.step) : at;
 
-  // Playback. One step per beat, stopping at the window's end rather than
-  // wrapping — a loop would quietly re-run the day and read as live data
+  // Playback: the transport-control contract. ▶ walks one step per beat and
+  // keeps going — across days, the day window following along — until the
+  // availability ends or ■ stops it. Stopping at the end rather than wrapping,
+  // because a loop would quietly re-run the run and read as live data
   // refreshing.
   useEffect(() => {
-    if (!playing || !w) return undefined;
+    if (!playing || !w || !availability) return undefined;
     const id = window.setInterval(() => {
-      // From the knob, never from `at`: starting outside the window would walk
-      // the whole run of requests out of range.
-      const end = lastNotch(w, def.step);
+      // From the grid, never from a raw `at`: starting off-grid would walk
+      // the whole run of requests off the notches the readout names.
       const next = clampInto(at, w, def.step) + def.step;
-      if (next >= end) {
-        onAsOf(end);
+      if (next >= availability.end) {
         onPlaying(false);
       } else {
         onAsOf(next);
       }
     }, 800);
     return () => window.clearInterval(id);
-  }, [playing, at, def.step, onAsOf, onPlaying, w]);
+  }, [playing, at, def.step, onAsOf, onPlaying, w, availability]);
 
   // Changing horizon must leave the instant inside the new window, and re-snap it
   // to the new step. Scrubbing to Thursday at Week and switching to Day would
@@ -318,6 +312,19 @@ export function TimeControl({
    * and clamps to the availability's own grid notches at the ends. Emits a
    * dated instant even when it lands near now; ⟲ Now is the way back to live.
    */
+  /** Jump to an arbitrary instant, clamped to the availability on the
+   *  horizon's own grid — the date picker's and the « » buttons' move. */
+  const jump = (ms: number) => {
+    if (!availability) return;
+    onPlaying(false);
+    const nw = windowFor(horizon, now, availability, ms);
+    if (horizon === "day") {
+      onAsOf(clampInto(ms, nw, def.step));
+    } else {
+      onAsOf(clampInto(ms, { start: nw.start, end: availability.end }, def.step));
+    }
+  };
+
   const click = (dir: 1 | -1) => {
     if (!availability) return;
     onPlaying(false);
@@ -390,45 +397,114 @@ export function TimeControl({
         </span>
       ) : (
         <>
-          <button
-            onClick={() => onPlaying(!playing)}
-            title="Step through the window one interval at a time"
-            aria-label={playing ? "Pause playback" : "Play through the window"}
-            style={{ ...chip(playing), width: 26, padding: "3px 0", textAlign: "center" }}
-          >
-            {playing ? "❙❙" : "▶"}
-          </button>
-
-          {/* The date clicker: the primary gesture. Steps the horizon's clicking
-              unit and walks the whole availability. */}
-          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          {/* The stepper toolbar: jump to either end of the availability, step
+              one unit, pick a date from the calendar, play/stop, and come back
+              to now. The layout is the transport-control idiom a scheduler
+              already knows — everything else on this strip annotates it. */}
+          <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+            <button
+              onClick={() => availability && jump(availability.start)}
+              title="Jump to the start of the availability"
+              aria-label="Jump to availability start"
+              style={{ ...chip(false), padding: "3px 7px", fontFamily: "monospace" }}
+            >
+              «
+            </button>
             <button
               onClick={() => click(-1)}
               title={`Back one ${def.click.unit}`}
               aria-label={`Back one ${def.click.unit}`}
-              style={{ ...chip(false), padding: "3px 7px" }}
+              style={{ ...chip(false), padding: "3px 7px", fontFamily: "monospace" }}
             >
-              ◀
+              ‹
             </button>
-            <span
+            <input
+              type="date"
+              value={new Date(at).toISOString().slice(0, 10)}
+              onChange={(e) => {
+                const [yy, mm, dd] = e.target.value.split("-").map(Number);
+                if (!yy || !mm || !dd) return;
+                onPlaying(false);
+                // Jump to the picked UTC day, preserving the time within the
+                // day — the chosen watch block at Day, the grid slot elsewhere.
+                jump(Date.UTC(yy, mm - 1, dd) + (at - utcDayStart(at)));
+              }}
+              aria-label="Evaluation date"
+              title="Pick the date to read the hull at (UTC)"
               style={{
+                font: "inherit",
                 fontFamily: "monospace",
+                fontSize: 11.5,
                 color: projecting ? C.warn : C.bright,
-                minWidth: horizon === "day" ? 168 : 92,
-                textAlign: "center",
+                background: "transparent",
+                border: `1px solid ${C.line}`,
+                borderRadius: 5,
+                padding: "2px 6px",
+                colorScheme: "dark",
+              }}
+            />
+            <button
+              onClick={() => onPlaying(true)}
+              disabled={playing}
+              title="Play through the window one interval at a time"
+              aria-label="Play"
+              style={{ ...chip(playing), padding: "3px 7px", opacity: playing ? 0.5 : 1 }}
+            >
+              ▶
+            </button>
+            <button
+              onClick={() => onPlaying(false)}
+              disabled={!playing}
+              title="Stop playback"
+              aria-label="Stop"
+              style={{ ...chip(false), padding: "3px 7px", opacity: playing ? 1 : 0.5 }}
+            >
+              ■
+            </button>
+            <button
+              onClick={() => {
+                onPlaying(false);
+                onAsOf(null);
+              }}
+              disabled={asOf === null}
+              title="Back to now — read the hull live"
+              aria-label="Back to now"
+              style={{
+                ...chip(false),
+                padding: "3px 8px",
+                fontWeight: 700,
+                opacity: asOf === null ? 0.5 : 1,
               }}
             >
-              {fmtInstant(at, horizon)}
-            </span>
+              t
+            </button>
             <button
               onClick={() => click(1)}
               title={`Forward one ${def.click.unit}`}
               aria-label={`Forward one ${def.click.unit}`}
-              style={{ ...chip(false), padding: "3px 7px" }}
+              style={{ ...chip(false), padding: "3px 7px", fontFamily: "monospace" }}
             >
-              ▶
+              ›
+            </button>
+            <button
+              onClick={() => availability && jump(availability.end - 1)}
+              title="Jump to the end of the availability"
+              aria-label="Jump to availability end"
+              style={{ ...chip(false), padding: "3px 7px", fontFamily: "monospace" }}
+            >
+              »
             </button>
           </div>
+
+          <span
+            style={{
+              fontFamily: "monospace",
+              color: projecting ? C.warn : C.bright,
+              minWidth: horizon === "day" ? 150 : 84,
+            }}
+          >
+            {fmtInstant(at, horizon)}
+          </span>
 
           {/* The watch blocks: the day horizon's floor of resolution, clickable.
               The block containing now emits live (asOf null) — the present
@@ -471,21 +547,7 @@ export function TimeControl({
             </div>
           )}
 
-          <input
-            type="range"
-            min={w.start}
-            max={lastNotch(w, def.step)}
-            step={def.step}
-            value={knob}
-            aria-label={`Evaluation instant, ${def.gloss}`}
-            onChange={(e) => {
-              onPlaying(false);
-              onAsOf(snap(Number(e.target.value), w, def.step));
-            }}
-            style={{ flex: 1, minWidth: 140, accentColor: projecting ? C.warn : C.accent }}
-          />
-
-          <span style={{ fontFamily: "monospace", color: C.dim, minWidth: 42 }}>
+          <span style={{ marginLeft: "auto", fontFamily: "monospace", color: C.dim, minWidth: 42 }}>
             {fmtOffset(at, now, horizon)}
           </span>
 
@@ -520,17 +582,7 @@ export function TimeControl({
             </span>
           )}
 
-          <button
-            onClick={() => {
-              onPlaying(false);
-              onAsOf(null);
-            }}
-            disabled={asOf === null}
-            title="Return to now"
-            style={{ ...chip(false), opacity: asOf === null ? 0.4 : 1 }}
-          >
-            ⟲ Now
-          </button>
+
         </>
       )}
     </div>

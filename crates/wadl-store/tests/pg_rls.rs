@@ -36,8 +36,8 @@
 use sqlx::Row as _;
 use uuid::Uuid;
 use wadl_domain::ids::{OrgId, VesselId};
-use wadl_store::memory::ManningBook;
-use wadl_store::model::ManningCrewSummary;
+use wadl_store::memory::{GeometryRegister, ManningBook};
+use wadl_store::model::{DeckCoverageSummary, ManningCrewSummary, SpaceGeometrySummary};
 use wadl_store::pg::PgStore;
 use wadl_store::StoreError;
 use wadl_store::TenantScope;
@@ -412,6 +412,62 @@ async fn ingested_documents_are_all_or_nothing_and_tenant_scoped() {
         Some("test.xer")
     );
     store.clear_schedule_of_record(&scope, hull).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_geometry_register_round_trips_and_stays_in_tenant() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN73);
+
+    store.clear_geometry_register(&scope, hull).await.unwrap();
+    assert!(store
+        .geometry_register(&scope, hull)
+        .await
+        .unwrap()
+        .is_none());
+
+    store
+        .set_geometry_register(
+            &scope,
+            hull,
+            GeometryRegister {
+                label: "CVN73-CA-extract.csv".to_owned(),
+                spaces: vec![SpaceGeometrySummary {
+                    compartment_no: "3-148-2-E".to_owned(),
+                    fwd_frame: 148,
+                    aft_frame: 154,
+                }],
+                decks: vec![DeckCoverageSummary {
+                    deck_code: "3rd".to_owned(),
+                    lo_frame: 20,
+                    hi_frame: 210,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let register = store
+        .geometry_register(&scope, hull)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(register.label, "CVN73-CA-extract.csv");
+    assert_eq!(register.spaces.first().map(|g| g.aft_frame), Some(154));
+    assert_eq!(register.decks.first().map(|d| d.hi_frame), Some(210));
+
+    let foreign = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.geometry_register(&foreign, hull).await,
+        Err(StoreError::NotFound)
+    ));
+
+    store.clear_geometry_register(&scope, hull).await.unwrap();
+    assert!(store
+        .geometry_register(&scope, hull)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

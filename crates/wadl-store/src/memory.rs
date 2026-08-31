@@ -313,6 +313,8 @@ pub struct InMemoryStore {
     budget_book: std::sync::RwLock<BTreeMap<VesselId, BudgetBook>>,
     /// An ingested manning book per hull — the supply side of crew planning.
     manning_book: std::sync::RwLock<BTreeMap<VesselId, ManningBook>>,
+    /// An ingested geometry register per hull — surveyed extents + deck bands.
+    geometry: std::sync::RwLock<BTreeMap<VesselId, GeometryRegister>>,
     /// Administrative clearances recorded against the seeded hazards, keyed by
     /// what the API clears with: hull, origin space, hazard kind. The seed rows
     /// stay immutable — a clearance is a second fact laid over the first, which
@@ -371,6 +373,22 @@ pub struct BudgetBook {
     pub label: String,
     /// One line per work item.
     pub items: Vec<crate::model::BudgetItemSummary>,
+}
+
+/// An ingested geometry register: surveyed compartment extents and deck
+/// coverage bands (see `docs/geometry-accuracy.md`).
+///
+/// Deliberately NOT seeded: a surveyed position is a yard's or a drawing's
+/// claim, and claims enter through the import door or not at all. Without one
+/// the boards draw placard-parsed pins and say so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeometryRegister {
+    /// Where it came from, e.g. `CVN73-CA-extract.csv`.
+    pub label: String,
+    /// One row per surveyed space.
+    pub spaces: Vec<crate::model::SpaceGeometrySummary>,
+    /// Zero or more coverage bands per deck.
+    pub decks: Vec<crate::model::DeckCoverageSummary>,
 }
 
 /// An ingested manning book: the crews the yard actually has, per trade.
@@ -480,6 +498,7 @@ impl InMemoryStore {
             zone_register: std::sync::RwLock::new(BTreeMap::new()),
             budget_book: std::sync::RwLock::new(BTreeMap::new()),
             manning_book: std::sync::RwLock::new(BTreeMap::new()),
+            geometry: std::sync::RwLock::new(BTreeMap::new()),
             cleared_hazards: std::sync::Mutex::new(Vec::new()),
         };
         (store, world)
@@ -1567,6 +1586,8 @@ impl Repositories for InMemoryStore {
                 let usn = compartment_no.parse_usn();
                 CompartmentSummary {
                     frame: usn.as_ref().map(|u| u.frame.get()),
+                    fwd_frame: None,
+                    aft_frame: None,
                     side: usn.as_ref().map_or_else(
                         || "unknown".to_owned(),
                         |u| format!("{:?}", u.side).to_lowercase(),
@@ -1748,6 +1769,47 @@ impl Repositories for InMemoryStore {
     ) -> Result<(), StoreError> {
         self.scoped_vessel(scope, vessel)?;
         self.budget_book
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<GeometryRegister>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .geometry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned())
+    }
+
+    async fn set_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: GeometryRegister,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.geometry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, register);
+        Ok(())
+    }
+
+    async fn clear_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.geometry
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&vessel);

@@ -143,6 +143,9 @@ export interface Decision {
 
 export interface Compartment {
   frame: number | null;
+  /** Surveyed frame extent from the geometry register; null = pin only. */
+  fwd_frame: number | null;
+  aft_frame: number | null;
   side: string;
   geometry_source: string;
   compartment_no: string;
@@ -1150,4 +1153,73 @@ export async function revertManningBook(id: Identity, vesselId: string): Promise
     headers: headers(id),
   });
   if (!res.ok) throw new Error(`manning book revert → ${res.status}`);
+}
+
+/** One surveyed space of a geometry register (docs/geometry-accuracy.md). */
+export interface SpaceGeometry {
+  compartment_no: string;
+  fwd_frame: number;
+  aft_frame: number;
+}
+
+/** One coverage band: the frames where a deck physically exists. */
+export interface DeckBand {
+  deck_code: string;
+  lo_frame: number;
+  hi_frame: number;
+}
+
+/** The findings a geometry register raises against the register, live. */
+export interface GeometryFindings {
+  surveyed: number;
+  register_total: number;
+  placard_disagreements: { compartment_no: string; placard_frame: number; surveyed_fwd: number }[];
+  outside_deck_coverage: { compartment_no: string; deck_code: string; fwd_frame: number; aft_frame: number }[];
+  unknown_spaces: { count: number; examples: string[] };
+}
+
+/** The served geometry register, summarized, with its live findings. */
+export interface GeometryInfo {
+  register: { label: string; spaces: number; decks: DeckBand[] } | null;
+  findings: GeometryFindings | null;
+}
+
+// The hull's geometry register with its live findings — or nulls, and every
+// drawn position is a placard parse that says so.
+export async function getGeometry(id: Identity, vesselId: string): Promise<GeometryInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/geometry`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`geometry → ${res.status}`);
+  return (await res.json()) as GeometryInfo;
+}
+
+/** Ingests a geometry register, all-or-nothing. `dryRun` previews findings. */
+export async function importGeometry(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  spaces: SpaceGeometry[],
+  decks: DeckBand[],
+  dryRun: boolean,
+): Promise<{
+  stored: boolean;
+  label: string;
+  spaces: number;
+  deck_bands: number;
+  findings: GeometryFindings;
+}> {
+  const res = await fetch(`/api/vessels/${vesselId}/geometry${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, spaces, decks }),
+  });
+  if (!res.ok) throw new Error(`geometry → ${res.status}: ${await res.text()}`);
+  return (await res.json()) as never;
+}
+
+export async function revertGeometry(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/geometry/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`geometry revert → ${res.status}`);
 }

@@ -134,6 +134,14 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::revert_manning),
         )
         .route(
+            "/api/vessels/:id/geometry",
+            get(handlers::get_geometry).post(handlers::import_geometry),
+        )
+        .route(
+            "/api/vessels/:id/geometry/revert",
+            post(handlers::revert_geometry),
+        )
+        .route(
             "/api/vessels/:id/schedule-of-record",
             post(handlers::import_schedule),
         )

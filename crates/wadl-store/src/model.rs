@@ -74,6 +74,12 @@ pub struct CompartmentSummary {
     /// cannot be parsed — the plan view must then say so rather than guess a
     /// position.
     pub frame: Option<i32>,
+    /// Surveyed frame extent — forward and aft boundary — from an ingested
+    /// geometry register. `None` until one is loaded; the plan then draws a
+    /// pin, not a band. Overlaid by the API, so both stores serve it alike.
+    pub fwd_frame: Option<i32>,
+    /// See `fwd_frame`.
+    pub aft_frame: Option<i32>,
     /// Athwartships side: `port`, `starboard` or `centreline`.
     pub side: String,
     /// Where the geometry came from — `register` when the class register stores
@@ -81,6 +87,34 @@ pub struct CompartmentSummary {
     /// position is a convenience for a scheme the platform understands, never a
     /// substitute for an authored register, and the surface labels it as such.
     pub geometry_source: String,
+}
+
+/// One surveyed space in a geometry register: the compartment's true frame
+/// extent, from a Compartment & Access drawing or the general plans. The
+/// placard number encodes the FORWARD boundary, which is what makes a
+/// disagreement between the two a computable finding rather than a mystery.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpaceGeometrySummary {
+    /// The placard number the row claims to survey.
+    pub compartment_no: String,
+    /// Forward boundary frame.
+    pub fwd_frame: i32,
+    /// Aft boundary frame (inclusive; `fwd <= aft`).
+    pub aft_frame: i32,
+}
+
+/// One coverage band of a deck: the frame interval where the deck physically
+/// exists. A deck may carry several bands; a platform that runs frames 60–180
+/// is delineated as exactly that, and the plan shades the rest as "no deck
+/// here" rather than "nothing scheduled".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeckCoverageSummary {
+    /// The register's deck code, e.g. `3rd`.
+    pub deck_code: String,
+    /// Forward end of the band.
+    pub lo_frame: i32,
+    /// Aft end of the band (inclusive; `lo <= hi`).
+    pub hi_frame: i32,
 }
 
 /// A work order with its provenance and, where distributed, its footprint.

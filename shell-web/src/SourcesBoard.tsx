@@ -28,14 +28,18 @@ import {
   type AsOf,
   type Identity,
   type ZoneChart,
+  getGeometry,
   getManningBook,
+  importGeometry,
   importManningBook,
+  revertGeometry,
   revertManningBook,
+  type GeometryInfo,
   type ManningBook,
 } from "./api";
 import { DiscardButton } from "./DiscardButton";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
-import { fmtBytes, parseBudgetCsv, parseManningCsv, parseZoneCsv, deltaSummary } from "./ingest";
+import { fmtBytes, parseBudgetCsv, parseGeometryCsv, parseManningCsv, parseZoneCsv, deltaSummary } from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { commitBtnStyle, C, errText, mh, msgColor } from "./theme";
@@ -70,6 +74,7 @@ export default function SourcesBoard({
   const [nonce, setNonce] = useState(0);
   const [staged, setStaged] = useState<Staged | null>(null);
   const [manning, setManning] = useState<ManningBook | null>(null);
+  const [geometry, setGeometry] = useState<GeometryInfo | null>(null);
   /** What the door is doing right now — a P6 export is megabytes, and reading
    *  or ingesting one deserves a visible verb rather than a frozen screen. */
   const [busy, setBusy] = useState<string | null>(null);
@@ -216,6 +221,44 @@ export default function SourcesBoard({
       });
   };
 
+  const stageGeometry = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const { spaces, decks } = parseGeometryCsv(text);
+        return importGeometry(identity, vesselId, file.name, spaces, decks, true).then((r) => {
+          setBusy(null);
+          const f = r.findings;
+          setStaged({
+            kind: "Geometry register",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              `${r.spaces} spaces surveyed · ${r.deck_bands} deck bands` +
+              (f.placard_disagreements.length > 0
+                ? ` · ⚠ ${f.placard_disagreements.length} disagree with their placard`
+                : "") +
+              (f.outside_deck_coverage.length > 0
+                ? ` · ⚠ ${f.outside_deck_coverage.length} outside deck coverage`
+                : "") +
+              (f.unknown_spaces.count > 0
+                ? ` · ${f.unknown_spaces.count} name no register space`
+                : ""),
+            commit: () =>
+              importGeometry(identity, vesselId, file.name, spaces, decks, false).then(
+                (x) => `✓ ${x.label}: ${x.spaces} spaces now surveyed, ${x.deck_bands} deck bands delineated`,
+              ),
+          });
+        });
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
+
   const confirmStaged = () => {
     const p = staged;
     if (!p) return;
@@ -241,12 +284,14 @@ export default function SourcesBoard({
       listActivities(identity, vesselId, asOf),
       getZoneChart(identity, vesselId),
       getManningBook(identity, vesselId).catch(() => null),
+      getGeometry(identity, vesselId).catch(() => null),
     ])
-      .then(([r, z, m]) => {
+      .then(([r, z, m, g]) => {
         if (stale) return;
         setRegister(r);
         setZones(z);
         setManning(m);
+        setGeometry(g);
       })
       .catch((e: unknown) => {
         if (stale) return;
@@ -525,6 +570,61 @@ export default function SourcesBoard({
                   void revertManningBook(identity, vesselId)
                     .then(() => {
                       setMsg("✓ back to demand only");
+                      setNonce((n) => n + 1);
+                    })
+                    .catch((e: unknown) => setMsg(errText(e)));
+                }
+              : undefined
+          }
+        />
+
+        <SourceCard
+          kind="Geometry register"
+          status={geometry?.register ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "NOT LOADED", tone: "#94a3b8" }}
+          name={geometry?.register?.label ?? "no geometry register — positions are placard parses"}
+          lines={[
+            {
+              text: geometry?.register
+                ? `${geometry.register.spaces} spaces surveyed of ${geometry.findings?.register_total ?? "?"} · ${geometry.register.decks.length} deck bands delineated`
+                : "The plan draws the forward-boundary frame parsed from each placard number, labelled as a parse. True extents and deck delineation are a drawing's claim and enter here.",
+              gloss:
+                "Surveyed frame extents per space and the frame bands where each deck physically exists — docs/geometry-accuracy.md. Disagreements with the register are served as findings, not hidden.",
+            },
+            ...(geometry?.findings
+              ? [
+                  {
+                    text:
+                      (geometry.findings.placard_disagreements.length > 0
+                        ? `⚠ placard disagrees: ${geometry.findings.placard_disagreements.map((x) => x.compartment_no).join(", ")}`
+                        : "every surveyed space agrees with its placard") +
+                      (geometry.findings.outside_deck_coverage.length > 0
+                        ? ` · ⚠ outside deck coverage: ${geometry.findings.outside_deck_coverage.map((x) => x.compartment_no).join(", ")}`
+                        : ""),
+                    tone:
+                      geometry.findings.placard_disagreements.length > 0 ||
+                      geometry.findings.outside_deck_coverage.length > 0
+                        ? C.warn
+                        : C.ok,
+                  },
+                ]
+              : []),
+          ]}
+          upload={{
+            label: "⭱ Upload geometry CSV",
+            accept: ".csv,text/csv,text/plain",
+            title:
+              "Ingest the geometry register (CSV lines: space,<no>,<fwd_frame>,<aft_frame> and deck,<code>,<lo>,<hi>). The preview names every disagreement with the register before Confirm. All-or-nothing.",
+            onFile: stageGeometry,
+          }}
+          importHint="Drawn on the Deck Explorer's plates"
+          onOpenHome={() => onOpenModule("deckExplorer")}
+          onRevert={
+            geometry?.register
+              ? () => {
+                  setMsg("⏳ discarding the geometry register…");
+                  void revertGeometry(identity, vesselId)
+                    .then(() => {
+                      setMsg("✓ back to placard parses");
                       setNonce((n) => n + 1);
                     })
                     .catch((e: unknown) => setMsg(errText(e)));

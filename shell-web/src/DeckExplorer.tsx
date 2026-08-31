@@ -8,6 +8,7 @@ import {
   importZoneChart,
   listActivities,
   listDecks,
+  getGeometry,
   getManningBook,
   listHazards,
   readiness,
@@ -18,6 +19,7 @@ import {
   type DeckStateRow,
   type Decision,
   type Identity,
+  type GeometryInfo,
   type LiveHazard,
   type ManningBook,
   type Rollup,
@@ -183,6 +185,11 @@ export default function DeckExplorer({
   // whatever the map is already showing.
   const [showManning, setShowManning] = useState(false);
   const [manningBook, setManningBook] = useState<ManningBook | null>(null);
+  // The geometry register (docs/geometry-accuracy.md): its deck coverage
+  // bands shade "no deck here" on the plate, and its presence is named in
+  // marker titles. The surveyed extents themselves arrive on the rows —
+  // the API overlays them, so no view re-derives the grade.
+  const [geometry, setGeometry] = useState<GeometryInfo | null>(null);
   // Two error slots, because the two fetches fail for different reasons and need
   // different words. The register is scope-gated: failing it means this hull is
   // not yours. The states are instant-gated too: failing those can just mean the
@@ -325,6 +332,9 @@ export default function DeckExplorer({
     getManningBook(identity, vesselId)
       .then(setManningBook)
       .catch(() => setManningBook(null));
+    getGeometry(identity, vesselId)
+      .then(setGeometry)
+      .catch(() => setGeometry(null));
   }, [identity, vesselId, asOf, epoch]);
 
   // The reading window: from the instant, one horizon forward. This is what
@@ -1028,6 +1038,16 @@ export default function DeckExplorer({
                 />
               ) : effMode === "drawing" && sheet ? (
                 <SheetView
+                  deckBands={
+                    geometry?.register
+                      ? {
+                          label: geometry.register.label,
+                          bands: geometry.register.decks.filter(
+                            (d) => d.deck_code === selectedDeck,
+                          ),
+                        }
+                      : null
+                  }
                   sheet={sheet}
                   rows={onDeck}
                   selected={selected}
@@ -1079,13 +1099,28 @@ export default function DeckExplorer({
                 />
               )}
 
-              {parsedGeometry && (
+              {geometry?.register ? (
+                <p style={{ fontSize: 10.5, color: DIM, marginTop: 8 }}>
+                  Geometry register <b style={{ color: C.bright }}>{geometry.register.label}</b>{" "}
+                  is in force: surveyed spaces draw their frame extent as a band on the
+                  plate&apos;s ruler, and shaded regions are where this deck does not
+                  exist. Spaces the register does not survey remain placard parses — the
+                  hover card says which is which.
+                  {(geometry.findings?.placard_disagreements.length ?? 0) > 0 && (
+                    <b style={{ color: C.warn }}>
+                      {" "}⚠ {geometry.findings?.placard_disagreements.length} surveyed
+                      space(s) disagree with their placard — see Data Sources.
+                    </b>
+                  )}
+                </p>
+              ) : parsedGeometry ? (
                 <p style={{ fontSize: 10.5, color: DIM, marginTop: 8 }}>
                   Positions derived from the placard numbers — this class uses the USN
                   deck-frame-side scheme. A hull whose register carries authored frame
-                  and side data uses that instead, and says <b>register</b>.
+                  and side data uses that instead, and says <b>register</b>. A surveyed
+                  geometry register (Data Sources) upgrades pins to true frame extents.
                 </p>
-              )}
+              ) : null}
 
               {/* legend — whichever colouring is actually in force */}
               <div style={{ display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap", fontSize: 11, color: DIM }}>
@@ -1801,6 +1836,7 @@ function ReadinessAltitude({
  * labels, and drawing them all would hide the drawing they are annotating.
  */
 function SheetView({
+  deckBands,
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
   dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zones, zoneAlerts, zoneRows,
   load, windowDays, horizonLabel, conflicts,
@@ -1841,6 +1877,10 @@ function SheetView({
   horizonLabel: string;
   /** The day's served hot-vs-flammable pairs, drawn on the plate. */
   conflicts: WorkConflicts | null;
+  /** The geometry register's coverage bands for THIS deck, when one is
+   *  loaded: where the deck physically exists. Everything outside shades
+   *  as "no deck here" — an empty area must not read as "nothing scheduled". */
+  deckBands: { label: string; bands: { lo_frame: number; hi_frame: number }[] } | null;
 }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<string | null>(null);
@@ -2087,6 +2127,44 @@ function SheetView({
             onLoad={() => setLoaded(sheet.file)}
           />
 
+          {/* Deck delineation: where the geometry register says this deck
+              does NOT exist, the plate shades — so an empty region reads as
+              "no deck here", never as "nothing scheduled here". Bands are the
+              drawing's claim; absence of bands claims nothing and shades
+              nothing. */}
+          {cal && deckBands && deckBands.bands.length > 0 && (() => {
+            const maxFrame = Math.ceil(cal.frame0X / cal.pxPerFrame);
+            const covered = deckBands.bands
+              .map((b) => [Math.max(0, b.lo_frame), Math.min(maxFrame, b.hi_frame)] as [number, number])
+              .sort((a, b) => a[0] - b[0]);
+            const gaps: [number, number][] = [];
+            let cursor = 0;
+            for (const [lo, hi] of covered) {
+              if (lo > cursor) gaps.push([cursor, lo]);
+              cursor = Math.max(cursor, hi);
+            }
+            if (cursor < maxFrame) gaps.push([cursor, maxFrame]);
+            return (
+              <g pointerEvents="none">
+                {gaps.map(([lo, hi]) => {
+                  const xHi = sheetX(cal, hi);
+                  const xLo = sheetX(cal, lo);
+                  const [gx, gw] = xHi < xLo ? [xHi, xLo - xHi] : [xLo, xHi - xLo];
+                  return (
+                    <g key={`${lo}-${hi}`}>
+                      <rect x={gx} y={0} width={gw} height={H} fill="#0a0b0d" opacity={0.55} />
+                      {gw > 260 * u && (
+                        <text x={gx + gw / 2} y={H * 0.5} fill="#6a7080" fontSize={15 * u} fontWeight={700} textAnchor="middle" letterSpacing={1.2}>
+                          NO DECK HERE · fr {lo}–{hi} · {deckBands.label}
+                        </text>
+                      )}
+                    </g>
+                  );
+                })}
+              </g>
+            );
+          })()}
+
           {/* Zones & compartments shading — the register's geometry made
               visible so it can be CHECKED, not trusted. A zone is a band of
               frames (the extent of its spaces on this deck, drawn edge to
@@ -2196,12 +2274,45 @@ function SheetView({
             const heldQuiet = !active && (r.readiness === "held" || r.state !== "ALLOW");
             const crew = active ? Math.max(1, Math.ceil((l?.hours ?? 0) / (8 * Math.max(1, windowDays)))) : 0;
             const crowded = crew > CREW_TOLERANCE;
+            const fwd = r.compartment.fwd_frame;
+            const aft = r.compartment.aft_frame;
+            const surveyed = fwd !== null && aft !== null;
+            const provenance = surveyed
+              ? `position: surveyed extent fr ${fwd}–${aft}`
+              : r.compartment.geometry_source === "parsed"
+                ? "position: parsed from the placard number — forward boundary only, transverse is a legible placement"
+                : `position source: ${r.compartment.geometry_source}`;
+            const extentBand = surveyed && cal && (
+              <g pointerEvents="none">
+                <rect
+                  x={Math.min(sheetX(cal, fwd), sheetX(cal, aft))}
+                  y={at.y - H * 0.024}
+                  width={Math.abs(sheetX(cal, fwd) - sheetX(cal, aft))}
+                  height={H * 0.048}
+                  rx={3 * u}
+                  fill={toneOf(r).fg}
+                  opacity={0.14}
+                />
+                <rect
+                  x={Math.min(sheetX(cal, fwd), sheetX(cal, aft))}
+                  y={at.y - H * 0.024}
+                  width={Math.abs(sheetX(cal, fwd) - sheetX(cal, aft))}
+                  height={H * 0.048}
+                  rx={3 * u}
+                  fill="none"
+                  stroke={toneOf(r).fg}
+                  strokeWidth={1.6 * u}
+                  opacity={0.8}
+                />
+              </g>
+            );
             if (!active && !heldQuiet && !isSel && !isHot) {
               return (
                 <g key={no} onClick={() => onSelect(no)} onPointerEnter={() => setHovered(no)} style={{ cursor: "pointer" }}>
                   <title>
-                    {`${no} — ${r.compartment.name}\nno work this ${horizonLabel} · nothing refuses work here at this instant\nA candidate site for ad-hoc work — verify gas-free status with the certifying authority before hot work.`}
+                    {`${no} — ${r.compartment.name}\nno work this ${horizonLabel} · nothing refuses work here at this instant\n${provenance}\nA candidate site for ad-hoc work — verify gas-free status with the certifying authority before hot work.`}
                   </title>
+                  {extentBand}
                   <circle cx={at.x} cy={at.y} r={3.4 * u} fill={OVERLAY_STYLE.go.fg} fillOpacity={0.4} stroke={OVERLAY_STYLE.go.fg} strokeWidth={1 * u} strokeOpacity={0.6} />
                 </g>
               );
@@ -2231,6 +2342,7 @@ function SheetView({
                     strokeWidth={1.6 * u} opacity={0.75}
                   />
                 )}
+                {extentBand}
                 {/* A tick down to the keel line: on a busy plate the pin alone
                     does not make its frame station obvious. */}
                 <line x1={at.x} y1={at.y} x2={at.x} y2={cal.centrelineY} stroke={tone.fg} strokeWidth={1.5 * u} opacity={0.6} />
@@ -2337,6 +2449,13 @@ function SheetView({
               <span style={{ fontSize: 10.5, fontWeight: 700, color: OVERLAY_STYLE[overlayBucket(hoverRow)].fg }}>
                 {OVERLAY_STYLE[overlayBucket(hoverRow)].label}
               </span>
+            </div>
+            <div style={{ fontSize: 10.5, color: "#8a90a0", marginTop: 2 }}>
+              {hoverRow.compartment.fwd_frame !== null && hoverRow.compartment.aft_frame !== null
+                ? `surveyed extent fr ${hoverRow.compartment.fwd_frame}–${hoverRow.compartment.aft_frame}`
+                : hoverRow.compartment.geometry_source === "parsed"
+                  ? "position parsed from placard — fwd boundary only"
+                  : `position source: ${hoverRow.compartment.geometry_source}`}
             </div>
             <div style={{ fontSize: 11.5, color: C.bright }}>{hoverRow.compartment.name}</div>
             <div style={{ fontSize: 10.5, color: DIM }}>

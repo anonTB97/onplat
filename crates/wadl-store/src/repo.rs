@@ -189,6 +189,40 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<(), StoreError>;
 
+    /// The hull's ingested geometry register — surveyed compartment extents
+    /// and deck coverage bands — or `None` when every drawn position is a
+    /// placard parse and the surface says so.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::GeometryRegister>, StoreError>;
+
+    /// Replaces a hull's geometry register. All-or-nothing at the caller.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: crate::memory::GeometryRegister,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's geometry register; positions return to placard
+    /// parses. A no-op when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
     /// The hull's ingested manning book — available people per trade, per
     /// half-shift — or `None` when the boards can show demand only.
     ///

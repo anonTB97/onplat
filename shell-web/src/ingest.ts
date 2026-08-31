@@ -8,7 +8,7 @@
 // header row is left for the server to refuse — the all-or-nothing verdict,
 // with every rejection reason, is the server's to give.
 
-import type { BudgetItem, ZoneBound , ManningCrew } from "./api";
+import type { BudgetItem, DeckBand, ManningCrew, SpaceGeometry, ZoneBound } from "./api";
 
 /** CSV: `zone,lo_frame,hi_frame` — the yard's zone chart. */
 export function parseZoneCsv(text: string): ZoneBound[] {
@@ -50,6 +50,27 @@ export function parseManningCsv(text: string): ManningCrew[] {
     crews.push({ trade: trade ?? "", headcount: Number(headcount) });
   }
   return crews;
+}
+
+/**
+ * CSV for the geometry register — record-typed lines, one file:
+ * `space,<compartment_no>,<fwd_frame>,<aft_frame>` and
+ * `deck,<deck_code>,<lo_frame>,<hi_frame>`.
+ */
+export function parseGeometryCsv(text: string): { spaces: SpaceGeometry[]; decks: DeckBand[] } {
+  const spaces: SpaceGeometry[] = [];
+  const decks: DeckBand[] = [];
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const [kind, a, b, c] = t.split(",").map((x) => x.trim());
+    if (kind === "space") {
+      spaces.push({ compartment_no: a ?? "", fwd_frame: Number(b), aft_frame: Number(c) });
+    } else if (kind === "deck") {
+      decks.push({ deck_code: a ?? "", lo_frame: Number(b), hi_frame: Number(c) });
+    }
+  }
+  return { spaces, decks };
 }
 
 /** A file size a human reads: a real P6 export is megabytes, and the reader

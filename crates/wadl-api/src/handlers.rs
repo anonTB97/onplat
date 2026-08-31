@@ -131,11 +131,40 @@ pub(crate) async fn list_compartments(
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let compartments = state
-        .store
-        .list_compartments(&scope, VesselId::from_uuid(id))
-        .await?;
+    let vessel = VesselId::from_uuid(id);
+    let mut compartments = state.store.list_compartments(&scope, vessel).await?;
+    overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
     Ok(Json(json!(compartments)))
+}
+
+/// Overlays the ingested geometry register onto served compartments: a
+/// surveyed space gains its frame extent, its forward boundary becomes the
+/// drawn datum, and its provenance climbs to `surveyed`. Done here, once, so
+/// both stores serve identical geometry and no view re-derives the grade.
+async fn overlay_geometry(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    compartments: &mut [wadl_store::model::CompartmentSummary],
+) -> Result<(), ApiError> {
+    let Some(register) = state.store.geometry_register(scope, vessel).await? else {
+        return Ok(());
+    };
+    let by_no: std::collections::BTreeMap<&str, &wadl_store::model::SpaceGeometrySummary> =
+        register
+            .spaces
+            .iter()
+            .map(|g| (g.compartment_no.as_str(), g))
+            .collect();
+    for c in compartments.iter_mut() {
+        if let Some(g) = by_no.get(c.compartment_no.as_str()) {
+            c.frame = Some(g.fwd_frame);
+            c.fwd_frame = Some(g.fwd_frame);
+            c.aft_frame = Some(g.aft_frame);
+            c.geometry_source = "surveyed".to_owned();
+        }
+    }
+    Ok(())
 }
 
 /// The work orders on a hull, each marked with whether it is planned for `as_of`.
@@ -595,7 +624,8 @@ pub(crate) async fn deck_states(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let mut compartments = state.store.list_compartments(&scope, vessel).await?;
+    overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
     let hazards = state.store.live_hazards(&scope, vessel).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
@@ -2106,6 +2136,214 @@ pub(crate) async fn import_manning(
         "crews": crews,
         "coverage": coverage,
     })))
+}
+
+/// The body of a geometry-register import (`docs/geometry-accuracy.md`).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportGeometry {
+    /// Where the register came from, e.g. a C&A drawing extract.
+    pub(crate) label: String,
+    /// Surveyed frame extents, one row per space.
+    #[serde(default)]
+    pub(crate) spaces: Vec<wadl_store::model::SpaceGeometrySummary>,
+    /// Deck coverage bands — where each deck physically exists.
+    #[serde(default)]
+    pub(crate) decks: Vec<wadl_store::model::DeckCoverageSummary>,
+}
+
+/// The findings a geometry register raises against the current compartment
+/// register. Computed at dry-run AND on every read, so they cannot go stale:
+/// the placard number encodes the forward boundary, which makes a survey that
+/// disagrees with it a computable finding; a space outside its deck's coverage
+/// bands is a transcription error wearing coordinates.
+fn geometry_findings(
+    register: &wadl_store::memory::GeometryRegister,
+    compartments: &[wadl_store::model::CompartmentSummary],
+) -> Value {
+    const EXAMPLES: usize = 8;
+    let known: std::collections::BTreeMap<&str, &wadl_store::model::CompartmentSummary> =
+        compartments
+            .iter()
+            .map(|c| (c.compartment_no.as_str(), c))
+            .collect();
+    let mut bands: std::collections::BTreeMap<&str, Vec<(i32, i32)>> =
+        std::collections::BTreeMap::new();
+    for d in &register.decks {
+        bands
+            .entry(d.deck_code.as_str())
+            .or_default()
+            .push((d.lo_frame, d.hi_frame));
+    }
+
+    let mut placard_disagreements: Vec<Value> = Vec::new();
+    let mut outside_coverage: Vec<Value> = Vec::new();
+    let mut unknown = 0_usize;
+    let mut unknown_examples: Vec<&str> = Vec::new();
+    let mut surveyed = 0_usize;
+    for g in &register.spaces {
+        let Some(c) = known.get(g.compartment_no.as_str()) else {
+            unknown += 1;
+            if unknown_examples.len() < EXAMPLES {
+                unknown_examples.push(&g.compartment_no);
+            }
+            continue;
+        };
+        surveyed += 1;
+        if let Some(usn) = c.compartment_no.parse_usn() {
+            if usn.frame.get() != g.fwd_frame {
+                placard_disagreements.push(json!({
+                    "compartment_no": g.compartment_no,
+                    "placard_frame": usn.frame.get(),
+                    "surveyed_fwd": g.fwd_frame,
+                }));
+            }
+        }
+        if let Some(deck_bands) = bands.get(c.deck_code.as_str()) {
+            let inside = deck_bands
+                .iter()
+                .any(|&(lo, hi)| g.fwd_frame >= lo && g.aft_frame <= hi);
+            if !inside {
+                outside_coverage.push(json!({
+                    "compartment_no": g.compartment_no,
+                    "deck_code": c.deck_code,
+                    "fwd_frame": g.fwd_frame,
+                    "aft_frame": g.aft_frame,
+                }));
+            }
+        }
+    }
+    json!({
+        "surveyed": surveyed,
+        "register_total": compartments.len(),
+        "placard_disagreements": placard_disagreements,
+        "outside_deck_coverage": outside_coverage,
+        "unknown_spaces": { "count": unknown, "examples": unknown_examples },
+    })
+}
+
+/// The hull's geometry register with its live findings, or `null` — placard
+/// parses all round, and the surface says so.
+pub(crate) async fn get_geometry(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let Some(register) = state.store.geometry_register(&scope, vessel).await? else {
+        state.store.get_vessel(&scope, vessel).await?;
+        return Ok(Json(
+            json!({ "register": Value::Null, "findings": Value::Null }),
+        ));
+    };
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let findings = geometry_findings(&register, &compartments);
+    Ok(Json(json!({
+        "register": {
+            "label": register.label,
+            "spaces": register.spaces.len(),
+            "decks": register.decks,
+        },
+        "findings": findings,
+    })))
+}
+
+/// Ingests a geometry register: surveyed frame extents per space and coverage
+/// bands per deck. Refusals are structural (the file is malformed);
+/// disagreements with the register are FINDINGS — previewed before Confirm,
+/// served on every read — because a survey that contradicts a placard is
+/// exactly the thing a person should look at, not a thing to hide.
+pub(crate) async fn import_geometry(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportGeometry = read_import_body(req).await?;
+
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the register carries no label".to_owned());
+    }
+    if body.spaces.is_empty() && body.decks.is_empty() {
+        rejections.push("the register carries neither spaces nor deck bands".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for g in &body.spaces {
+        if g.compartment_no.trim().is_empty() {
+            rejections.push("a space row names no compartment".to_owned());
+        }
+        if g.fwd_frame > g.aft_frame {
+            rejections.push(format!(
+                "{}: fwd frame {} is aft of aft frame {}",
+                g.compartment_no, g.fwd_frame, g.aft_frame
+            ));
+        }
+        if g.fwd_frame < 0 {
+            rejections.push(format!("{}: negative frame", g.compartment_no));
+        }
+        if !seen.insert(g.compartment_no.as_str()) {
+            rejections.push(format!("{} is surveyed twice", g.compartment_no));
+        }
+    }
+    for d in &body.decks {
+        if d.lo_frame > d.hi_frame || d.lo_frame < 0 {
+            rejections.push(format!(
+                "deck {}: band {}..{} is not a forward-to-aft interval",
+                d.deck_code, d.lo_frame, d.hi_frame
+            ));
+        }
+    }
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the register was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let register = wadl_store::memory::GeometryRegister {
+        label: body.label,
+        spaces: body.spaces,
+        decks: body.decks,
+    };
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let findings = geometry_findings(&register, &compartments);
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": register.label,
+            "spaces": register.spaces.len(),
+            "deck_bands": register.decks.len(),
+            "findings": findings,
+        })));
+    }
+    let label = register.label.clone();
+    let spaces = register.spaces.len();
+    let deck_bands = register.decks.len();
+    state
+        .store
+        .set_geometry_register(&scope, vessel, register)
+        .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "spaces": spaces,
+        "deck_bands": deck_bands,
+        "findings": findings,
+    })))
+}
+
+/// Discards the geometry register; positions return to placard parses.
+pub(crate) async fn revert_geometry(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_geometry_register(&scope, vessel).await?;
+    Ok(Json(json!({ "reverted": true })))
 }
 
 /// Discards the ingested manning book; the boards return to demand only.

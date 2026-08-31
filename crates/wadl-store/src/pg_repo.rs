@@ -360,6 +360,8 @@ impl PgStore {
                 let from_register = stored_frame.is_some() && stored_side.is_some();
                 CompartmentSummary {
                     frame: stored_frame.or_else(|| parsed.as_ref().map(|u| u.frame.get())),
+                    fwd_frame: None,
+                    aft_frame: None,
                     side: stored_side.unwrap_or_else(|| {
                         parsed.as_ref().map_or_else(
                             || "unknown".to_owned(),
@@ -426,7 +428,15 @@ use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
 use wadl_plan::{Package, Segment, SpaceWork};
 
-use crate::memory::{BudgetBook, ManningBook, ScheduleOfRecord, ZoneRegister};
+use crate::memory::{BudgetBook, GeometryRegister, ManningBook, ScheduleOfRecord, ZoneRegister};
+
+/// The jsonb payload of a `geometry_register` document row: the register minus
+/// its label (the label is the document row's own column).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GeometryDoc {
+    spaces: Vec<crate::model::SpaceGeometrySummary>,
+    decks: Vec<crate::model::DeckCoverageSummary>,
+}
 use crate::model::{
     ActivitySummary, AuditRecord, PackageSummary, ScheduleEdgeSummary, StrandedItem,
     StrandedReport, WorkOrderSummary,
@@ -900,6 +910,52 @@ impl Repositories for PgStore {
     ) -> Result<(), StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         self.delete_document(scope.org, vessel, "budget_book").await
+    }
+
+    async fn geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<GeometryRegister>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "geometry_register")
+            .await?
+            .map(|(label, doc)| {
+                let parts: GeometryDoc = serde_json::from_value(doc)
+                    .map_err(|e| StoreError::Backend(format!("geometry_register doc: {e}")))?;
+                Ok(GeometryRegister {
+                    label,
+                    spaces: parts.spaces,
+                    decks: parts.decks,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: GeometryRegister,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let doc = serde_json::to_value(GeometryDoc {
+            spaces: register.spaces,
+            decks: register.decks,
+        })
+        .map_err(|e| StoreError::Backend(format!("geometry_register doc: {e}")))?;
+        self.put_document(scope.org, vessel, "geometry_register", &register.label, doc)
+            .await
+    }
+
+    async fn clear_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "geometry_register")
+            .await
     }
 
     async fn manning_book(

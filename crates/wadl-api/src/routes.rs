@@ -134,6 +134,7 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
     ("GET", "/api/vessels/:id/packages/:no", true, None),
 ];
 
+/// The full endpoint inventory as typed rows — [`ROUTES`] materialized.
 #[must_use]
 pub fn inventory() -> Vec<RouteSpec> {
     ROUTES

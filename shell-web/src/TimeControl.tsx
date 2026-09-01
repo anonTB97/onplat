@@ -11,23 +11,18 @@
 // 04–08Z, … — because that is the lowest level anything on this hull is planned
 // at. An hour-grain scrubber claimed a precision no schedule carries.
 //
-// **Dates are clicked, not only scrubbed.** The primary gesture is the day
-// clicker — step a day back or forward, then pick the watch block — because
-// "show me Thursday" is a discrete question and a slider makes the reader aim
-// for it. The scrubber remains for sweeping a window continuously.
+// **Dates are clicked, not scrubbed.** The control is a transport bar —
+// « ‹ [calendar date] ▶ ■ t › » — because "show me Thursday" is a discrete
+// question. Every gesture moves on ONE grid: the whole availability, notched
+// at the horizon's step (`availabilityGrid`). Three audiences share the bar,
+// each with their own step:
 //
-// Why this is still not one slider. The range asked for — watch to month — is a
-// large spread in resolution, and a single control spanning it is unusable at
-// both ends. Three audiences are hiding inside the one request, each with its
-// own horizon AND its own step:
+//   mechanic     Day     watch    can I get in there at 1400?
+//   supervisor   Week    day      what frees up before Thursday?
+//   planner      Availability     where does the work pile up?
 //
-//   mechanic     this day          watch    can I get in there at 1400?
-//   supervisor   this week         day      what frees up before Thursday?
-//   planner      the availability  month    where does the work pile up?
-//
-// So the horizon sets the window and the step together, and the clicker and
-// scrubber move inside it. Personas carry the horizon they open at, pairing
-// with the altitude control the Deck Explorer already has.
+// Personas carry the horizon they open at, pairing with the altitude control
+// the Deck Explorer already has.
 //
 // The instant is fed to the API as `?as_of=` and evaluated by the engine, which
 // takes the instant as data and reads no clock. Nothing here interpolates a
@@ -114,12 +109,12 @@ export const HORIZON_ORDER: Horizon[] = ["day", "week", "month", "availability"]
 /**
  * Moves a window's start onto the step grid that runs through `anchor`.
  *
- * This is load-bearing, not tidiness. `<input type="range">` only reaches
- * `min + k*step`, so unless `min` is congruent to the anchor modulo the step,
- * no reachable notch sits on the instants the readout names. At the Week
- * horizon a mis-anchored grid once put a reachable instant 9.6 h inside the
- * "this is live" band: the boards were evaluated 9.6 h out, the coating cascade
- * had flipped BLOCK to ALLOW, and the chrome said `evaluated live`.
+ * This is load-bearing, not tidiness. Every instant this control emits is a
+ * grid notch, and unless the grid is congruent to its anchor modulo the step,
+ * no notch sits on the instants the readout names. At the Week horizon a
+ * mis-anchored grid once put an emitted instant 9.6 h inside the "this is
+ * live" band: the boards were evaluated 9.6 h out, the coating cascade had
+ * flipped BLOCK to ALLOW, and the chrome said `evaluated live`.
  *
  * Shifted forward only, so an aligned window never reaches back outside the
  * availability it was just clamped into.
@@ -132,10 +127,8 @@ function alignStart(start: number, anchor: number, step: number): number {
  * The last grid notch strictly inside `w`.
  *
  * The window's exclusive end is almost never on the grid, so clamping to
- * `end - 1` would emit an instant the slider cannot represent — the thumb would
- * snap to the nearest notch and sit somewhere other than the readout it is
- * labelled with. Every instant this control emits is on the grid, top of the
- * window included.
+ * `end - 1` would emit an off-grid instant the readout could not name. Every
+ * instant this control emits is on the grid, top of the window included.
  */
 function lastNotch(w: TimeWindow, step: number): number {
   return w.start + Math.floor((w.end - 1 - w.start) / step) * step;
@@ -147,46 +140,25 @@ export function clampInto(at: number, w: TimeWindow, step: number): number {
 }
 
 /**
- * The scrubbable window for a horizon.
+ * The one grid every gesture moves on: the WHOLE availability, notched at the
+ * horizon's step.
  *
- * The day horizon's window is the UTC calendar day containing `focus` — the
- * day the clicker has walked to — aligned to the watch grid, so the scrubber
- * sweeps the six blocks of THAT day and stepping a day moves the window
- * wholesale. Slid, not truncated, at the availability's edges so it keeps its
- * span.
- *
- * The wider horizons stay anchored on `now` (their grid runs through the
- * present, so "live" is a reachable notch) and open with a fifth of their span
- * behind it, because a window that starts at the present hides the thing a
- * supervisor most often wants — what has just happened. The clicker is not
- * limited to this window: it walks the whole availability, and the scrubber
- * covers the near term.
+ * The day grid is anchored to UTC midnight, so its notches ARE the watch
+ * blocks — calendar names two readers share. The wider grids run through
+ * `now`, so the present is itself a notch and the live band means what it
+ * says. There is deliberately no windowing: « must reach the availability's
+ * first notch and ▶ its last, whatever the horizon — anchoring a window on
+ * `now` is exactly how « once landed on "roughly yesterday" and playback froze
+ * against an edge the readout never named.
  */
-export function windowFor(
+export function availabilityGrid(
   horizon: Horizon,
   now: number,
   availability: TimeWindow,
-  focus: number = now,
 ): TimeWindow {
-  const { span, step } = HORIZONS[horizon];
-  const whole = availability.end - availability.start;
-  if (horizon === "day") {
-    let start = utcDayStart(focus);
-    if (start < availability.start) start = availability.start;
-    if (start + DAY > availability.end) start = Math.max(availability.start, availability.end - DAY);
-    // Anchor on the UTC day, so the notches ARE the watch blocks.
-    return {
-      start: alignStart(start, utcDayStart(focus), step),
-      end: Math.min(start + DAY, availability.end),
-    };
-  }
-  if (span === null || span >= whole) {
-    return { start: alignStart(availability.start, now, step), end: availability.end };
-  }
-  let start = now - span / 5;
-  if (start < availability.start) start = availability.start;
-  if (start + span > availability.end) start = availability.end - span;
-  return { start: alignStart(start, now, step), end: start + span };
+  const { step } = HORIZONS[horizon];
+  const anchor = horizon === "day" ? utcDayStart(availability.start) : now;
+  return { start: alignStart(availability.start, anchor, step), end: availability.end };
 }
 
 /** Snaps an instant to the horizon's step grid inside `w`. */
@@ -267,76 +239,60 @@ export function TimeControl({
   // evaluated at, and a readout that clamped it would name an instant nobody
   // asked for.
   const at = asOf ?? now;
-  const w = availability ? windowFor(horizon, now, availability, at) : null;
+  const w = availability ? availabilityGrid(horizon, now, availability) : null;
   const projecting = isProjection(asOf, now, horizon);
   // A hull whose availability has not opened (or has closed) has no notch on
   // `now`. Live still works — no parameter is sent and the server answers from
-  // its own clock — but the slider cannot point at the present, so it says so
-  // rather than sitting at one end implying it does.
+  // its own clock — but the transport bar cannot land on the present, so it
+  // says so rather than implying it can.
   const nowOutside = w !== null && (now < w.start || now >= w.end);
 
-  // Playback: the transport-control contract. ▶ walks one step per beat and
-  // keeps going — across days, the day window following along — until the
-  // availability ends or ■ stops it. Stopping at the end rather than wrapping,
-  // because a loop would quietly re-run the run and read as live data
-  // refreshing.
+  // Playback: the transport-control contract. ▶ walks one grid notch per beat
+  // and keeps going — across days, weeks, whatever the step — until the
+  // availability's last notch or ■ stops it. Stopping, never wrapping: a loop
+  // would quietly re-run the availability and read as live data refreshing.
   useEffect(() => {
-    if (!playing || !w || !availability) return undefined;
+    if (!playing || !w) return undefined;
+    const end = lastNotch(w, def.step);
     const id = window.setInterval(() => {
       // From the grid, never from a raw `at`: starting off-grid would walk
       // the whole run of requests off the notches the readout names.
       const next = clampInto(at, w, def.step) + def.step;
-      if (next >= availability.end) {
+      if (next > end) {
         onPlaying(false);
       } else {
         onAsOf(next);
       }
     }, 800);
     return () => window.clearInterval(id);
-  }, [playing, at, def.step, onAsOf, onPlaying, w, availability]);
+  }, [playing, at, def.step, onAsOf, onPlaying, w]);
 
-  // Changing horizon must leave the instant inside the new window, and re-snap it
-  // to the new step. Scrubbing to Thursday at Week and switching to Day would
-  // otherwise leave an instant that is not a watch block.
+  // Changing horizon must re-snap the instant to the new grid. A Thursday
+  // picked at Week and switched to Day would otherwise not be a watch block.
   const pickHorizon = (h: Horizon) => {
     onPlaying(false);
     onHorizon(h);
     if (asOf === null || !availability) return;
-    const next = windowFor(h, now, availability, asOf);
-    onAsOf(snap(clampInto(asOf, next, HORIZONS[h].step), next, HORIZONS[h].step));
+    const grid = availabilityGrid(h, now, availability);
+    onAsOf(snap(clampInto(asOf, grid, HORIZONS[h].step), grid, HORIZONS[h].step));
   };
 
-  /**
-   * The day clicker's step. Walks the WHOLE availability, not just the
-   * scrubber's window — "show me next Tuesday" must not stop at a window edge —
-   * and clamps to the availability's own grid notches at the ends. Emits a
-   * dated instant even when it lands near now; ⟲ Now is the way back to live.
-   */
-  /** Jump to an arbitrary instant, clamped to the availability on the
-   *  horizon's own grid — the date picker's and the « » buttons' move. */
+  /** Jump to an arbitrary instant, clamped to the availability's grid — the
+   *  date picker's and the « » buttons' move. Reaches the whole availability:
+   *  « lands on the first notch, » on the last, whatever the horizon. */
   const jump = (ms: number) => {
-    if (!availability) return;
+    if (!w) return;
     onPlaying(false);
-    const nw = windowFor(horizon, now, availability, ms);
-    if (horizon === "day") {
-      onAsOf(clampInto(ms, nw, def.step));
-    } else {
-      onAsOf(clampInto(ms, { start: nw.start, end: availability.end }, def.step));
-    }
+    onAsOf(clampInto(ms, w, def.step));
   };
 
+  /** Step one clicking unit — a day at Day and Week, a week at Month, a month
+   *  at Availability — staying on the grid. */
   const click = (dir: 1 | -1) => {
-    if (!availability) return;
+    if (!w) return;
     onPlaying(false);
-    const base = horizon === "day" ? blockStart(at) : at;
-    const next = base + dir * def.click.step;
-    const nw = windowFor(horizon, now, availability, next);
-    const whole: TimeWindow = { start: nw.start, end: availability.end };
-    if (horizon === "day") {
-      onAsOf(clampInto(next, nw, def.step));
-    } else {
-      onAsOf(clampInto(next, whole, def.step));
-    }
+    const base = horizon === "day" ? blockStart(at) : clampInto(at, w, def.step);
+    onAsOf(clampInto(base + dir * def.click.step, w, def.step));
   };
 
   const chip = (active: boolean): React.CSSProperties => ({
@@ -553,7 +509,7 @@ export function TimeControl({
 
           {nowOutside && asOf === null && (
             <span
-              title="Now falls outside this hull's availability, so the scrubber cannot point at the present. The boards are live; click a date inside the availability to read it."
+              title="Now falls outside this hull's availability, so the transport bar cannot land on the present. The boards are live; pick a date inside the availability to read it."
               style={{ color: C.dim }}
             >
               · now is outside this availability

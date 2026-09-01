@@ -308,13 +308,20 @@ export default function DeckExplorer({
   // fabricated trace behind it, which is the one thing this screen must never do.
   // The selection survives, because scrubbing is how you watch one space change.
   useEffect(() => {
+    // One stale flag over every fetch in this effect: a slow response from the
+    // previous hull must not paint its rows, register, hazards, manning, or
+    // deck bands onto the next hull's plates (repo convention: fetches carry
+    // stale guards).
+    let stale = false;
     Promise.all([deckStates(identity, vesselId, asOf), readiness(identity, vesselId, asOf)])
       .then(([r, roll]) => {
+        if (stale) return;
         setRows(r);
         setRollup(roll);
         setInstantError(null);
       })
       .catch((e: unknown) => {
+        if (stale) return;
         setRows([]);
         setRollup(null);
         setInstantError(String(e));
@@ -322,19 +329,38 @@ export default function DeckExplorer({
     // The register, for the whole-ship view: activities are the markers there,
     // and they carry the instant like every other read on this screen.
     listActivities(identity, vesselId, asOf)
-      .then((r) => setActivities(r.activities))
-      .catch(() => setActivities([]));
+      .then((r) => {
+        if (!stale) setActivities(r.activities);
+      })
+      .catch(() => {
+        if (!stale) setActivities([]);
+      });
     // The live facts are not instant-scoped: a hazard is on the hull or it is
     // not. (History lives in the ledger, not this list.)
     listHazards(identity, vesselId)
-      .then(setHazards)
-      .catch(() => setHazards([]));
+      .then((h) => {
+        if (!stale) setHazards(h);
+      })
+      .catch(() => {
+        if (!stale) setHazards([]);
+      });
     getManningBook(identity, vesselId)
-      .then(setManningBook)
-      .catch(() => setManningBook(null));
+      .then((m) => {
+        if (!stale) setManningBook(m);
+      })
+      .catch(() => {
+        if (!stale) setManningBook(null);
+      });
     getGeometry(identity, vesselId)
-      .then(setGeometry)
-      .catch(() => setGeometry(null));
+      .then((g) => {
+        if (!stale) setGeometry(g);
+      })
+      .catch(() => {
+        if (!stale) setGeometry(null);
+      });
+    return () => {
+      stale = true;
+    };
   }, [identity, vesselId, asOf, epoch]);
 
   // The reading window: from the instant, one horizon forward. This is what

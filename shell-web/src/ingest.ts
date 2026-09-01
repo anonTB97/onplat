@@ -68,6 +68,14 @@ export function parseGeometryCsv(text: string): { spaces: SpaceGeometry[]; decks
       spaces.push({ compartment_no: a ?? "", fwd_frame: Number(b), aft_frame: Number(c) });
     } else if (kind === "deck") {
       decks.push({ deck_code: a ?? "", lo_frame: Number(b), hi_frame: Number(c) });
+    } else {
+      // A row that is neither kind cannot be carried to the server, and
+      // dropping it silently would import "whole" minus the losses — the
+      // exact thing the all-or-nothing door exists to prevent. Refuse the
+      // FILE, loudly, before anything is staged.
+      throw new Error(
+        `geometry CSV: unrecognised record kind ${JSON.stringify(kind)} — every line must start with "space," or "deck," (line: ${JSON.stringify(t.slice(0, 60))})`,
+      );
     }
   }
   return { spaces, decks };

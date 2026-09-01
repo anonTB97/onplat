@@ -28,15 +28,12 @@ pub struct RouteSpec {
     pub sample_body: Option<&'static str>,
 }
 
-/// The full endpoint inventory, as the data it is.
-///
-/// A table rather than seventeen struct literals: every row is
+/// The endpoint inventory, as the data it is. Every row is
 /// `(method, path, tenant_scoped, sample_body)`, and adding an endpoint is
-/// adding a line — which is also what keeps this function inside the
-/// workspace's function-length lint as the API grows.
-/// The route table itself, hoisted out of [`inventory`] so the function stays
-/// inside the workspace's function-length lint no matter how many endpoints
-/// the API grows — the table is data, and data has no line budget.
+/// adding a line. A module-level const rather than a literal inside
+/// [`inventory`], so the function stays within the workspace's
+/// function-length lint no matter how many endpoints the API grows — the
+/// table is data, and data has no line budget.
 const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
     ("GET", "/health", false, None),
     // Scoped (it requires and reflects a caller identity) but addresses no

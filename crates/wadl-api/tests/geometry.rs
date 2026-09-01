@@ -174,3 +174,53 @@ async fn disagreements_are_findings_not_refusals_and_the_grade_climbs() {
         .iter()
         .all(|c| c["geometry_source"] != "surveyed"));
 }
+
+/// Review finding: bands 20..210 and 210..248 are continuous plating, and a
+/// space spanning the seam must NOT be flagged outside coverage; the same
+/// band delineated twice must refuse (the design doc's contract).
+#[tokio::test]
+async fn touching_bands_are_one_deck_and_duplicates_refuse() {
+    let (app, w) = app();
+    let register = json!({
+        "label": "seam.csv",
+        "spaces": [{"compartment_no": "3-184-0-Q", "fwd_frame": 205, "aft_frame": 215}],
+        "decks": [
+            {"deck_code": "3rd", "lo_frame": 20, "hi_frame": 210},
+            {"deck_code": "3rd", "lo_frame": 210, "hi_frame": 248},
+        ],
+    });
+    let (status, preview) = call(
+        &app,
+        &w,
+        "POST",
+        &format!("{}?dry_run=true", base(&w)),
+        Some(register),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(
+        preview["findings"]["outside_deck_coverage"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a span across touching bands is on continuous plating: {preview}"
+    );
+
+    let duped = json!({
+        "label": "dupe.csv",
+        "spaces": [],
+        "decks": [
+            {"deck_code": "3rd", "lo_frame": 20, "hi_frame": 210},
+            {"deck_code": "3rd", "lo_frame": 20, "hi_frame": 210},
+        ],
+    });
+    let (status, body) = call(&app, &w, "POST", &base(&w), Some(duped)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("delineated twice"),
+        "{body}"
+    );
+}

@@ -2174,6 +2174,22 @@ fn geometry_findings(
             .or_default()
             .push((d.lo_frame, d.hi_frame));
     }
+    // Coalesce overlapping or touching bands before any containment check: a
+    // deck delineated 20..210 and 210..248 is continuous plating, and a space
+    // surveyed 205..215 lies entirely on it — flagging that as "outside
+    // coverage" would send a person to investigate a finding the data does
+    // not support.
+    for deck_bands in bands.values_mut() {
+        deck_bands.sort_unstable();
+        let mut merged: Vec<(i32, i32)> = Vec::with_capacity(deck_bands.len());
+        for &(lo, hi) in deck_bands.iter() {
+            match merged.last_mut() {
+                Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+                _ => merged.push((lo, hi)),
+            }
+        }
+        *deck_bands = merged;
+    }
 
     let mut placard_disagreements: Vec<Value> = Vec::new();
     let mut outside_coverage: Vec<Value> = Vec::new();
@@ -2288,10 +2304,17 @@ pub(crate) async fn import_geometry(
             rejections.push(format!("{} is surveyed twice", g.compartment_no));
         }
     }
+    let mut seen_bands = std::collections::BTreeSet::new();
     for d in &body.decks {
         if d.lo_frame > d.hi_frame || d.lo_frame < 0 {
             rejections.push(format!(
                 "deck {}: band {}..{} is not a forward-to-aft interval",
+                d.deck_code, d.lo_frame, d.hi_frame
+            ));
+        }
+        if !seen_bands.insert((d.deck_code.as_str(), d.lo_frame, d.hi_frame)) {
+            rejections.push(format!(
+                "deck {}: band {}..{} is delineated twice",
                 d.deck_code, d.lo_frame, d.hi_frame
             ));
         }

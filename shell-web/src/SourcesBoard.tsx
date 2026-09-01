@@ -585,7 +585,7 @@ export default function SourcesBoard({
           lines={[
             {
               text: geometry?.register
-                ? `${geometry.register.spaces} spaces surveyed of ${geometry.findings?.register_total ?? "?"} · ${geometry.register.decks.length} deck bands delineated`
+                ? `${geometry.findings?.surveyed ?? geometry.register.spaces} spaces surveyed of ${geometry.findings?.register_total ?? "?"} · ${geometry.register.decks.length} deck bands delineated`
                 : "The plan draws the forward-boundary frame parsed from each placard number, labelled as a parse. True extents and deck delineation are a drawing's claim and enter here.",
               gloss:
                 "Surveyed frame extents per space and the frame bands where each deck physically exists — docs/geometry-accuracy.md. Disagreements with the register are served as findings, not hidden.",

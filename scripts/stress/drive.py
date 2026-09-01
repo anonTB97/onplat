@@ -14,6 +14,7 @@ Stdlib only (urllib + threads), so the harness runs anywhere the repo does.
 Usage: drive.py <base_url> <vessel_id> <xer_path> [phase...]
 """
 
+import gzip
 import json
 import statistics
 import sys
@@ -30,6 +31,9 @@ PHASES = set(sys.argv[4:]) or {"import", "latency", "concurrency", "shed"}
 HEADERS = {
     "x-org-id": "00000000-0000-0000-0000-000000000001",
     "x-assigned-vessels": "00000000-0000-0000-0000-000000000073",
+    # What the shell's own fetches send: the sweep measures the wire the
+    # browser actually sees, compressed where the server compresses.
+    "accept-encoding": "gzip",
 }
 
 
@@ -44,7 +48,10 @@ def req(method: str, path: str, body: bytes | None = None, timeout: float = 300.
     try:
         with urllib.request.urlopen(r, timeout=timeout) as resp:
             payload = resp.read()
-            return resp.status, time.perf_counter() - t0, len(payload), payload
+            wire = len(payload)  # what crossed the network, compressed or not
+            if resp.headers.get("content-encoding") == "gzip":
+                payload = gzip.decompress(payload)
+            return resp.status, time.perf_counter() - t0, wire, payload
     except urllib.error.HTTPError as e:
         payload = e.read()
         return e.code, time.perf_counter() - t0, len(payload), payload
@@ -126,9 +133,11 @@ if "concurrency" in PHASES:
     )
 
 if "shed" in PHASES:
-    # The harness boots this phase's server with WADL_MAX_IN_FLIGHT=4: with 32
-    # workers on the slowest endpoint, most must be refused 503 — cleanly, not
-    # by hanging. Proves the mechanism without needing 512 live sockets.
+    # The harness boots this phase's server with WADL_MAX_IN_FLIGHT below the
+    # host's core count (the demo store's handlers never await, so at cap ≥
+    # cores the EXECUTOR serializes arrivals and the semaphore sees no
+    # contention — measured; see docs/stress-test.md). With 32 workers on the
+    # slowest endpoint, most must be refused 503 — cleanly, not by hanging.
     codes: list[int] = []
 
     def one(_: int) -> None:
@@ -140,4 +149,4 @@ if "shed" in PHASES:
     shed = sum(1 for c in codes if c == 503)
     served = sum(1 for c in codes if c == 200)
     other = [c for c in codes if c not in (200, 503)]
-    print(f"\n| shed (cap 4, 32 workers) | served {served} | shed 503 {shed} | other {other} |")
+    print(f"\n| shed (low cap, 32 workers) | served {served} | shed 503 {shed} | other {other} |")

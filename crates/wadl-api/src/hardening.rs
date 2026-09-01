@@ -20,6 +20,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
+use std::io::Write as _;
+
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use tokio::sync::Semaphore;
 use wadl_domain::Clock;
 
@@ -61,6 +65,7 @@ pub fn harden(router: Router, limits: Limits, clock: Arc<dyn Clock>) -> Router {
     let gate = Arc::new(Semaphore::new(limits.max_in_flight));
     let timeout = limits.request_timeout;
     router
+        .layer(middleware::from_fn(compressed))
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let gate = Arc::clone(&gate);
             async move { guarded(&gate, timeout, req, next).await }
@@ -134,6 +139,78 @@ async fn guarded(gate: &Semaphore, timeout: Duration, req: Request, next: Next) 
         )
             .into_response(),
     }
+}
+
+/// Bodies below this size ship uncompressed: the frame costs more than it
+/// saves, and tiny responses are latency-bound, not bandwidth-bound.
+const COMPRESS_FLOOR: usize = 16 * 1024;
+
+/// Bodies above this ceiling pass through untouched rather than being
+/// buffered twice; nothing the API serves is near it, and a bound beats a
+/// surprise.
+const COMPRESS_CEILING: usize = 256 * 1024 * 1024;
+
+/// Gzip for the text-shaped responses, hand-rolled (the workspace's stated
+/// posture: no tower-http; every layer readable in one sitting).
+///
+/// Admitted for one measured number: the full activity register at key-op
+/// grain (~40k rows) serializes to ~23 MB, which compresses ~10:1 — the
+/// difference between a kiosk refresh and a stalled one on a yard network.
+/// `Compression::fast()` because the win is the wire, not the ratio: level 1
+/// already takes JSON down an order of magnitude at a fraction of the CPU of
+/// the default level, and this runs inside the concurrency permit.
+///
+/// What is compressed: 2xx responses the client asked gzip for, whose
+/// content-type is JSON or text-shaped, that are not already encoded and not
+/// trivially small. Everything else — images (already compressed), errors
+/// (small), HEAD-shaped bodies — passes through untouched.
+async fn compressed(req: Request, next: Next) -> Response {
+    let wants_gzip = req
+        .headers()
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("gzip"));
+    let res = next.run(req).await;
+    if !wants_gzip || !res.status().is_success() {
+        return res;
+    }
+    let compressible = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| {
+            ct.starts_with("application/json")
+                || ct.starts_with("text/")
+                || ct.starts_with("application/javascript")
+                || ct.starts_with("image/svg")
+        });
+    if !compressible || res.headers().contains_key(header::CONTENT_ENCODING) {
+        return res;
+    }
+    let (mut parts, body) = res.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, COMPRESS_CEILING).await else {
+        // A body we refuse to buffer is a body we refuse to recompose; serve
+        // a plain error rather than a truncated payload dressed as success.
+        return (StatusCode::INTERNAL_SERVER_ERROR, "response too large").into_response();
+    };
+    if bytes.len() < COMPRESS_FLOOR {
+        return Response::from_parts(parts, axum::body::Body::from(bytes));
+    }
+    let mut enc = GzEncoder::new(Vec::with_capacity(bytes.len() / 8), Compression::fast());
+    if enc.write_all(&bytes).is_err() {
+        return Response::from_parts(parts, axum::body::Body::from(bytes));
+    }
+    let Ok(gz) = enc.finish() else {
+        return Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    parts
+        .headers
+        .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    parts
+        .headers
+        .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, axum::body::Body::from(gz))
 }
 
 /// Stamps the browser-protection headers on every response.
@@ -275,6 +352,86 @@ fn content_type(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The compression layer's whole contract in one place: a large JSON body
+    /// for a gzip-accepting client compresses (and round-trips); everything
+    /// else — a client that never asked, a body under the floor, an image —
+    /// passes through byte-identical.
+    #[tokio::test]
+    async fn compression_applies_exactly_where_it_claims() {
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let big = serde_json::to_string(&vec!["the same forty bytes of json"; 4096]).unwrap();
+        let big_len = big.len();
+        assert!(big_len > COMPRESS_FLOOR);
+        let app = Router::new()
+            .route(
+                "/big",
+                get(move || {
+                    let body = big.clone();
+                    async move { ([(header::CONTENT_TYPE, "application/json")], body) }
+                }),
+            )
+            .route(
+                "/small",
+                get(|| async { ([(header::CONTENT_TYPE, "application/json")], "{}") }),
+            )
+            .route(
+                "/png",
+                get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![0_u8; 64 * 1024]) }),
+            )
+            .layer(middleware::from_fn(compressed));
+
+        let ask = |path: &'static str, gzip: bool| {
+            let app = app.clone();
+            async move {
+                let mut req = axum::http::Request::builder().uri(path);
+                if gzip {
+                    req = req.header(header::ACCEPT_ENCODING, "gzip, br");
+                }
+                let res = app
+                    .oneshot(req.body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                let encoding = res
+                    .headers()
+                    .get(header::CONTENT_ENCODING)
+                    .map(|v| v.to_str().unwrap_or("?").to_owned());
+                let bytes = axum::body::to_bytes(res.into_body(), COMPRESS_CEILING)
+                    .await
+                    .unwrap();
+                (encoding, bytes)
+            }
+        };
+
+        // The one case that compresses — and it round-trips.
+        let (enc, bytes) = ask("/big", true).await;
+        assert_eq!(enc.as_deref(), Some("gzip"));
+        assert!(
+            bytes.len() * 4 < big_len,
+            "json should crush: {}",
+            bytes.len()
+        );
+        let mut dec = flate2::read::GzDecoder::new(&bytes[..]);
+        let mut out = String::new();
+        std::io::Read::read_to_string(&mut dec, &mut out).unwrap();
+        assert_eq!(out.len(), big_len);
+
+        // A client that never asked gets identity bytes.
+        let (enc, bytes) = ask("/big", false).await;
+        assert_eq!(enc, None);
+        assert_eq!(bytes.len(), big_len);
+
+        // Below the floor: not worth the frame.
+        let (enc, _) = ask("/small", true).await;
+        assert_eq!(enc, None);
+
+        // Already-compressed shapes pass through.
+        let (enc, bytes) = ask("/png", true).await;
+        assert_eq!(enc, None);
+        assert_eq!(bytes.len(), 64 * 1024);
+    }
 
     #[test]
     fn traversal_shapes_never_reach_the_filesystem() {

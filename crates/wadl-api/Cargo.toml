@@ -16,6 +16,9 @@ wadl-issues.workspace = true
 wadl-ingest.workspace = true
 wadl-store.workspace = true
 axum.workspace = true
+# Gzip for the hand-rolled compression layer (hardening.rs) — see the
+# admission note in the workspace manifest.
+flate2.workspace = true
 # sync + time carry the hardening layer (semaphore shed, request timeout) on
 # the runtime we already ship instead of adding a middleware crate.
 tokio = { workspace = true, features = ["sync", "time"] }
@@ -34,6 +37,7 @@ postgres = ["wadl-store/postgres"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 tower = { workspace = true, features = ["util"] }
+flate2 = { workspace = true }
 http-body-util = "0.1"
 
 [lints]

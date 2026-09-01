@@ -40,8 +40,8 @@ echo "RSS after: $(rss "$PID")"
 kill "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 
-echo "== phase: shed (WADL_MAX_IN_FLIGHT=4) =="
-PID="$(boot WADL_MAX_IN_FLIGHT=4)"
+echo "== phase: shed (WADL_MAX_IN_FLIGHT=2, below core count — see docs/stress-test.md) =="
+PID="$(boot WADL_MAX_IN_FLIGHT=2)"
 python3 scripts/stress/drive.py "http://127.0.0.1:$PORT" "$VESSEL" "$OUT" import shed
 kill "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true

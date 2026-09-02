@@ -156,6 +156,19 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         true,
         None,
     ),
+    ("GET", "/api/vessels/:id/schedule-proposals", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/schedule-proposals",
+        true,
+        Some(r#"{"activity":"A00010","start_ms":1,"end_ms":2,"reason":"leak test"}"#),
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/schedule-proposals/withdraw",
+        true,
+        Some(r#"{"seq":1,"reason":"leak test"}"#),
+    ),
     (
         "POST",
         "/api/vessels/:id/compartments/:no/decision",

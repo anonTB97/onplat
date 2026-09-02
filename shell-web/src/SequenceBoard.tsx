@@ -21,7 +21,9 @@ import {
   previewSchedule,
   revertSchedule,
   listActivities,
+  listProposals,
   scheduleAlternatives,
+  type ProposalList,
   type Activity,
   type AlternativeRow,
   type AsOf,
@@ -39,6 +41,7 @@ import { Loading } from "./Loading";
 import { LoadDigest } from "./LoadDigest";
 import { ModuleHeader } from "./ModuleHeader";
 import { ZoneLanes } from "./ZoneLanes";
+import { ProposalsPanel } from "./Proposals";
 import { tdStyle, thStyle, chipStyle, commitBtnStyle, C, errText, mh, msgColor } from "./theme";
 import { DiscardButton } from "./DiscardButton";
 import { deltaSummary } from "./ingest";
@@ -166,7 +169,11 @@ export default function SequenceBoard({
     );
   }, [allActivities, zoneFocus, zoneOf]);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
-  const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes" | "digest">("register");
+  const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes" | "digest" | "proposals">("register");
+  // The proposals in the ledger with where each stands — refetched when one
+  // lands from the inspector, when the register changes, and on a hull switch.
+  const [proposals, setProposals] = useState<ProposalList | null>(null);
+  const [proposalNonce, setProposalNonce] = useState(0);
   const [importMsg, setImportMsg] = useState<string | null>(null);
   const [pending, setPending] = useState<{ label: string; xer: string; preview: ImportPreview } | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -241,6 +248,20 @@ export default function SequenceBoard({
       stale = true;
     };
   }, [identity, vesselId, asOf, reloadNonce]);
+
+  useEffect(() => {
+    let stale = false;
+    listProposals(identity, vesselId)
+      .then((p) => {
+        if (!stale) setProposals(p);
+      })
+      .catch(() => {
+        if (!stale) setProposals(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, reloadNonce, proposalNonce]);
 
   // A view switch orphans the inspector: a panel describing one register row
   // must not sit over a heat map it has nothing to say about.
@@ -378,7 +399,9 @@ export default function SequenceBoard({
               ? "The sequence inside each space"
               : boardView === "digest"
                 ? "Where the load sits, week by week"
-                : "The activity register"
+                : boardView === "proposals"
+                  ? "What goes back to P6"
+                  : "The activity register"
         }
         stats={[
           { value: activities.length, label: "activities", title: "Every scheduled activity at the grain a crew is handed — the doing grain the six work orders are made of." },
@@ -398,6 +421,10 @@ export default function SequenceBoard({
           gated > 0 && {
             value: gated, label: "need verification", tone: "#c4b5fd",
             title: "Refused work whose governing hold clears only on a named authority's verification — no date can honestly be promised. The proposal is the action on the space's options panel.",
+          },
+          (proposals?.counts.open ?? 0) > 0 && {
+            value: proposals?.counts.open ?? 0, label: "proposals open", tone: C.accent,
+            title: "Schedule changes proposed from this board and not yet reflected by P6 — engine-checked, in the ledger, exportable as a change request from the Proposals view.",
           },
           unlocated > 0 && {
             value: unlocated, label: "unlocated", tone: C.warn,
@@ -461,6 +488,13 @@ export default function SequenceBoard({
           title="The whole availability as a zone × week (or month) heat map — where the load sits, where the refusals cluster. The right first read of a large ingest."
         >
           Load digest
+        </button>
+        <button
+          style={{ ...chip(boardView === "proposals"), ...(proposals && proposals.counts.open > 0 ? { borderColor: C.accent } : {}) }}
+          onClick={() => setBoardView("proposals")}
+          title="Every schedule change proposed from this board — engine-checked, ledgered, with where each stands against the schedule served now — and the change request that goes back to P6."
+        >
+          Proposals{proposals && proposals.counts.open > 0 ? ` · ${proposals.counts.open} open` : ""}
         </button>
         {zoneFocus && (
           <span
@@ -696,6 +730,22 @@ export default function SequenceBoard({
           altWindows={viableWindows}
           onInspect={setInspect}
           onOpenSpace={onOpenSpace}
+        />
+      )}
+
+      {boardView === "proposals" && (
+        <ProposalsPanel
+          identity={identity}
+          vesselId={vesselId}
+          hullLabel={hullLabel}
+          list={proposals}
+          source={source}
+          asOf={asOfMs}
+          onChanged={() => setProposalNonce((n) => n + 1)}
+          onInspect={(code) => {
+            const row = (allActivities ?? []).find((x) => x.code === code);
+            if (row) setInspect(row);
+          }}
         />
       )}
 
@@ -1082,6 +1132,7 @@ export default function SequenceBoard({
           asOf={asOf}
           onClose={() => setInspect(null)}
           onOpenSpace={onOpenSpace}
+          onProposed={() => setProposalNonce((n) => n + 1)}
         />
       )}
     </div>

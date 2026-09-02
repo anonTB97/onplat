@@ -1669,28 +1669,8 @@ async fn schedule_delta(
         rules: &rules,
         hazards: &hazards,
     };
-    let refused =
-        |acts: &[wadl_store::model::ActivitySummary]| -> BTreeMap<String, (String, String)> {
-            acts.iter()
-                .filter(|a| !a.is_milestone)
-                .filter_map(|a| {
-                    match wadl_issues::executability(&hull, a.compartment_no.as_ref(), a.planned) {
-                        wadl_issues::Executability::NotExecutable(r) => Some((
-                            a.code.clone(),
-                            (
-                                a.compartment_no
-                                    .as_ref()
-                                    .map_or_else(String::new, |c| c.as_str().to_owned()),
-                                r.rule_code,
-                            ),
-                        )),
-                        _ => None,
-                    }
-                })
-                .collect()
-        };
-    let before = refused(&current);
-    let after = refused(incoming);
+    let before = refused_by_code(&hull, &current);
+    let after = refused_by_code(&hull, incoming);
     let before_keys: BTreeSet<&String> = before.keys().collect();
     let after_keys: BTreeSet<&String> = after.keys().collect();
 
@@ -1715,6 +1695,8 @@ async fn schedule_delta(
         .filter(|code| !after_keys.contains(code) && new.contains_key(code.as_str()))
         .count();
 
+    let proposals = proposals_reflected(state, scope, vessel, &current, incoming).await?;
+
     Ok(json!({
         "baseline": baseline,
         "added": added,
@@ -1726,7 +1708,72 @@ async fn schedule_delta(
         "refused_after": after.len(),
         "newly_refused": { "count": newly_refused_count, "examples": newly_refused },
         "newly_clear": { "count": newly_clear_count, "examples": newly_clear },
+        "proposals": proposals,
     }))
+}
+
+/// The loop closing where it started: which open proposals an incoming
+/// export reflects, to the day. Answered at the door so the planner sees
+/// what P6 took before Confirm.
+async fn proposals_reflected(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    current: &[wadl_store::model::ActivitySummary],
+    incoming: &[wadl_store::model::ActivitySummary],
+) -> Result<Value, ApiError> {
+    let new: std::collections::BTreeMap<&str, &wadl_store::model::ActivitySummary> =
+        incoming.iter().map(|a| (a.code.as_str(), a)).collect();
+    let open: Vec<Value> = proposal_rows(state, scope, vessel, current)
+        .await?
+        .into_iter()
+        .filter(|p| p.get("status").is_some_and(|s| s == "open"))
+        .collect();
+    let (reflected, still_open): (Vec<&Value>, Vec<&Value>) = open.iter().partition(|p| {
+        proposal_activity(p)
+            .and_then(|code| new.get(code))
+            .is_some_and(|a| p.get("to").is_some_and(|to| same_days(to, a.planned)))
+    });
+    let codes = |ps: &[&Value]| -> Vec<String> {
+        ps.iter()
+            .filter_map(|p| proposal_activity(p).map(str::to_owned))
+            .collect()
+    };
+    Ok(json!({
+        "open": open.len(),
+        "reflected": codes(&reflected),
+        "still_open": codes(&still_open),
+    }))
+}
+
+/// The activity code a proposal row names.
+fn proposal_activity(p: &Value) -> Option<&str> {
+    p.get("activity").and_then(Value::as_str)
+}
+
+/// The activities a hull refuses as planned, by code, with the space and
+/// the governing rule — one side of the re-import delta's constraint half.
+fn refused_by_code(
+    hull: &wadl_issues::Hull<'_>,
+    acts: &[wadl_store::model::ActivitySummary],
+) -> std::collections::BTreeMap<String, (String, String)> {
+    acts.iter()
+        .filter(|a| !a.is_milestone)
+        .filter_map(|a| {
+            match wadl_issues::executability(hull, a.compartment_no.as_ref(), a.planned) {
+                wadl_issues::Executability::NotExecutable(r) => Some((
+                    a.code.clone(),
+                    (
+                        a.compartment_no
+                            .as_ref()
+                            .map_or_else(String::new, |c| c.as_str().to_owned()),
+                        r.rule_code,
+                    ),
+                )),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// The import half of the schedule-of-record area: a P6 XER export, posted as
@@ -3627,6 +3674,341 @@ pub(crate) async fn import_hazard_log(
         "raised": raised,
         "already_live": already_live,
     })))
+}
+
+/// A schedule change proposal, as posted: the activity, the window the
+/// planner proposes (absent for a hold pending verification), and why.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ProposalBody {
+    /// The activity code, as the schedule of record spells it.
+    activity: String,
+    /// The proposed start, epoch ms.
+    #[serde(default)]
+    start_ms: Option<i64>,
+    /// The proposed finish, epoch ms.
+    #[serde(default)]
+    end_ms: Option<i64>,
+    /// `engine_window` (the engine's own alternative), `manual` (a planner's
+    /// window, engine-checked), or `hold_pending_verification` (no date can
+    /// honestly be promised; the proposal is the hold).
+    #[serde(default)]
+    kind: Option<String>,
+    /// Why — pressed for; a proposal without a reason is refused.
+    #[serde(default)]
+    reason: String,
+    /// The instant the board was read at.
+    #[serde(default)]
+    as_of: Option<i64>,
+}
+
+/// Day-granular window equality: P6 carries times, a planner reads dates,
+/// and "reflected" means the export moved the work to the proposed days.
+fn same_days(a: &Value, b: Option<wadl_domain::time::Window>) -> bool {
+    const DAY: i64 = 86_400_000;
+    let (Some(a_start), Some(a_end), Some(b)) = (
+        a.get("start").and_then(Value::as_i64),
+        a.get("end").and_then(Value::as_i64),
+        b,
+    ) else {
+        return false;
+    };
+    a_start.div_euclid(DAY) == b.start.epoch_millis().div_euclid(DAY)
+        && a_end.div_euclid(DAY) == b.end.epoch_millis().div_euclid(DAY)
+}
+
+/// Where a proposal stands, derived on every read from the ledger and the
+/// schedule currently served — never stored, so the past does not change
+/// because somebody acted in the present:
+/// `open` (the activity still sits where it was), `reflected` (the served
+/// schedule now carries the proposed days — P6 took it), `superseded` (the
+/// activity moved, but not to the proposal), `dropped` (the activity is no
+/// longer on the register), `withdrawn` (a later ledger entry took it back).
+fn proposal_status(
+    detail: &Value,
+    current: Option<&wadl_store::model::ActivitySummary>,
+    withdrawn: bool,
+) -> &'static str {
+    if withdrawn {
+        return "withdrawn";
+    }
+    let Some(a) = current else {
+        return "dropped";
+    };
+    let to = &detail["to"];
+    if !to.is_null() && same_days(to, a.planned) {
+        return "reflected";
+    }
+    if same_days(&detail["from"], a.planned) {
+        "open"
+    } else {
+        "superseded"
+    }
+}
+
+/// The proposals in the ledger, joined to the schedule currently served.
+/// Newest first, with the withdrawals folded in as status.
+async fn proposal_rows(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    current: &[wadl_store::model::ActivitySummary],
+) -> Result<Vec<Value>, ApiError> {
+    let ledger = state.store.list_audit(scope, vessel, None).await?;
+    let by_code: std::collections::BTreeMap<&str, &wadl_store::model::ActivitySummary> =
+        current.iter().map(|a| (a.code.as_str(), a)).collect();
+    let withdrawn: std::collections::BTreeSet<i64> = ledger
+        .iter()
+        .filter(|r| r.action == "SCHEDULE_CHANGE_WITHDRAWN")
+        .filter_map(|r| serde_json::from_str::<Value>(&r.detail).ok())
+        .filter_map(|d| d.get("seq").and_then(Value::as_i64))
+        .collect();
+    Ok(ledger
+        .iter()
+        .filter(|r| r.action == "SCHEDULE_CHANGE_PROPOSED")
+        .filter_map(|r| {
+            let detail = serde_json::from_str::<Value>(&r.detail).ok()?;
+            let code = detail.get("activity")?.as_str()?.to_owned();
+            let status = proposal_status(
+                &detail,
+                by_code.get(code.as_str()).copied(),
+                withdrawn.contains(&r.seq),
+            );
+            let mut row = detail;
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("seq".to_owned(), json!(r.seq));
+                obj.insert("entry_hash".to_owned(), json!(r.entry_hash));
+                obj.insert("proposed_at_ms".to_owned(), json!(r.occurred_at_ms));
+                obj.insert("status".to_owned(), json!(status));
+                obj.insert(
+                    "planned_now".to_owned(),
+                    json!(by_code.get(code.as_str()).and_then(|a| a.planned)),
+                );
+            }
+            Some(row)
+        })
+        .collect())
+}
+
+/// The kind and window a proposal carries, or why it is refused: no reason,
+/// a dated kind without both instants, a finish not after its start, a kind
+/// the product does not know.
+fn proposed_window(
+    body: &ProposalBody,
+) -> Result<(String, Option<wadl_domain::time::Window>), ApiError> {
+    if body.reason.trim().is_empty() {
+        return Err(ApiError::OutOfRange(
+            "a proposal needs a reason — P6 will be asked to move work on the strength of it"
+                .to_owned(),
+        ));
+    }
+    let kind = body.kind.clone().unwrap_or_else(|| {
+        if body.start_ms.is_some() {
+            "manual".to_owned()
+        } else {
+            "hold_pending_verification".to_owned()
+        }
+    });
+    let window = match kind.as_str() {
+        "hold_pending_verification" => None,
+        "engine_window" | "manual" => {
+            let (Some(start), Some(end)) = (body.start_ms, body.end_ms) else {
+                return Err(ApiError::OutOfRange(format!(
+                    "a {kind} proposal needs start_ms and end_ms"
+                )));
+            };
+            if end <= start {
+                return Err(ApiError::OutOfRange(
+                    "the proposed finish is not after the proposed start".to_owned(),
+                ));
+            }
+            Some(wadl_domain::time::Window::new(
+                Timestamp::from_epoch_millis(start),
+                Timestamp::from_epoch_millis(end),
+            ))
+        }
+        other => {
+            return Err(ApiError::OutOfRange(format!(
+                "kind must be engine_window, manual or hold_pending_verification, got {other:?}"
+            )))
+        }
+    };
+    Ok((kind, window))
+}
+
+/// `POST /api/vessels/:id/schedule-proposals` — records a schedule change
+/// proposal: the path from a refusal on this board back to P6.
+///
+/// Nothing here moves a date. The proposal is checked by the engine over
+/// the proposed window under the hazards live at the instant (so a planner
+/// never sends P6 a window the hull would refuse without knowing it), its
+/// knock-on is read off the schedule's own logic, and the whole record —
+/// what was proposed, from where, why, with what verdict — lands in the
+/// ledger as `SCHEDULE_CHANGE_PROPOSED`, subject the activity. The export
+/// to P6 is built from these rows; the next XER import says which of them
+/// P6 reflected.
+pub(crate) async fn propose_schedule_change(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<ProposalBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let hull_row = state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let (kind, window) = proposed_window(&body)?;
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let Some(a) = activities.iter().find(|a| a.code == body.activity) else {
+        return Err(ApiError::OutOfRange(format!(
+            "activity {:?} is not on this hull's schedule of record",
+            body.activity
+        )));
+    };
+    let at = AsOf { as_of: body.as_of }.resolve(&state, &hull_row)?;
+
+    // The engine's word on the proposed window, under the hazards live at the
+    // instant: a proposal is never sent blind.
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
+    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    let hull = wadl_issues::Hull {
+        graph: &graph,
+        rules: &rules,
+        hazards: &hazards,
+    };
+    let verdict =
+        window.map(|w| wadl_issues::executability(&hull, a.compartment_no.as_ref(), Some(w)));
+    // Knock-on, read finish-to-start off the schedule's own logic.
+    let edges = state.store.list_schedule_edges(&scope, vessel).await?;
+    let pushes: Vec<&str> = match window {
+        Some(w) => edges
+            .iter()
+            .filter(|e| e.pred_code == a.code)
+            .filter_map(|e| {
+                let succ = activities.iter().find(|s| s.code == e.succ_code)?;
+                (succ.planned?.start < w.end).then_some(e.succ_code.as_str())
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let now_ms = state.clock.now().epoch_millis();
+    let detail = json!({
+        "activity": a.code,
+        "name": a.name,
+        "compartment": a.compartment_no,
+        "trade": a.trade,
+        "from": a.planned,
+        "to": window,
+        "kind": kind,
+        "reason": body.reason.trim(),
+        "verdict": verdict,
+        "pushes": pushes,
+        "knock_on_basis": "finish-to-start, lags not applied",
+        "as_of_ms": at.epoch_millis(),
+        "proposed_by_org": scope.org.to_string(),
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "SCHEDULE_CHANGE_PROPOSED",
+            &detail,
+            Some(&a.code),
+            now_ms,
+        )
+        .await?;
+    let rows = proposal_rows(&state, &scope, vessel, &activities).await?;
+    let proposal = rows
+        .into_iter()
+        .find(|r| r["seq"].as_i64() == Some(record.seq))
+        .unwrap_or(Value::Null);
+    Ok(Json(json!({ "proposal": proposal, "recorded": record })))
+}
+
+/// `GET /api/vessels/:id/schedule-proposals` — every proposal in the
+/// ledger with where it stands against the schedule currently served.
+pub(crate) async fn list_schedule_proposals(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let rows = proposal_rows(&state, &scope, vessel, &activities).await?;
+    let count = |s: &str| rows.iter().filter(|r| r["status"] == s).count();
+    Ok(Json(json!({
+        "as_of": state.clock.now(),
+        "schedule_source": state.store.schedule_source(&scope, vessel).await?,
+        "counts": {
+            "open": count("open"),
+            "reflected": count("reflected"),
+            "superseded": count("superseded"),
+            "dropped": count("dropped"),
+            "withdrawn": count("withdrawn"),
+        },
+        "proposals": rows,
+        "status_basis": "derived on every read: reflected when the served schedule carries the proposed days; superseded when the activity moved elsewhere; dropped when it left the register; withdrawn by a later ledger entry",
+    })))
+}
+
+/// A withdrawal, as posted.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct WithdrawBody {
+    /// The proposal's ledger sequence.
+    seq: i64,
+    #[serde(default)]
+    reason: String,
+}
+
+/// `POST /api/vessels/:id/schedule-proposals/withdraw` — takes a proposal
+/// back, as a later ledger entry; the original stays in the chain.
+pub(crate) async fn withdraw_schedule_proposal(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<WithdrawBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let ledger = state.store.list_audit(&scope, vessel, None).await?;
+    let Some(original) = ledger
+        .iter()
+        .find(|r| r.seq == body.seq && r.action == "SCHEDULE_CHANGE_PROPOSED")
+    else {
+        return Err(ApiError::OutOfRange(format!(
+            "ledger entry {} is not a schedule change proposal on this hull",
+            body.seq
+        )));
+    };
+    let now_ms = state.clock.now().epoch_millis();
+    let detail = json!({
+        "seq": body.seq,
+        "activity": original.subject_ref,
+        "reason": body.reason.trim(),
+        "withdrawn_by_org": scope.org.to_string(),
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "SCHEDULE_CHANGE_WITHDRAWN",
+            &detail,
+            original.subject_ref.as_deref(),
+            now_ms,
+        )
+        .await?;
+    Ok(Json(json!({ "withdrawn": body.seq, "recorded": record })))
 }
 
 /// The distributed packages on a hull.

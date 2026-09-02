@@ -14,11 +14,13 @@
 import { useEffect, useState } from "react";
 import {
   mitigations,
+  proposeScheduleChange,
   type Activity,
   type AlternativeRow,
   type AsOf,
   type Assessment,
   type Identity,
+  type ScheduleProposal,
 } from "./api";
 import { actionTitle } from "./Mitigations";
 import { C, mh } from "./theme";
@@ -33,6 +35,10 @@ const block: React.CSSProperties = {
   border: `1px solid ${C.line}`, borderRadius: 7, padding: "8px 10px",
   display: "flex", flexDirection: "column", gap: 4,
 };
+const proposeBtn = (tone: string): React.CSSProperties => ({
+  font: "inherit", fontSize: 11, cursor: "pointer", padding: "3px 9px", borderRadius: 5,
+  color: tone, background: "transparent", border: `1px solid ${tone}66`,
+});
 
 export function ActivityInspector({
   a,
@@ -44,8 +50,11 @@ export function ActivityInspector({
   onClose,
   onOpenSpace,
   onOpenJob,
+  onProposed,
 }: {
   a: Activity;
+  /** A proposal landed in the ledger — the board's Proposals view should refetch. */
+  onProposed?: (p: ScheduleProposal) => void;
   /** The engine's re-sequence proposal for this activity, when it is refused. */
   alt: AlternativeRow | undefined;
   /** Whether the alternatives fetch has finished (either way) — so "Computing…"
@@ -61,6 +70,18 @@ export function ActivityInspector({
 }) {
   const [assessment, setAssessment] = useState<Assessment | null>(null);
   const [optionsError, setOptionsError] = useState(false);
+  // The proposal form: a reason (pressed for), an optional start of the
+  // planner's own, and what came back. Reset when the row changes — a reason
+  // written for one activity must not ride along to the next.
+  const [reason, setReason] = useState("");
+  const [manualStart, setManualStart] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [proposed, setProposed] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    setReason("");
+    setManualStart("");
+    setProposed(null);
+  }, [a.activity_id]);
 
   // A drawer closes on Escape — the norm every menu in this app already keeps.
   useEffect(() => {
@@ -294,6 +315,106 @@ export function ActivityInspector({
             )}
           </div>
         )}
+
+        {/* the path back to P6: a proposal, engine-checked and ledgered */}
+        {refused && !a.is_milestone && (() => {
+          const duration = a.planned ? a.planned.end - a.planned.start : 0;
+          const send = (kind: ScheduleProposal["kind"], start?: number) => {
+            if (!reason.trim()) {
+              setProposed({ ok: false, text: "Say why — P6 will be asked to move work on the strength of it." });
+              return;
+            }
+            setBusy(true);
+            setProposed(null);
+            void proposeScheduleChange(identity, vesselId, {
+              activity: a.code,
+              kind,
+              reason: reason.trim(),
+              as_of: asOf,
+              ...(start !== undefined ? { start_ms: start, end_ms: start + duration } : {}),
+            })
+              .then((r) => {
+                setBusy(false);
+                const v = r.proposal.verdict;
+                setProposed({
+                  ok: true,
+                  text:
+                    `Proposed · ledger #${r.proposal.seq} · ` +
+                    (v === null
+                      ? "no date promised"
+                      : v.verdict === "executable"
+                        ? "the engine accepts the window"
+                        : v.verdict === "not_executable"
+                          ? `⚠ the engine still refuses it (${v.rule_code} @ ${v.origin}) — recorded as such`
+                          : "engine could not assess") +
+                    (r.proposal.pushes.length > 0 ? ` · pushes ${r.proposal.pushes.join(", ")}` : "") +
+                    " — see Proposals to export the change request.",
+                });
+                onProposed?.(r.proposal);
+              })
+              .catch((err: unknown) => {
+                setBusy(false);
+                setProposed({ ok: false, text: String(err instanceof Error ? err.message : err) });
+              });
+          };
+          const manualMs = manualStart ? Date.parse(`${manualStart}T06:00:00Z`) : NaN;
+          return (
+            <div style={{ ...block, border: `1px solid ${C.accent}55` }}>
+              <div style={{ ...label, color: C.accent }}>Propose to P6</div>
+              <input
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="Why — the sentence the change request carries"
+                title="Pressed for: a proposal without a reason is refused."
+                style={{ font: "inherit", fontSize: 11.5, padding: "4px 7px", background: "#0b0c0e", color: C.text, border: `1px solid ${C.line}`, borderRadius: 5 }}
+              />
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                {alt?.alternative.kind === "viable" && (
+                  <button
+                    disabled={busy}
+                    onClick={() => alt.alternative.kind === "viable" && send("engine_window", alt.alternative.window.start)}
+                    title="Propose the engine's own window — the first of the same duration the rules permit. Re-checked at the instant before it lands."
+                    style={proposeBtn(C.ok)}
+                  >
+                    Slide to {alt.alternative.kind === "viable" ? fmtDay(alt.alternative.window.start) : ""}
+                  </button>
+                )}
+                {(alt?.alternative.kind === "verification_gated" || e.verdict === "not_executable" && e.earliest_clear === null) && (
+                  <button
+                    disabled={busy}
+                    onClick={() => send("hold_pending_verification")}
+                    title="No date can honestly be promised: propose that P6 hold this activity until the named authority verifies the hazard is cleared."
+                    style={proposeBtn("#c4b5fd")}
+                  >
+                    Hold pending verification
+                  </button>
+                )}
+                <input
+                  type="date"
+                  value={manualStart}
+                  onChange={(ev) => setManualStart(ev.target.value)}
+                  title="A start of your own — same duration; the engine checks it before it lands."
+                  style={{ font: "inherit", fontSize: 11, padding: "3px 6px", background: "#0b0c0e", color: C.text, border: `1px solid ${C.line}`, borderRadius: 5 }}
+                />
+                <button
+                  disabled={busy || Number.isNaN(manualMs)}
+                  onClick={() => send("manual", manualMs)}
+                  title="Propose this start with the planned duration. Engine-checked; a window the hull still refuses is recorded as such, not blocked."
+                  style={proposeBtn(C.accent)}
+                >
+                  Propose this start
+                </button>
+              </div>
+              {proposed && (
+                <div style={{ fontSize: 11, color: proposed.ok ? C.ok : C.danger }}>{proposed.text}</div>
+              )}
+              <div style={{ fontSize: 10, color: C.faint }}>
+                Nothing moves here. The proposal is checked by the engine, lands in the ledger, exports as a
+                P6 change request, and the next XER import says whether P6 took it.
+              </div>
+            </div>
+          );
+        })()}
 
         {/* the space's options — same assessment the Deck Explorer shows */}
         {a.compartment_no && optionsError && (

@@ -45,7 +45,7 @@ enforces the same fact browser-side). Data enters by exactly two doors:
 
 ## 3. API surface (generated from `wadl_api::routes::inventory()`)
 
-47 endpoints: 46 tenant-scoped, 1 open (health only).
+50 endpoints: 49 tenant-scoped, 1 open (health only).
 
 | Method | Path | Access |
 |---|---|---|
@@ -93,6 +93,9 @@ enforces the same fact browser-side). Data enters by exactly two doors:
 | `POST` | `/api/vessels/:id/hazards/import` | tenant-scoped |
 | `POST` | `/api/vessels/:id/schedule-of-record` | tenant-scoped |
 | `POST` | `/api/vessels/:id/schedule-of-record/revert` | tenant-scoped |
+| `GET` | `/api/vessels/:id/schedule-proposals` | tenant-scoped |
+| `POST` | `/api/vessels/:id/schedule-proposals` | tenant-scoped |
+| `POST` | `/api/vessels/:id/schedule-proposals/withdraw` | tenant-scoped |
 | `POST` | `/api/vessels/:id/compartments/:no/decision` | tenant-scoped |
 | `GET` | `/api/vessels/:id/packages` | tenant-scoped |
 | `GET` | `/api/vessels/:id/packages/:no` | tenant-scoped |

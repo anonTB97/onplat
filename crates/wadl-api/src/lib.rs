@@ -182,6 +182,14 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::revert_schedule),
         )
         .route(
+            "/api/vessels/:id/schedule-proposals",
+            get(handlers::list_schedule_proposals).post(handlers::propose_schedule_change),
+        )
+        .route(
+            "/api/vessels/:id/schedule-proposals/withdraw",
+            post(handlers::withdraw_schedule_proposal),
+        )
+        .route(
             "/api/vessels/:id/compartments/:no/decision",
             post(handlers::record_decision),
         )

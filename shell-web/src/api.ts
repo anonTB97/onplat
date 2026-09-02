@@ -873,6 +873,92 @@ export async function scheduleAlternatives(
   return (await res.json()) as ScheduleAlternatives;
 }
 
+/* ------------------------------------------------------ schedule proposals */
+
+/** Where a proposal stands, derived on every read from the ledger and the
+ *  schedule currently served — never stored. */
+export type ProposalStatus = "open" | "reflected" | "superseded" | "dropped" | "withdrawn";
+
+/** One schedule change proposal — the path from a refusal here back to P6. */
+export interface ScheduleProposal {
+  seq: number;
+  entry_hash: string;
+  proposed_at_ms: number;
+  activity: string;
+  name: string;
+  compartment: string | null;
+  trade: string;
+  from: Window | null;
+  /** The proposed window; null for a hold pending verification. */
+  to: Window | null;
+  kind: "engine_window" | "manual" | "hold_pending_verification";
+  reason: string;
+  /** The engine's verdict on the proposed window under the hazards live at the instant. */
+  verdict: Executability | null;
+  /** Successors whose planned start falls before the proposed finish. */
+  pushes: string[];
+  knock_on_basis: string;
+  status: ProposalStatus;
+  /** Where the activity sits on the schedule served now. */
+  planned_now: Window | null;
+}
+
+export interface ProposalList {
+  as_of: number;
+  schedule_source: string | null;
+  counts: Record<ProposalStatus, number>;
+  proposals: ScheduleProposal[];
+  status_basis: string;
+}
+
+/**
+ * Records a schedule change proposal. Nothing moves: the engine checks the
+ * proposed window under the live hazards, the knock-on is read off the
+ * schedule's logic, and the whole record lands in the ledger. The export to
+ * P6 is built from these; the next XER import says which P6 reflected.
+ */
+export async function proposeScheduleChange(
+  id: Identity,
+  vesselId: string,
+  body: {
+    activity: string;
+    start_ms?: number;
+    end_ms?: number;
+    kind: ScheduleProposal["kind"];
+    reason: string;
+    as_of: AsOf;
+  },
+): Promise<{ proposal: ScheduleProposal; recorded: AuditRecord }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-proposals`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await doorRefusal(res, "proposal");
+  return (await res.json()) as { proposal: ScheduleProposal; recorded: AuditRecord };
+}
+
+export async function listProposals(id: Identity, vesselId: string): Promise<ProposalList> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-proposals`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`proposals → ${res.status}`);
+  return (await res.json()) as ProposalList;
+}
+
+/** Takes a proposal back as a later ledger entry; the original stays in the chain. */
+export async function withdrawProposal(
+  id: Identity,
+  vesselId: string,
+  seq: number,
+  reason: string,
+): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-proposals/withdraw`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ seq, reason }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "withdrawal");
+}
+
 export interface ActivityRegister {
   as_of: number;
   /** null = the generated demo register; a label = the ingested export it came from. */
@@ -955,6 +1041,8 @@ export interface ScheduleDelta {
   refused_after: number;
   newly_refused: { count: number; examples: DeltaExample[] };
   newly_clear: { count: number; examples: DeltaExample[] };
+  /** Which open proposals the incoming export reflects, to the day. */
+  proposals?: { open: number; reflected: string[]; still_open: string[] };
 }
 
 export interface ImportPreview {

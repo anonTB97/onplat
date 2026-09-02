@@ -238,6 +238,7 @@ export function deltaSummary(d: {
   rehoused: number;
   newly_refused: { count: number; examples: { code: string; space: string; rule: string }[] };
   newly_clear: { count: number };
+  proposals?: { open: number; reflected: string[]; still_open: string[] };
 }): string {
   const moves = [
     d.added > 0 ? `+${d.added} new` : null,
@@ -254,5 +255,11 @@ export function deltaSummary(d: {
       ? `⚠ ${d.newly_refused.count} newly NOT executable (${ex}${d.newly_refused.count > 3 ? ", …" : ""})`
       : "no work moved into a refusal";
   const clears = d.newly_clear.count > 0 ? ` · ${d.newly_clear.count} refusal${d.newly_clear.count === 1 ? "" : "s"} cleared` : "";
-  return `vs ${d.baseline}: ${moves || "no rows changed"} — ${shift}${clears}`;
+  // The loop closing: which of this board's open proposals the export took.
+  const p = d.proposals;
+  const proposals =
+    p && p.open > 0
+      ? ` · proposals: ${p.reflected.length} of ${p.open} reflected${p.reflected.length > 0 ? ` (${p.reflected.slice(0, 4).join(", ")}${p.reflected.length > 4 ? ", …" : ""})` : ""}${p.still_open.length > 0 ? `, ${p.still_open.length} still open` : ""}`
+      : "";
+  return `vs ${d.baseline}: ${moves || "no rows changed"} — ${shift}${clears}${proposals}`;
 }

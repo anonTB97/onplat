@@ -126,6 +126,10 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::revert_zones),
         )
         .route(
+            "/api/vessels/:id/zones/:zone/adjacent",
+            get(handlers::zone_adjacent),
+        )
+        .route(
             "/api/vessels/:id/budget-book",
             post(handlers::import_budgets),
         )

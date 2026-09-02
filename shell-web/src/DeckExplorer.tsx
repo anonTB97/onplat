@@ -29,6 +29,9 @@ import {
   type ZoneChart,
   workConflicts,
   type WorkConflicts,
+  zoneAdjacent,
+  type AdjacentSpace,
+  type ZoneAdjacency,
 } from "./api";
 import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
@@ -86,6 +89,32 @@ type Mode = "drawing" | "schematic";
  */
 type Altitude = ChromeAltitude;
 
+/** The zone in focus, as the canvases read it: who is inside, who is next
+ *  door and why, and whether the next-door answer has arrived. */
+export interface ZoneFocus {
+  zone: string;
+  inside: Set<string>;
+  adjacent: Map<string, AdjacentSpace>;
+  served: boolean;
+}
+
+/** The server's reasons, in yard words. */
+export function nextDoorWords(via: string[]): string {
+  return via
+    .map((v) =>
+      v === "frame_boundary"
+        ? "across the frame boundary"
+        : v === "deck_above"
+          ? "on the deck above"
+          : v === "deck_below"
+            ? "on the deck below"
+            : v.startsWith("coupled:")
+              ? `coupled by ${v.slice(8).replace(/_/g, " ")}`
+              : v,
+    )
+    .join(" · ");
+}
+
 /** Viewport height for a plate, in CSS px. */
 const SHEET_BOX_H = 520;
 /** Zoom ceiling. Past this the JPEG's own scan resolution is the limit. */
@@ -138,10 +167,17 @@ export default function DeckExplorer({
   horizon,
   now,
   onMutated,
+  zoneFocus,
+  onZoneFocus,
 }: {
   identity: Identity;
   vesselId: string;
   hullLabel: string;
+  /** The zone in focus, shared with the Sequence Board through the shell:
+   *  the rail picks it, the canvases blot out everything outside it and
+   *  keep next-door work visible. */
+  zoneFocus: string | null;
+  onZoneFocus: (zone: string | null) => void;
   /** Controlled by the shell, because the persona decides where you land. */
   altitude: Altitude;
   onAltitude: (a: Altitude) => void;
@@ -200,7 +236,9 @@ export default function DeckExplorer({
   const [error, setError] = useState<string | null>(null);
   const [instantError, setInstantError] = useState<string | null>(null);
 
-  const [zoneFilter, setZoneFilter] = useState<string | null>(null);
+  // The zone in focus is the shell's; this screen reads and sets it.
+  const zoneFilter = zoneFocus;
+  const setZoneFilter = onZoneFocus;
   const [lens, setLens] = useState<Lens>("space");
   // Two independent axes, as in the prototype. What you are looking at (one deck
   // or a vertical trace) is a different question from how it is drawn (the real
@@ -377,6 +415,37 @@ export default function DeckExplorer({
   // deck plan can draw the pairs and a worker at a kiosk sees them without
   // opening anything.
   const [conflicts, setConflicts] = useState<WorkConflicts | null>(null);
+  // Next door to the zone in focus — served, with the reason each space
+  // counts, so the canvases can blot out the hull and still show what is
+  // about to reach in. Refetched with the instant and after a clearance.
+  const [adjacency, setAdjacency] = useState<ZoneAdjacency | null>(null);
+  useEffect(() => {
+    setAdjacency(null);
+    if (!zoneFocus) return undefined;
+    let stale = false;
+    zoneAdjacent(identity, vesselId, zoneFocus, asOf)
+      .then((a) => {
+        if (!stale) setAdjacency(a);
+      })
+      .catch(() => {
+        if (!stale) setAdjacency(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, zoneFocus, asOf, epoch]);
+  /** The focus, as the canvases read it: who is inside, who is next door and why. */
+  const focus = useMemo(() => {
+    if (!zoneFocus) return null;
+    const adjacent = new Map<string, AdjacentSpace>();
+    for (const a of adjacency?.adjacent ?? []) adjacent.set(a.compartment, a);
+    return {
+      zone: zoneFocus,
+      inside: new Set(rows.filter((r) => r.compartment.zone === zoneFocus).map((r) => r.compartment.compartment_no)),
+      adjacent,
+      served: adjacency !== null,
+    };
+  }, [zoneFocus, adjacency, rows]);
   useEffect(() => {
     let stale = false;
     workConflicts(identity, vesselId, asOf)
@@ -545,20 +614,38 @@ export default function DeckExplorer({
     return [...set].sort();
   }, [rows]);
 
+  // The zone in focus does NOT filter here: the plates and the whole-ship
+  // view keep every space and ghost the ones outside the zone, so the hull
+  // stays legible around it and next-door work stays visible. The views
+  // that cannot ghost (the section, the schematic, the zone matrix) get
+  // `focusRows` — inside plus next door — instead.
   const visible = useMemo(
     () =>
       rows.filter((r) => {
         if (restrictedOnly && r.state === "ALLOW") return false;
         if (tradeFilter && !r.trades.includes(tradeFilter)) return false;
-        if (zoneFilter && r.compartment.zone !== zoneFilter) return false;
         return true;
       }),
-    [rows, restrictedOnly, tradeFilter, zoneFilter],
+    [rows, restrictedOnly, tradeFilter],
+  );
+  const inFocus = (r: DeckStateRow) =>
+    focus === null ||
+    focus.inside.has(r.compartment.compartment_no) ||
+    focus.adjacent.has(r.compartment.compartment_no);
+  const focusRows = useMemo(
+    () => (focus ? visible.filter(inFocus) : visible),
+    // `inFocus` closes over `focus` alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visible, focus],
   );
 
   const onDeck = useMemo(
     () => visible.filter((r) => r.compartment.deck_code === selectedDeck),
     [visible, selectedDeck],
+  );
+  const onDeckFocused = useMemo(
+    () => focusRows.filter((r) => r.compartment.deck_code === selectedDeck),
+    [focusRows, selectedDeck],
   );
 
   // The plate's height budget: a panel in the page normally; in full screen the
@@ -770,12 +857,45 @@ export default function DeckExplorer({
           </button>
         </div>
 
-        {zoneFilter && (
-          <button style={{ ...seg(true), marginTop: 3 }} onClick={() => setZoneFilter(null)} title="Clear the zone filter">
-            Zone {zoneFilter} ✕
-          </button>
+        {zoneFilter && focus && (
+          <span
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 8, marginTop: 3, padding: "3px 8px 3px 10px",
+              borderRadius: 6, border: `1px solid ${zoneColour(zoneFilter)}`, background: `${zoneColour(zoneFilter)}18`, fontSize: 11.5,
+            }}
+            title={adjacency?.basis ?? "Reading what is next door…"}
+          >
+            <b style={{ color: zoneColour(zoneFilter) }}>Zone {zoneFilter} in focus</b>
+            <span style={{ color: DIM }}>
+              {focus.inside.size} spaces
+              {focus.served
+                ? ` · ${focus.adjacent.size} next door` +
+                  (adjacency && adjacency.adjacent.some((a) => !a.permits_work)
+                    ? ` · ${adjacency.adjacent.filter((a) => !a.permits_work).length} refusing`
+                    : "")
+                : " · reading next door…"}
+              {" · everything else dims"}
+            </span>
+            <button
+              onClick={() => setZoneFilter(null)}
+              title="Leave zone focus — the whole hull draws again, on every screen"
+              style={{ font: "inherit", fontSize: 11, cursor: "pointer", padding: "1px 7px", borderRadius: 4, color: TEXT, background: "transparent", border: `1px solid ${LINE}` }}
+            >
+              ✕
+            </button>
+          </span>
         )}
       </div>
+
+      {zoneFilter && focus && adjacency && altitude === "compartment" && (
+        <NextDoorStrip
+          zone={zoneFilter}
+          adjacency={adjacency}
+          load={spaceLoad}
+          horizonLabel={HORIZONS[horizon].label.toLowerCase()}
+          onOpenSpace={openSpace}
+        />
+      )}
 
       {showManning && (
         <ManningPanel
@@ -796,7 +916,9 @@ export default function DeckExplorer({
           <SelectorRail
             altitude={altitude}
             decks={decks}
-            rows={rows}
+            // In focus, the rail's deck counts answer for the zone: which
+            // decks the zone's work is on, and how much of it is held.
+            rows={zoneFilter ? rows.filter((r) => r.compartment.zone === zoneFilter) : rows}
             rollup={rollup}
             selectedDeck={selectedDeck}
             zoneFilter={zoneFilter}
@@ -837,7 +959,7 @@ export default function DeckExplorer({
                 rollup={rollup}
                 onDrill={drill}
                 zone={zoneFilter}
-                rows={visible}
+                rows={zoneFilter ? visible.filter((r) => r.compartment.zone === zoneFilter) : visible}
                 decks={decks}
                 selected={selected}
                 toneOf={toneOf}
@@ -1047,6 +1169,7 @@ export default function DeckExplorer({
                   zonesOn={zonesOn}
                   zones={zoneGeometry}
                   zoneAlerts={zoneAlerts}
+                  focus={focus}
                   onPick={(deckCode, compartment) => {
                     if (compartment === selected) {
                       setSelected(null);
@@ -1060,7 +1183,7 @@ export default function DeckExplorer({
               ) : view === "vertical" ? (
                 <VerticalTrace
                   decks={decks}
-                  rows={visible}
+                  rows={focusRows}
                   centreOrdinal={deckOrdinal}
                   selected={selected}
                   onSelect={toggleSelect}
@@ -1082,6 +1205,7 @@ export default function DeckExplorer({
                   }
                   sheet={sheet}
                   deckOrdinal={deckOrdinal}
+                  focus={focus}
                   rows={onDeck}
                   selected={selected}
                   onSelect={toggleSelect}
@@ -1112,7 +1236,7 @@ export default function DeckExplorer({
                 />
               ) : (
                 <PlanView
-                  rows={onDeck}
+                  rows={onDeckFocused}
                   selected={selected}
                   onSelect={toggleSelect}
                   toneOf={toneOf}
@@ -1998,10 +2122,13 @@ function SheetView({
   deckBands,
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
   dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zones, zoneAlerts, zoneRows,
-  load, windowDays, horizonLabel, conflicts, deckOrdinal,
+  load, windowDays, horizonLabel, conflicts, deckOrdinal, focus: zoneFocus,
 }: {
   /** This plate's deck ordinal — a zone block draws here only if it covers the deck. */
   deckOrdinal: number;
+  /** The zone in focus: spaces inside it draw in full, spaces next door draw
+   *  ringed with their reason, everything else ghosts. */
+  focus: ZoneFocus | null;
   sheet: DeckSheet;
   rows: DeckStateRow[];
   selected: string | null;
@@ -2430,6 +2557,18 @@ function SheetView({
             const tone = toneOf(r);
             const isSel = no === selected;
             const isHot = no === hovered;
+            // Zone focus: outside the zone and not next door, a space is a
+            // ghost — placed, so the hull keeps its shape, and nothing more.
+            // Next door draws ringed, with its reason on the title.
+            const nextDoor = zoneFocus?.adjacent.get(no);
+            const ghost = zoneFocus !== null && !zoneFocus.inside.has(no) && nextDoor === undefined && !isSel;
+            if (ghost) {
+              return (
+                <g key={no} pointerEvents="none" opacity={0.18}>
+                  <circle cx={at.x} cy={at.y} r={2.6 * u} fill={C.subtle} />
+                </g>
+              );
+            }
             const l = load.get(no);
             // The day-driven rule, same as the schematic: the schedule decides
             // what the plate shows. Quiet open spaces recede to a dot.
@@ -2504,6 +2643,16 @@ function SheetView({
                     fill="none" stroke={isSel ? C.accent : STATE_STYLE.SUSPEND.fg}
                     strokeWidth={1.6 * u} opacity={0.75}
                   />
+                )}
+                {/* Next door to the zone in focus: ringed, and the ring says why. */}
+                {nextDoor && (
+                  <g pointerEvents="none">
+                    <title>{`next door to Zone ${zoneFocus?.zone}: ${nextDoorWords(nextDoor.via)}`}</title>
+                    <circle
+                      cx={at.x} cy={at.y} r={13 * u}
+                      fill="none" stroke={C.warn} strokeWidth={1.4 * u} strokeDasharray={`${4 * u} ${3 * u}`} opacity={0.85}
+                    />
+                  </g>
                 )}
                 {extentBand}
                 {/* A tick down to the keel line: on a busy plate the pin alone
@@ -2654,6 +2803,93 @@ const presetBtn: React.CSSProperties = {
   background: "transparent", color: C.dim, border: `1px solid ${C.line}`,
   font: "inherit", fontSize: 10.5, lineHeight: 1,
 };
+
+/**
+ * What is next door to the zone in focus, as a strip above the canvas: the
+ * spaces outside the zone that can reach into it — across the frame
+ * boundary, from the deck above or below, or through a coupling — worst
+ * first, each with its reason, its state, the live condition in it and the
+ * work booked there this window. A zone manager's awareness of the
+ * neighbours, without the neighbours' clutter.
+ */
+function NextDoorStrip({
+  zone,
+  adjacency,
+  load,
+  horizonLabel,
+  onOpenSpace,
+}: {
+  zone: string;
+  adjacency: ZoneAdjacency;
+  load: Map<string, SpaceLoad>;
+  horizonLabel: string;
+  onOpenSpace: (compartment: string) => void;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const rows = adjacency.adjacent;
+  // Only the neighbours with something going on lead; the quiet ones are
+  // counted and one click away.
+  const busy = rows.filter((a) => !a.permits_work || a.hazards.length > 0 || (load.get(a.compartment)?.count ?? 0) > 0);
+  const shown = showAll ? rows : busy.slice(0, 12);
+  const refusing = rows.filter((a) => !a.permits_work).length;
+  const withHazards = rows.filter((a) => a.hazards.length > 0).length;
+  return (
+    <div style={{ border: `1px solid ${C.warn}55`, borderRadius: 8, background: "rgba(245,158,11,0.04)", padding: "8px 12px", marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+        <b style={{ fontSize: 12, color: C.warn }}>Next door to Zone {zone}</b>
+        <span style={{ fontSize: 11, color: DIM }} title={adjacency.basis}>
+          {rows.length} spaces outside the zone can reach into it
+          {refusing > 0 && <> · <b style={{ color: C.danger }}>{refusing} refusing work</b></>}
+          {withHazards > 0 && <> · {withHazards} with a live field condition</>}
+          {busy.length === 0 && " · all quiet this " + horizonLabel}
+        </span>
+        {rows.length > shown.length && (
+          <button
+            onClick={() => setShowAll(true)}
+            style={{ marginLeft: "auto", font: "inherit", fontSize: 10.5, cursor: "pointer", padding: "1px 8px", borderRadius: 4, color: C.accent, background: "transparent", border: `1px solid ${C.accent}55` }}
+          >
+            show all {rows.length}
+          </button>
+        )}
+        {showAll && (
+          <button
+            onClick={() => setShowAll(false)}
+            style={{ marginLeft: "auto", font: "inherit", fontSize: 10.5, cursor: "pointer", padding: "1px 8px", borderRadius: 4, color: DIM, background: "transparent", border: `1px solid ${LINE}` }}
+          >
+            fewer
+          </button>
+        )}
+      </div>
+      {shown.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
+          {shown.map((a) => {
+            const l = load.get(a.compartment);
+            const tone = STATE_STYLE[a.state];
+            return (
+              <button
+                key={a.compartment}
+                onClick={() => onOpenSpace(a.compartment)}
+                title={`${a.compartment} — ${a.name} · ${a.zone} · ${a.deck_code}\n${nextDoorWords(a.via)}\n${tone.label}${a.hazards.length > 0 ? `\n${a.hazards.map((h) => h.label).join("\n")}` : ""}${l ? `\nthis ${horizonLabel}: ${l.count} activities · ${mh(Math.round(l.hours))}` : ""}`}
+                style={{
+                  font: "inherit", fontSize: 10.5, cursor: "pointer", padding: "3px 8px", borderRadius: 5, textAlign: "left",
+                  color: C.text, background: "#0b0c0e", border: `1px solid ${a.permits_work ? LINE : tone.fg}`,
+                  display: "inline-flex", gap: 6, alignItems: "center",
+                }}
+              >
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: tone.fg, flex: "0 0 auto" }} />
+                <span style={{ fontFamily: "monospace" }}>{a.compartment}</span>
+                <span style={{ color: DIM }}>{a.zone}</span>
+                {a.hazards.length > 0 && <span style={{ color: C.warn }}>⚑ {a.hazards[0]?.kind.replace(/_/g, " ")}</span>}
+                {l && l.count > 0 && <span style={{ color: DIM }}>{l.count} act</span>}
+                <span style={{ color: "#5a6070" }}>{nextDoorWords(a.via.slice(0, 1))}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** The deck plan: compartments placed by frame and side, pannable and zoomable. */
 function PlanView({

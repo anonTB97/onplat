@@ -110,6 +110,8 @@ export default function SequenceBoard({
   spaces,
   onOpenSpace,
   onOpenJob,
+  zoneFocus = null,
+  onZoneFocus,
 }: {
   identity: Identity;
   vesselId: string;
@@ -120,6 +122,11 @@ export default function SequenceBoard({
   onOpenSpace: (compartment: string) => void;
   /** Opens the job card for a work-order code. */
   onOpenJob: (code: string) => void;
+  /** The zone in focus, shared with the Deck Explorer through the shell:
+   *  the register and the lanes narrow to work located in it (or hinted to
+   *  it by the WBS), and say so. */
+  zoneFocus?: string | null;
+  onZoneFocus?: (zone: string | null) => void;
 }) {
 
   // The day's hot-vs-flammable pairs, served — a schedule that plans flame
@@ -139,7 +146,25 @@ export default function SequenceBoard({
     };
   }, [identity, vesselId, asOf]);
 
-  const [activities, setActivities] = useState<Activity[] | null>(null);
+  const [allActivities, setActivities] = useState<Activity[] | null>(null);
+  // The zone in focus narrows the board to work located in the zone, or
+  // hinted to it by its WBS bucket when unlocated — the same placement rule
+  // the zone lanes use. Said in the header; never silent.
+  const zoneOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of spaces) m.set(r.compartment.compartment_no, r.compartment.zone);
+    return m;
+  }, [spaces]);
+  const activities = useMemo(() => {
+    if (!allActivities || !zoneFocus) return allActivities;
+    return allActivities.filter(
+      (a) =>
+        a.is_milestone ||
+        (a.compartment_no !== null
+          ? zoneOf.get(a.compartment_no) === zoneFocus
+          : a.wbs_area === zoneFocus),
+    );
+  }, [allActivities, zoneFocus, zoneOf]);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
   const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes" | "digest">("register");
   const [importMsg, setImportMsg] = useState<string | null>(null);
@@ -437,6 +462,26 @@ export default function SequenceBoard({
         >
           Load digest
         </button>
+        {zoneFocus && (
+          <span
+            style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "3px 8px 3px 10px", borderRadius: 6, border: `1px solid ${C.warn}88`, background: "rgba(245,158,11,0.08)", fontSize: 11.5 }}
+            title="The zone in focus, shared with the Deck Explorer. Work located in the zone, or hinted to it by its WBS bucket when unlocated, is on the board; the rest of the register is one click away."
+          >
+            <b style={{ color: C.warn }}>Zone {zoneFocus} in focus</b>
+            <span style={{ color: C.dim }}>
+              {activities.length.toLocaleString()} of {(allActivities?.length ?? 0).toLocaleString()} activities
+            </span>
+            {onZoneFocus && (
+              <button
+                onClick={() => onZoneFocus(null)}
+                title="Leave zone focus — the whole register, on every screen"
+                style={{ font: "inherit", fontSize: 11, cursor: "pointer", padding: "1px 7px", borderRadius: 4, color: C.text, background: "transparent", border: `1px solid ${C.line}` }}
+              >
+                ✕
+              </button>
+            )}
+          </span>
+        )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           {importMsg && (
             <span style={{ fontSize: 11, color: msgColor(importMsg) }}>{importMsg}</span>

@@ -86,11 +86,15 @@ export function ShipView({
   zonesOn,
   zones,
   zoneAlerts,
+  focus,
   onPick,
 }: {
   decks: Deck[];
   rows: DeckStateRow[];
   activities: Activity[];
+  /** The zone in focus: its spaces and chips draw in full, next door draws
+   *  ringed, everything else ghosts — the hull keeps its shape. */
+  focus?: { zone: string; inside: Set<string>; adjacent: Map<string, { via: string[] }> } | null;
   /** The selected compartment — its box and chips ring in accent. */
   selected: string | null;
   /** The selected space's hazard route, compartment to compartment. */
@@ -430,6 +434,10 @@ export function ShipView({
               const isSel = no === selected;
               const inViolation = involved.has(no);
               const dimmed = violationFocus && !inViolation;
+              // Zone focus: outside and not next door, the box is a ghost;
+              // next door keeps its state and wears a ring that says why.
+              const nextDoor = focus?.adjacent.get(no);
+              const ghost = focus ? !focus.inside.has(no) && nextDoor === undefined && !isSel : false;
               // Divided by zoom: the footprint's WIDTH is hull geometry and
               // grows with the drawing, but the strip height, text and strokes
               // are labels and keep their screen size.
@@ -439,12 +447,20 @@ export function ShipView({
                 <g
                   key={no}
                   onClick={() => onPick(r.compartment.deck_code, no)}
-                  style={{ cursor: "pointer" }}
-                  opacity={dimmed ? 0.45 : 1}
+                  style={{ cursor: ghost ? "default" : "pointer" }}
+                  opacity={ghost ? 0.12 : dimmed ? 0.45 : 1}
+                  pointerEvents={ghost ? "none" : undefined}
                 >
                   <title>
-                    {`${no} — ${r.compartment.name}\n${r.state}${r.permits_work ? "" : " — refuses work"} · ${r.compartment.zone}${r.clearing_authority ? `\ncleared by ${r.clearing_authority}` : ""}`}
+                    {`${no} — ${r.compartment.name}\n${r.state}${r.permits_work ? "" : " — refuses work"} · ${r.compartment.zone}${r.clearing_authority ? `\ncleared by ${r.clearing_authority}` : ""}${nextDoor ? `\nnext door to Zone ${focus?.zone}: ${nextDoor.via.join(", ")}` : ""}`}
                   </title>
+                  {nextDoor && (
+                    <rect
+                      x={c.x - boxHalfW - 3 * sc} y={y - 3 * sc}
+                      width={boxHalfW * 2 + 6 * sc} height={BOX_H * sc + 6 * sc} rx={4 * sc}
+                      fill="none" stroke={C.warn} strokeWidth={1.2 * sc} strokeDasharray={`${3 * sc} ${2 * sc}`} opacity={0.9}
+                    />
+                  )}
                   {/* The violation's own spaces get a halo, so the route reads
                       even where lit and dimmed boxes sit close. */}
                   {violationFocus && inViolation && (
@@ -498,7 +514,11 @@ export function ShipView({
                 const y = top + (10 + p.level * 12) * sc;
                 // The two focuses compose: a chip outside both the violation's
                 // route and the instant's window earns both dims.
+                const outsideFocus =
+                  focus !== null && focus !== undefined &&
+                  !focus.inside.has(p.compartment) && !focus.adjacent.has(p.compartment);
                 const dim =
+                  (outsideFocus ? 0.12 : 1) *
                   (violationFocus && !involved.has(p.compartment) ? 0.45 : 1) *
                   (windowFocus && !a.in_window ? 0.35 : 1);
                 return (

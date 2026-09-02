@@ -1073,6 +1073,48 @@ export interface ZoneChart {
   audit: ZoneAudit;
 }
 
+/** One space next door to a zone, and why it counts as next door. */
+export interface AdjacentSpace {
+  compartment: string;
+  name: string;
+  zone: string;
+  deck_code: string;
+  deck_ordinal: number;
+  frame: number | null;
+  side: string;
+  /** `frame_boundary`, `deck_above`, `deck_below`, `coupled:<code>` — every reason that applies. */
+  via: string[];
+  state: DecisionState;
+  permits_work: boolean;
+  /** Field conditions live in the space at the instant. */
+  hazards: { kind: string; label: string }[];
+}
+
+/** The spaces next door to a zone — the server's answer (docs/zone-scheme.md). */
+export interface ZoneAdjacency {
+  zone: string;
+  as_of: number;
+  inside: string[];
+  adjacent: AdjacentSpace[];
+  basis: string;
+}
+
+// What is about to reach into a zone from outside it: served once from the
+// register, the geometry and the coupling graph, never re-derived here.
+export async function zoneAdjacent(
+  id: Identity,
+  vesselId: string,
+  zone: string,
+  asOf: AsOf = null,
+): Promise<ZoneAdjacency> {
+  const res = await fetch(
+    withAsOf(`/api/vessels/${vesselId}/zones/${encodeURIComponent(zone)}/adjacent`, asOf),
+    { headers: headers(id) },
+  );
+  if (!res.ok) throw new Error(`zone adjacency → ${res.status}`);
+  return (await res.json()) as ZoneAdjacency;
+}
+
 export async function getZoneChart(id: Identity, vesselId: string): Promise<ZoneChart> {
   const res = await fetch(`/api/vessels/${vesselId}/zones`, { headers: headers(id) });
   if (!res.ok) throw new Error(`zones → ${res.status}`);

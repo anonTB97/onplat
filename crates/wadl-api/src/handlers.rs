@@ -2064,6 +2064,192 @@ pub(crate) async fn zones(
     })))
 }
 
+/// How far across a frame boundary "next door" reaches: eight frames, 32 ft
+/// on this class — about two compartments.
+const BOUNDARY_FRAMES: i32 = 8;
+
+/// The frame extent a space claims: the surveyed extent where the geometry
+/// register has one, the placard's frame station otherwise.
+fn frame_extent(c: &wadl_store::model::CompartmentSummary) -> Option<(i32, i32)> {
+    match (c.fwd_frame, c.aft_frame, c.frame) {
+        (Some(f), Some(a), _) => Some((f, a)),
+        (_, _, Some(f)) => Some((f, f)),
+        _ => None,
+    }
+}
+
+/// Every reason a space outside a zone counts as next door to it, keyed by
+/// placard: `frame_boundary`, `deck_above`, `deck_below`, `coupled:<code>`.
+fn adjacency_reasons<'a>(
+    compartments: &'a [wadl_store::model::CompartmentSummary],
+    inside: &[&wadl_store::model::CompartmentSummary],
+    graph: &wadl_engine::AdjacencyGraph,
+) -> std::collections::BTreeMap<&'a str, std::collections::BTreeSet<String>> {
+    // The hull's deck order: "directly above" is the previous ordinal the
+    // register carries, not ordinal - 1.
+    let mut ordinals: Vec<i32> = compartments.iter().map(|c| c.deck_ordinal).collect();
+    ordinals.sort_unstable();
+    ordinals.dedup();
+    let neighbour_decks = |o: i32| -> (Option<i32>, Option<i32>) {
+        let i = ordinals.iter().position(|&x| x == o);
+        (
+            i.and_then(|i| i.checked_sub(1))
+                .and_then(|i| ordinals.get(i).copied()),
+            i.and_then(|i| ordinals.get(i + 1).copied()),
+        )
+    };
+    // The zone's frame extent per deck it occupies.
+    let mut extent_by_deck: std::collections::BTreeMap<i32, (i32, i32)> =
+        std::collections::BTreeMap::new();
+    for c in inside {
+        if let Some((f, a)) = frame_extent(c) {
+            extent_by_deck
+                .entry(c.deck_ordinal)
+                .and_modify(|e| {
+                    e.0 = e.0.min(f);
+                    e.1 = e.1.max(a);
+                })
+                .or_insert((f, a));
+        }
+    }
+    let inside_set: std::collections::BTreeSet<&str> =
+        inside.iter().map(|c| c.compartment_no.as_str()).collect();
+
+    let mut via: std::collections::BTreeMap<&str, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for c in compartments {
+        if inside_set.contains(c.compartment_no.as_str()) {
+            continue;
+        }
+        let Some((of, oa)) = frame_extent(c) else {
+            continue;
+        };
+        // Across the frame boundary: within reach of any zone space on this deck.
+        let near = inside.iter().any(|i| {
+            i.deck_ordinal == c.deck_ordinal
+                && frame_extent(i).is_some_and(|(f, a)| (of - a).max(f - oa) <= BOUNDARY_FRAMES)
+        });
+        if near {
+            via.entry(c.compartment_no.as_str())
+                .or_default()
+                .insert("frame_boundary".to_owned());
+        }
+        // On the deck directly above or below a zone deck, inside the zone's
+        // frame extent there. `below` is the deck under this space: the space
+        // sits ABOVE the zone when the zone occupies the deck below it.
+        let (above, below) = neighbour_decks(c.deck_ordinal);
+        for (deck, word) in [(below, "deck_above"), (above, "deck_below")] {
+            let Some(deck) = deck else { continue };
+            if let Some(&(lo, hi)) = extent_by_deck.get(&deck) {
+                if of <= hi && oa >= lo {
+                    via.entry(c.compartment_no.as_str())
+                        .or_default()
+                        .insert(word.to_owned());
+                }
+            }
+        }
+    }
+    // Coupled: an edge with one end in the zone and one end outside, either way.
+    for e in graph.edges() {
+        let (from, to) = (e.from.as_str(), e.to.as_str());
+        let outside = match (inside_set.contains(from), inside_set.contains(to)) {
+            (true, false) => to,
+            (false, true) => from,
+            _ => continue,
+        };
+        if let Some(c) = compartments
+            .iter()
+            .find(|c| c.compartment_no.as_str() == outside)
+        {
+            via.entry(c.compartment_no.as_str())
+                .or_default()
+                .insert(format!("coupled:{}", e.code.as_str()));
+        }
+    }
+    via
+}
+
+/// `GET /api/vessels/:id/zones/:zone/adjacent` — the spaces next door to a
+/// zone, each saying why it counts as next door (docs/zone-scheme.md):
+/// across the frame boundary on the same deck, on the deck directly above or
+/// below inside the zone's frame extent, or coupled into the zone by a path
+/// the rules bind to. Served with each space's authorization state and the
+/// field conditions live in it at the instant, so a zone-focused screen can
+/// blot out the rest of the hull and still show what is about to reach in.
+///
+/// Computed here, once, from the register, the geometry and the coupling
+/// graph; the screens draw it and never re-derive it.
+pub(crate) async fn zone_adjacent(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path((id, zone)): Path<(Uuid, String)>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let mut compartments = state.store.list_compartments(&scope, vessel).await?;
+    overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
+    let inside: Vec<&wadl_store::model::CompartmentSummary> =
+        compartments.iter().filter(|c| c.zone == zone).collect();
+    if inside.is_empty() {
+        return Err(ApiError::NotFound);
+    }
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
+    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    let via = adjacency_reasons(&compartments, &inside, &graph);
+
+    let mut adjacent: Vec<Value> = compartments
+        .iter()
+        .filter_map(|c| {
+            let ways = via.get(c.compartment_no.as_str())?;
+            let decision = evaluate(&EvaluationRequest {
+                subject: &c.compartment_no,
+                graph: &graph,
+                rules: &rules,
+                hazards: &hazards,
+                at,
+            });
+            let live: Vec<Value> = hazards
+                .iter()
+                .filter(|h| h.origin == c.compartment_no)
+                .map(|h| json!({ "kind": h.kind, "label": h.label }))
+                .collect();
+            Some(json!({
+                "compartment": c.compartment_no,
+                "name": c.name,
+                "zone": c.zone,
+                "deck_code": c.deck_code,
+                "deck_ordinal": c.deck_ordinal,
+                "frame": c.frame,
+                "side": c.side,
+                "via": ways,
+                "state": decision.state,
+                "permits_work": decision.permits_work(),
+                "hazards": live,
+            }))
+        })
+        .collect();
+    // Worst first: what refuses work next door is what a zone manager reads
+    // first; then what carries a live condition; then by placard.
+    adjacent.sort_by_key(|r| {
+        (
+            r["permits_work"].as_bool().unwrap_or(true),
+            r["hazards"].as_array().map_or(0, Vec::len) == 0,
+            r["compartment"].as_str().unwrap_or("").to_owned(),
+        )
+    });
+    Ok(Json(json!({
+        "zone": zone,
+        "as_of": at,
+        "inside": inside.iter().map(|c| &c.compartment_no).collect::<Vec<_>>(),
+        "adjacent": adjacent,
+        "basis": format!(
+            "next door = within {BOUNDARY_FRAMES} frames of a zone space on the same deck, on the deck directly above or below inside the zone's frame extent there, or coupled to a zone space by a path the rules bind to; extents surveyed where the geometry register has them, placard frames otherwise"
+        ),
+    })))
+}
+
 /// The body of a zone-chart import: authored frame bounds per zone.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct ImportZones {

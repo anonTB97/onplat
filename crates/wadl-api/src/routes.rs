@@ -88,6 +88,7 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         Some(r#"{"label":"leak test","bounds":[{"zone":"Z1","lo_frame":0,"hi_frame":1}]}"#),
     ),
     ("POST", "/api/vessels/:id/zones/revert", true, None),
+    ("GET", "/api/vessels/:id/zones/:zone/adjacent", true, None),
     (
         "POST",
         "/api/vessels/:id/budget-book",

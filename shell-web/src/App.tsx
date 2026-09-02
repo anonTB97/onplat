@@ -110,6 +110,15 @@ export default function App() {
   const [sharedSpace, setSharedSpace] = useState<string | null>(null);
   const [persona, setPersona] = useState<Persona>(INITIAL_ROLE);
   const [altitude, setAltitude] = useState<Altitude>(INITIAL_ROLE.altitude);
+  // The zone in focus — one choice, every screen answers for it: the plates
+  // and the whole-ship view blot out the rest of the hull, the register and
+  // the lanes narrow to it, and next-door work stays visible. Held here
+  // rather than inside the Deck Explorer so the Sequence Board reads the
+  // same zone, and cleared on a hull switch: a zone is a place on one ship.
+  const [zoneFocus, setZoneFocus] = useState<string | null>(null);
+  useEffect(() => {
+    setZoneFocus(null);
+  }, [selected]);
   const [focus, setFocus] = useState<string | null>(null);
   /** The first-run cards can open the legend in the top bar. */
   const [legendOpen, setLegendOpen] = useState(false);
@@ -487,6 +496,8 @@ export default function App() {
               horizon={horizon}
               now={frame?.now ?? null}
               onMutated={() => setDataEpoch((n) => n + 1)}
+              zoneFocus={zoneFocus}
+              onZoneFocus={setZoneFocus}
             />
           )}
 
@@ -524,6 +535,8 @@ export default function App() {
               asOf={asOf}
               spaces={rows}
               onOpenSpace={jump}
+              zoneFocus={zoneFocus}
+              onZoneFocus={setZoneFocus}
             />
           )}
 

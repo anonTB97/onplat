@@ -14,10 +14,11 @@ import {
 } from "./api";
 import {
   ClassificationBanner,
-  GuardrailStrip,
+  loadRole,
   MARKING_H,
   ModuleRail,
-  PERSONAS,
+  saveRole,
+  StatusStrip,
   TopBar,
   type Altitude,
   type HullChoice,
@@ -25,6 +26,7 @@ import {
   type Persona,
 } from "./Chrome";
 import DailyOps from "./DailyOps";
+import { FirstRun } from "./FirstRun";
 import { JobCard } from "./JobCard";
 import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
 import DeckExplorer from "./DeckExplorer";
@@ -39,24 +41,34 @@ import { fmtInstant, isProjection, TimeControl, type Horizon } from "./TimeContr
 import WorkOrders from "./WorkOrders";
 import { C } from "./theme";
 
-// The module rail, mirroring the prototype's grouping and order. `built` is
-// honest rather than aspirational: a module with no view is labelled in the rail
-// so nobody clicks expecting a screen and reads the emptiness as broken data.
+// The module rail, grouped the way a working day runs rather than the way the
+// prototype was built: what is happening now, the plan at its three grains,
+// the conflicts and their consequences, the data everything is built from,
+// and the record. "Authorization" is gone as a group name — the strip above
+// says the tool grants none, and a rail that said otherwise was arguing with
+// it. `built` is honest rather than aspirational: a module with no view is
+// labelled in the rail so nobody clicks expecting a screen and reads the
+// emptiness as broken data.
 const MODULES: ModuleDef[] = [
-  { group: "Operate", label: "Daily Ops", id: "dailyOps", icon: "dailyOps", built: true },
+  { group: "Today", label: "Daily Ops", id: "dailyOps", icon: "dailyOps", built: true },
   { group: "", label: "Deck Explorer", id: "deckExplorer", icon: "deckExplorer", built: true },
   { group: "Plan", label: "Sequence Board", id: "sequenceBoard", icon: "sequenceBoard", built: true },
   { group: "", label: "Work Orders", id: "workOrders", icon: "workOrders", built: true },
-  { group: "Decide", label: "Conflicts & Risk", id: "leverage", icon: "conflicts", built: true },
-  { group: "Yard", label: "Portfolio", id: "portfolio", icon: "portfolio", built: true },
-  { group: "", label: "Data Sources", id: "sources", icon: "sources", built: true },
-  { group: "Authorization", label: "Distributed Packages", id: "distPackages", icon: "distPackages", built: true },
-  { group: "", label: "Decisions Ledger", id: "ledger", icon: "ledger", built: true },
+  { group: "", label: "Distributed Packages", id: "distPackages", icon: "distPackages", built: true },
+  { group: "Conflicts", label: "Conflicts & Risk", id: "leverage", icon: "conflicts", built: true },
   { group: "", label: "Deconfliction Cascade", id: "cascade", icon: "cascade", built: true },
+  { group: "Data", label: "Data Sources", id: "sources", icon: "sources", built: true },
+  { group: "", label: "Portfolio", id: "portfolio", icon: "portfolio", built: true },
+  { group: "Record", label: "Decisions Ledger", id: "ledger", icon: "ledger", built: true },
+  { group: "", label: "Reports", id: "placeholder", icon: "ledger", built: false },
   { group: "Help", label: "Field Guide", id: "guide", icon: "guide", built: true },
 ];
 
-const DECK_EXPLORER = MODULES[1] as ModuleDef;
+const byId = (id: string): ModuleDef =>
+  MODULES.find((m) => m.id === id && m.built) ?? (MODULES[1] as ModuleDef);
+const DECK_EXPLORER = byId("deckExplorer");
+const PORTFOLIO = byId("portfolio");
+const INITIAL_ROLE = loadRole();
 
 /**
  * The URL's share of the state: #/{hull}/{module}?as_of=…&space=… — enough to
@@ -85,24 +97,32 @@ export default function App() {
   const [rows, setRows] = useState<DeckStateRow[]>([]);
   const [issues, setIssues] = useState<Issue[]>([]);
   const [selected, setSelected] = useState<string>(BOOT.vessel ?? PICKABLE_HULLS[0]?.id ?? "");
+  // A URL names a screen; otherwise the role's front door is where the day
+  // opens. Nobody lands on a deck plate because that is where the code starts.
   const [module, setModule] = useState<ModuleDef>(
-    MODULES.find((m) => m.id === BOOT.module && m.built) ?? DECK_EXPLORER,
+    MODULES.find((m) => m.id === BOOT.module && m.built) ?? byId(INITIAL_ROLE.landing),
   );
   // Where a route-to-fix came FROM, so the door swings both ways: any jump
   // from another module leaves a "back" chip over the Deck Explorer.
   const [returnTo, setReturnTo] = useState<ModuleDef | null>(null);
   /** The Deck Explorer's selection, reported up for the shareable URL. */
   const [sharedSpace, setSharedSpace] = useState<string | null>(null);
-  const [persona, setPersona] = useState<Persona>(PERSONAS[0] as Persona);
-  const [altitude, setAltitude] = useState<Altitude>((PERSONAS[0] as Persona).altitude);
+  const [persona, setPersona] = useState<Persona>(INITIAL_ROLE);
+  const [altitude, setAltitude] = useState<Altitude>(INITIAL_ROLE.altitude);
   const [focus, setFocus] = useState<string | null>(null);
+  /** The first-run cards can open the legend in the top bar. */
+  const [legendOpen, setLegendOpen] = useState(false);
+  // Whether the verdict reads below are a real answer. A failed read used to
+  // become an empty list, and an empty list reads as "nothing held" on every
+  // board — the one thing a failure must never look like.
+  const [verdictsOk, setVerdictsOk] = useState<boolean | null>(null);
   // One instant, one horizon, for the whole app. A time control that meant a
   // different moment on each screen would be worse than none — the Deck Explorer
   // and the ship board would disagree about what is held, and neither would be
   // wrong. Held here for the same reason the altitude is.
   const [frame, setFrame] = useState<Timeframe | null>(null);
   const [asOf, setAsOf] = useState<AsOf>(BOOT.asOf ?? null);
-  const [horizon, setHorizon] = useState<Horizon>((PERSONAS[0] as Persona).horizon);
+  const [horizon, setHorizon] = useState<Horizon>(INITIAL_ROLE.horizon);
   const [playing, setPlaying] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [wall, setWall] = useState(false);
@@ -148,22 +168,21 @@ export default function App() {
     // every tick — a slow response for one instant landing after a faster
     // later one would leave every consumer of `rows` at the wrong instant.
     let stale = false;
-    deckStates(DEMO_IDENTITY, selected, asOf)
-      .then((r) => {
-        if (!stale) setRows(r);
+    // Both reads succeed or the pair is marked failed: a bell that counted
+    // issues over spaces it could not read would be half an answer wearing
+    // the confidence of a whole one.
+    Promise.all([deckStates(DEMO_IDENTITY, selected, asOf), listIssues(DEMO_IDENTITY, selected, asOf)])
+      .then(([r, i]) => {
+        if (stale) return;
+        setRows(r);
+        setIssues(i.issues);
+        setVerdictsOk(true);
       })
       .catch(() => {
-        if (!stale) setRows([]);
-      });
-    // The issue board, held here because two pieces of chrome spend it: the
-    // alert bell's count and the Conflicts & Risk rail badge. One fetch, one
-    // number — a bell and a badge that disagreed would be worse than neither.
-    listIssues(DEMO_IDENTITY, selected, asOf)
-      .then((r) => {
-        if (!stale) setIssues(r.issues);
-      })
-      .catch(() => {
-        if (!stale) setIssues([]);
+        if (stale) return;
+        setRows([]);
+        setIssues([]);
+        setVerdictsOk(false);
       });
     return () => {
       stale = true;
@@ -278,26 +297,27 @@ export default function App() {
         persona={persona}
         onPersona={(p) => {
           setPersona(p);
-          // The persona's whole job in this shell: it decides where the reader
-          // starts in both dimensions — the height the Deck Explorer opens at,
-          // so an executive does not navigate down from the hull every morning
-          // and a foreman does not start at the hull, and the time resolution,
-          // so neither has to change the horizon before reading anything.
+          saveRole(p);
+          // A role is a front door: it decides where the reader starts in all
+          // three dimensions — the screen, the height the Deck Explorer opens
+          // at, and the time resolution — so nobody navigates to their own
+          // morning from somebody else's.
           setAltitude(p.altitude);
           setHorizon(p.horizon);
-          setModule(DECK_EXPLORER);
+          setReturnTo(null);
+          setModule(byId(p.landing));
         }}
         rows={rows}
         issues={issues}
+        verdictsOk={verdictsOk}
+        legendOpen={legendOpen}
+        onLegendOpened={() => setLegendOpen(false)}
         onJump={jump}
-        onOpenIssues={() => {
-          const leverage = MODULES.find((m) => m.id === "leverage");
-          if (leverage) setModule(leverage);
-        }}
+        onOpenIssues={() => setModule(byId("leverage"))}
         outOfScope={outOfScope}
       />
 
-      <GuardrailStrip />
+      <StatusStrip rows={rows} issues={issues} verdictsOk={outOfScope ? null : verdictsOk} />
 
       {/* Time applies to every module, so the control sits in the chrome rather
           than inside one screen. Rendered only once a hull is picked: its bounds
@@ -339,7 +359,7 @@ export default function App() {
           </span>
         )}
         <button
-          onClick={() => setModule(MODULES[5] as ModuleDef)}
+          onClick={() => setModule(PORTFOLIO)}
           style={{ background: "none", border: "none", padding: 0, font: "inherit", color: C.dim, cursor: "pointer" }}
         >
           Portfolio
@@ -414,6 +434,15 @@ export default function App() {
             <p style={{ color: C.dim, fontSize: 12.5 }}>Pick a hull to begin.</p>
           )}
 
+          {!error && selected && module.built && module.id !== "guide" && (
+            <FirstRun
+              roleName={persona.name}
+              opens={persona.opens}
+              onOpenGuide={() => setModule(byId("guide"))}
+              onOpenLegend={() => setLegendOpen(true)}
+            />
+          )}
+
           {!error && selected && module.id === "deckExplorer" && returnTo && (
             <button
               onClick={() => {
@@ -468,6 +497,7 @@ export default function App() {
               hullLabel={hullLabel}
               asOf={asOf}
               spaces={rows}
+              verdictsOk={outOfScope ? null : verdictsOk}
               onOpenSpace={jump}
             />
           )}
@@ -582,9 +612,9 @@ export default function App() {
               <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>{module.label}</div>
               <h1 style={{ fontSize: 22, margin: "4px 0 8px" }}>Not built yet</h1>
               <p style={{ color: C.dim, fontSize: 12.5, maxWidth: 640 }}>
-                This module is on the milestone-1 plan and has no view yet. It says so
-                rather than rendering an empty frame that looks like missing data — and
-                the rail marks it <b>soon</b> so the emptiness is never a surprise.
+                This module is on the plan and has no view yet. It says so rather than
+                rendering an empty frame that looks like missing data — and the rail
+                marks it <b>soon</b> so the emptiness is never a surprise.
               </p>
             </>
           )}

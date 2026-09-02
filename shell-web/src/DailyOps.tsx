@@ -79,6 +79,7 @@ export default function DailyOps({
   hullLabel,
   asOf,
   spaces,
+  verdictsOk,
   onOpenSpace,
   onOpenJob,
 }: {
@@ -88,6 +89,13 @@ export default function DailyOps({
   asOf: AsOf;
   /** The hull's per-space verdicts at the same instant, from the app shell. */
   spaces: DeckStateRow[];
+  /**
+   * Whether `spaces` is a real answer: true once the verdict read succeeded,
+   * false when it failed, null while it is still loading. A failed read must
+   * not render as a board with no holds on it — that is the one lie a shift
+   * board can tell that sends a crew into a refused space.
+   */
+  verdictsOk: boolean | null;
   onOpenSpace: (compartment: string) => void;
   /** Opens the job card for a work-order code. */
   onOpenJob: (code: string) => void;
@@ -295,6 +303,17 @@ export default function DailyOps({
           </>
         }
       />
+
+      {verdictsOk === false && (
+        <div
+          role="alert"
+          style={{ margin: "0 0 12px", padding: "8px 12px", borderRadius: 6, border: `1px solid rgba(245,158,11,0.55)`, background: "rgba(245,158,11,0.12)", color: C.warn, fontSize: 12.5 }}
+        >
+          <b>Verdicts unavailable.</b> The engine did not answer for this instant, so no
+          space on this board carries a HELD badge. Do not read the absence as clearance —
+          reload, or check the API.
+        </div>
+      )}
 
       {/* The slice: this instant, or one of the yard's three shifts on the
           as-of day — so tonight's board is readable this afternoon. */}

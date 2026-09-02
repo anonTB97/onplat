@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 import { acknowledgeIssue, listIssues, type AsOf, type Identity, type Issue } from "./api";
 import { Loading } from "./Loading";
-import { chipStyle, C, fmtClear, mh } from "./theme";
+import { chipStyle, C, fmtClear, mh, STATE_STYLE } from "./theme";
 
 /**
  * Persona-shaped cuts of the board. Each lens is the subset of kinds one job
@@ -104,7 +104,7 @@ function evidence(i: Issue): string {
       );
     case "held_with_crews_booked":
       return (
-        `${i.state} · ` +
+        `${STATE_STYLE[i.state].label} (${i.state}) · ` +
         (i.earliest_clear
           ? `clears ${fmtClear(i.earliest_clear)} on its own`
           : `needs ${i.clearing_authority} — never elapses on a clock`)

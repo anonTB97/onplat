@@ -663,13 +663,14 @@ export default function DeckExplorer({
     <div>
       {/* Title from the prototype. The question is the point of the screen, so it
           is the subtitle rather than a description of the data model. */}
-      <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
-        Deck Explorer · {hullLabel}
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <h1 style={{ fontSize: 22, margin: 0 }}>Deck Explorer</h1>
+        <span style={{ fontFamily: "monospace", fontSize: 11, color: DIM, letterSpacing: 0.3 }}>{hullLabel}</span>
       </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>
+      <div style={{ fontSize: 13, color: C.bright, margin: "3px 0 0" }}>
         Where can people work — and what&rsquo;s stopping them?
-      </h1>
-      <p style={{ color: DIM, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
+      </div>
+      <p style={{ color: DIM, fontSize: 12.5, margin: "4px 0 12px", maxWidth: 780 }}>
         Authorization is computed by the rule engine and read through the API — the shell
         never derives it. {heldCount} of {rows.length} compartments have work booked that
         {/* "currently" was true until the time control existed. On a scrubbed
@@ -1200,9 +1201,9 @@ export default function DeckExplorer({
                     ))
                   : lens === "space"
                     ? (["ALLOW", "WARN", "SUSPEND", "BLOCK"] as const).map((s) => (
-                        <span key={s} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span key={s} style={{ display: "flex", alignItems: "center", gap: 5 }} title={`${s} — ${STATE_STYLE[s].gloss}`}>
                           <span style={{ width: 9, height: 9, borderRadius: 2, background: STATE_STYLE[s].fg }} />
-                          {s}
+                          {STATE_STYLE[s].label} — {STATE_STYLE[s].gloss}
                         </span>
                       ))
                     : allTrades.map((t) => (
@@ -1637,8 +1638,12 @@ function TracePanel({
               <>
                 <div style={{ marginTop: 6, display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
                   <span style={{ fontFamily: "monospace" }}>{row.compartment.compartment_no}</span>
-                  <span style={{ color: STATE_STYLE[row.state].fg, fontWeight: 700, fontSize: 12 }}>
-                    {row.state}
+                  <span
+                    style={{ color: STATE_STYLE[row.state].fg, fontWeight: 700, fontSize: 12 }}
+                    title={`${row.state} — ${STATE_STYLE[row.state].gloss}`}
+                  >
+                    {STATE_STYLE[row.state].label}
+                    <span style={{ fontFamily: "monospace", fontWeight: 400, fontSize: 9.5, color: DIM, marginLeft: 5 }}>{row.state}</span>
                   </span>
                   <span
                     style={{ fontSize: 10, fontWeight: 700, color: OVERLAY_STYLE[overlayBucket(row)].fg }}

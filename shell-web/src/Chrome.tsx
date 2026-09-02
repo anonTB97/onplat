@@ -12,7 +12,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { DeckStateRow, Issue, VesselSummary, WhoAmI } from "./api";
 import { claim, fixSpace, KIND } from "./IssuesBoard";
 import type { Horizon } from "./TimeControl";
-import { C, mh } from "./theme";
+import {
+  ACTIVITY_STATUS,
+  C,
+  mh,
+  OVERLAY_STYLE,
+  READINESS_STYLE,
+  STATE_ORDER,
+  STATE_STYLE,
+} from "./theme";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -100,33 +108,53 @@ export interface Persona {
    * both.
    */
   horizon: Horizon;
+  /** The module id this role's day opens on. */
+  landing: string;
+  /** That module, said the way the role would say it — "the shift board". */
+  opens: string;
 }
 
+/**
+ * The yard's roles, each with the screen its morning starts on.
+ *
+ * These replaced eight programme-shaped personas (IPT, Program Office,
+ * Material Manager…) that all opened on the same deck plate. A role is a
+ * front door: a foreman lands on the shift board for their trade, a zone
+ * manager on their zone, a planner on the register. The altitude and horizon
+ * still travel with it, so the Deck Explorer opens at the right height when
+ * that role gets there.
+ */
 export const PERSONAS: Persona[] = [
-  { name: "Planner", focus: "Conflicts & sequence", altitude: "compartment", horizon: "week" },
-  { name: "Zone Manager", focus: "Your zone's muster", altitude: "zone", horizon: "week" },
-  { name: "Production Super", focus: "Shift plan", altitude: "zone", horizon: "day" },
-  { name: "Project Super", focus: "Availability health", altitude: "ship", horizon: "month" },
-  { name: "IPT", focus: "Mitigation decisions", altitude: "compartment", horizon: "month" },
-  {
-    name: "Program Office",
-    focus: "Risk / on-time confidence",
-    altitude: "ship",
-    horizon: "availability",
-  },
-  {
-    name: "Material Manager",
-    focus: "Material readiness",
-    altitude: "compartment",
-    horizon: "week",
-  },
-  {
-    name: "Executive",
-    focus: "Throughput / dock utilization",
-    altitude: "ship",
-    horizon: "availability",
-  },
+  { name: "Foreman", focus: "My crew's shift", altitude: "compartment", horizon: "day", landing: "dailyOps", opens: "the shift board" },
+  { name: "Zone Manager", focus: "My zone's week", altitude: "zone", horizon: "week", landing: "deckExplorer", opens: "the zone board" },
+  { name: "Production Super", focus: "Every trade, this shift", altitude: "zone", horizon: "day", landing: "dailyOps", opens: "the shift board" },
+  { name: "Planner", focus: "The register and its conflicts", altitude: "compartment", horizon: "week", landing: "sequenceBoard", opens: "the activity register" },
+  { name: "Ship Super", focus: "The hull, worst first", altitude: "ship", horizon: "month", landing: "deckExplorer", opens: "the ship board" },
+  { name: "Safety", focus: "Field conditions and who clears them", altitude: "compartment", horizon: "day", landing: "leverage", opens: "conflicts and actions" },
+  { name: "Project Manager", focus: "Availability health", altitude: "ship", horizon: "availability", landing: "deckExplorer", opens: "the ship board" },
 ];
+
+const ROLE_KEY = "wadl.role.v1";
+
+/** The role remembered on this browser, or the first one. */
+export function loadRole(): Persona {
+  try {
+    const name = window.localStorage.getItem(ROLE_KEY);
+    const found = PERSONAS.find((p) => p.name === name);
+    if (found) return found;
+  } catch {
+    // Storage refused — the default role is the honest fallback.
+  }
+  return PERSONAS[0] as Persona;
+}
+
+export function saveRole(p: Persona): void {
+  try {
+    window.localStorage.setItem(ROLE_KEY, p.name);
+  } catch {
+    // Storage refused — the choice lasts the session.
+  }
+}
 
 const initialsOf = (name: string) =>
   name
@@ -236,6 +264,9 @@ export function TopBar({
   onOpenIssues,
   outOfScope,
   who,
+  verdictsOk,
+  legendOpen,
+  onLegendOpened,
 }: {
   onCollapse: () => void;
   hulls: HullChoice[];
@@ -253,8 +284,19 @@ export function TopBar({
   outOfScope: boolean;
   /** Server-resolved identity; null while loading or if the read failed. */
   who: WhoAmI | null;
+  /** Whether the verdict read behind `rows` and `issues` succeeded; null while loading. */
+  verdictsOk: boolean | null;
+  /** Opens the legend from outside the bar (the first-run cards use it). */
+  legendOpen?: boolean;
+  onLegendOpened?: () => void;
 }) {
-  const [menu, setMenu] = useState<"context" | "persona" | "alerts" | null>(null);
+  const [menu, setMenu] = useState<"context" | "persona" | "alerts" | "legend" | null>(null);
+  useEffect(() => {
+    if (legendOpen) {
+      setMenu("legend");
+      onLegendOpened?.();
+    }
+  }, [legendOpen, onLegendOpened]);
   const [query, setQuery] = useState("");
   /** The keyboard-highlighted search hit; Enter takes it, arrows move it. */
   const [hitIdx, setHitIdx] = useState(0);
@@ -311,8 +353,8 @@ export function TopBar({
         zone: r.compartment.zone,
         detail:
           r.readiness === "held"
-            ? `${r.state} · ${mh(r.remaining_hours)} held`
-            : r.work_order_codes.join(", ") || r.state,
+            ? `${STATE_STYLE[r.state].label} · ${mh(r.remaining_hours)} held`
+            : r.work_order_codes.join(", ") || STATE_STYLE[r.state].label,
       }));
   }, [query, rows]);
 
@@ -411,6 +453,56 @@ export function TopBar({
         )}
       </div>
 
+      {/* legend — every vocabulary the boards use, one panel, reachable from
+          every screen. Eight sets of words used to be learned one screen at a
+          time; this is where they are all defined at once. */}
+      <div style={{ position: "relative" }}>
+        <button
+          onClick={() => setMenu(menu === "legend" ? null : "legend")}
+          title="What the colours and words mean, on every board"
+          aria-expanded={menu === "legend"}
+          style={{ ...clusterBtn, padding: "4px 9px", fontSize: 11.5, color: C.dim }}
+        >
+          <span style={{ display: "inline-flex", gap: 2 }}>
+            {STATE_ORDER.map((s) => (
+              <span key={s} style={{ width: 6, height: 10, borderRadius: 1, background: STATE_STYLE[s].fg }} />
+            ))}
+          </span>
+          Legend
+        </button>
+        {menu === "legend" && (
+          <div style={{ ...menuPanel, width: 420, right: "auto", left: 0 }}>
+            <LegendGroup title="Authorization state — the engine's verdict on a space">
+              {STATE_ORDER.map((s) => (
+                <LegendRow key={s} swatch={STATE_STYLE[s].fg} label={STATE_STYLE[s].label} code={s} gloss={STATE_STYLE[s].gloss} />
+              ))}
+            </LegendGroup>
+            <LegendGroup title="Readiness — whether anyone is actually held up">
+              {(["held", "go", "idle", "latent"] as const).map((k) => (
+                <LegendRow key={k} swatch={READINESS_STYLE[k].fg} label={READINESS_STYLE[k].label} gloss={READINESS_STYLE[k].gloss} />
+              ))}
+            </LegendGroup>
+            <LegendGroup title="On the plate — what the day needs">
+              {(["go", "wait", "stop", "none"] as const).map((k) => (
+                <LegendRow key={k} swatch={OVERLAY_STYLE[k].fg} label={OVERLAY_STYLE[k].label} gloss={OVERLAY_STYLE[k].gloss} />
+              ))}
+            </LegendGroup>
+            <LegendGroup title="Schedule status — from the schedule of record">
+              <LegendRow swatch={ACTIVITY_STATUS.not_started.fg} label="NOT STARTED" gloss="planned, no progress recorded" />
+              <LegendRow swatch={ACTIVITY_STATUS.in_progress.fg} label="IN PROGRESS" gloss="started per the last import" />
+              <LegendRow swatch={ACTIVITY_STATUS.complete.fg} label="COMPLETE" gloss="finished per the last import" />
+              <LegendRow swatch={C.warn} label="NOT EXECUTABLE" gloss="the space refuses this work somewhere in its planned window" />
+            </LegendGroup>
+            <LegendGroup title="Where a location came from">
+              <LegendRow swatch={C.bright} label="3-148-2-E" gloss="authored — the schedule's own compartment field" />
+              <LegendRow swatch={C.warn} label="≈ 3-185-0-L" gloss="derived — a placard read out of the task's name; graded, never silent" />
+              <LegendRow swatch={C.warn} label="not located" gloss="the schedule did not say; counted, never drawn" />
+              <LegendRow swatch={C.danger} label="unknown space" gloss="located to a placard this hull's register does not carry" />
+            </LegendGroup>
+          </div>
+        )}
+      </div>
+
       {/* context selector — which hull, and what else is in the portfolio */}
       <div style={{ position: "relative", marginLeft: "auto" }}>
         <button
@@ -486,7 +578,7 @@ export function TopBar({
           </span>
           <span style={{ textAlign: "left" }}>
             <span style={{ display: "block", fontSize: 8.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM }}>
-              Persona
+              Role
             </span>
             <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
               {persona.name}
@@ -531,7 +623,7 @@ export function TopBar({
                 <div style={{ fontSize: 11, color: DIM }}>identity unavailable — /api/whoami did not answer</div>
               )}
             </div>
-            <div style={menuHead}>Switch persona — sets the landing altitude</div>
+            <div style={menuHead}>Switch role — sets where your day opens</div>
             {PERSONAS.map((p) => (
               <button
                 key={p.name}
@@ -554,7 +646,7 @@ export function TopBar({
                 <span>
                   <span style={{ display: "block", fontSize: 12, fontWeight: 600 }}>{p.name}</span>
                   <span style={{ display: "block", fontSize: 10.5, color: DIM }}>
-                    {p.focus} · opens at {p.altitude}
+                    {p.focus} · opens {p.opens}
                   </span>
                 </span>
               </button>
@@ -584,7 +676,16 @@ export function TopBar({
                 The hull in focus is not assigned to you — the API refuses its data.
               </div>
             )}
-            {issues.length === 0 && !outOfScope && (
+            {verdictsOk === false && !outOfScope && (
+              <p style={{ fontSize: 11.5, color: C.warn, padding: "9px 12px", margin: 0 }}>
+                The engine did not answer for this instant. An empty list here is
+                missing information, not clearance.
+              </p>
+            )}
+            {verdictsOk === null && !outOfScope && issues.length === 0 && (
+              <p style={{ fontSize: 11.5, color: DIM, padding: "9px 12px", margin: 0 }}>Reading the board…</p>
+            )}
+            {verdictsOk === true && issues.length === 0 && !outOfScope && (
               <p style={{ fontSize: 11.5, color: DIM, padding: "9px 12px", margin: 0 }}>
                 No issues at this instant. That is a positive statement from the
                 engine and the register, not an absence of information.
@@ -671,29 +772,96 @@ const clusterBtn: React.CSSProperties = {
   font: "inherit",
 };
 
-/* --------------------------------------------------------- guardrail strip */
+/* -------------------------------------------------------------- legend rows */
 
-export function GuardrailStrip() {
+function LegendGroup({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", gap: 12, alignItems: "center", padding: "6px 16px", background: C.panel, borderBottom: `1px solid ${LINE}`, fontSize: 11.5, flexWrap: "wrap" }}>
-      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+    <div style={{ borderBottom: `1px solid ${LINE}`, padding: "7px 12px 8px" }}>
+      <div style={{ fontSize: 9.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM, marginBottom: 5 }}>{title}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>{children}</div>
+    </div>
+  );
+}
+
+function LegendRow({ swatch, label, code, gloss }: { swatch: string; label: string; code?: string; gloss: string }) {
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 11.5 }}>
+      <span style={{ width: 9, height: 9, borderRadius: 2, background: swatch, flex: "none", alignSelf: "center" }} />
+      <span style={{ fontWeight: 700, color: swatch, fontSize: 10.5, letterSpacing: 0.4, flex: "0 0 150px", lineHeight: 1.3 }}>
+        {label}
+        {code && <span style={{ fontFamily: "monospace", fontWeight: 400, color: DIM, marginLeft: 5, letterSpacing: 0 }}>{code}</span>}
+      </span>
+      <span style={{ color: C.bright }}>{gloss}</span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- status strip */
+
+/**
+ * One line of numbers, the same on every screen.
+ *
+ * Four boards used to lead with four different counts of trouble — spaces,
+ * activities, issues, crews — each right at its own grain and none saying
+ * which. This strip is the hull's headline everywhere: what is held now, what
+ * cannot run as planned, what is open for a decision. Every figure names its
+ * grain in its label, and every figure comes from the same two reads the alert
+ * bell uses, so the strip and the bell cannot disagree. It also carries the
+ * guardrail — decision support, not authorization — and the data marking,
+ * which used to be a band of their own.
+ */
+export function StatusStrip({
+  rows,
+  issues,
+  verdictsOk,
+}: {
+  rows: DeckStateRow[];
+  issues: Issue[];
+  verdictsOk: boolean | null;
+}) {
+  const held = rows.filter((r) => r.readiness === "held");
+  const heldHours = held.reduce((n, r) => n + r.remaining_hours, 0);
+  const notExecutable = issues.filter((i) => i.kind === "not_executable_as_planned").length;
+  const atRisk = issues.reduce((n, i) => n + i.hours_at_risk, 0);
+  const fig = (value: string, label: string, title: string, tone?: string) => (
+    <span title={title} style={{ display: "flex", gap: 5, alignItems: "baseline", whiteSpace: "nowrap" }}>
+      <b style={{ fontVariantNumeric: "tabular-nums", color: tone ?? C.bright, fontSize: 12.5 }}>{value}</b>
+      <span style={{ color: DIM, fontSize: 10.5 }}>{label}</span>
+    </span>
+  );
+  return (
+    <div style={{ display: "flex", gap: 14, alignItems: "center", padding: "5px 16px", background: C.panel, borderBottom: `1px solid ${LINE}`, fontSize: 11.5, flexWrap: "wrap" }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 6 }} title="Flags risk; the planner decides. Nothing here modifies the schedule of record or grants an authorization.">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth={1.8}>
           <path d="M12 3l8 4v5c0 5-4 8-8 9-4-1-8-4-8-9V7z" strokeLinejoin="round" />
           <path d="M9 12l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <span>
-          <b>Decision support</b> — flags risk; the planner decides. Does not modify the schedule.
-        </span>
+        <b>Decision support</b>
       </span>
       <span style={{ color: "#424656" }}>·</span>
-      <span style={{ letterSpacing: 0.5 }}>ILLUSTRATIVE / NOTIONAL DATA</span>
-      <span style={{ color: "#424656" }}>·</span>
-      <span style={{ display: "flex", alignItems: "center", gap: 5, color: C.accent, fontWeight: 600 }}>
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9}>
-          <rect x="5" y="11" width="14" height="9" rx="1.5" />
-          <path d="M8 11V8a4 4 0 018 0v3" />
-        </svg>
-        IL5 / sovereign
+      {verdictsOk === false ? (
+        <span style={{ color: C.warn, fontWeight: 600 }}>
+          Verdicts unavailable — the engine did not answer for this instant. Do not read any board as clearance.
+        </span>
+      ) : (
+        <>
+          {fig(String(held.length), "spaces held now", "Compartments with work booked that the engine refuses at this instant — the readiness rollup's HELD count.", held.length > 0 ? C.danger : undefined)}
+          {fig(mh(Math.round(heldHours)), "standing by", "Remaining man-hours booked into those held spaces.", heldHours > 0 ? C.danger : undefined)}
+          {fig(String(notExecutable), "activities not executable as planned", "Register rows whose space refuses them somewhere inside their planned window — a property of the plan, indifferent to the clock.", notExecutable > 0 ? C.warn : undefined)}
+          {fig(String(issues.length), "open issues", "Everything on the Conflicts & Risk board at this instant — holds, broken plans, strandings, overlaps — the alert bell's number.")}
+          {fig(mh(Math.round(atRisk)), "at risk", "Man-hours at risk across every open issue; the same hours can appear under more than one issue kind.")}
+        </>
+      )}
+      <span style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+        <span style={{ letterSpacing: 0.5, color: DIM }}>ILLUSTRATIVE / NOTIONAL DATA</span>
+        <span style={{ color: "#424656" }}>·</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 5, color: C.accent, fontWeight: 600 }}>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9}>
+            <rect x="5" y="11" width="14" height="9" rx="1.5" />
+            <path d="M8 11V8a4 4 0 018 0v3" />
+          </svg>
+          IL5 / sovereign
+        </span>
       </span>
     </div>
   );

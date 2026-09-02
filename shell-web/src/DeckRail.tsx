@@ -11,6 +11,7 @@
 // number that justifies its position. A rail of bare labels would make the user
 // click through decks to find out where the problem is.
 
+import { useState } from "react";
 import { worstOf, type Deck, type DeckStateRow, type Rollup } from "./api";
 import { C, mh, READINESS_STYLE } from "./theme";
 
@@ -122,6 +123,7 @@ export function SelectorRail({
   load?: Map<string, { hours: number; count: number; refused: number }>;
   horizonLabel?: string;
 }) {
+  const [showEmpty, setShowEmpty] = useState(false);
   const shell: React.CSSProperties = {
     flex: `0 0 ${RAIL_W}px`,
     width: RAIL_W,
@@ -133,10 +135,30 @@ export function SelectorRail({
   };
 
   if (altitude === "compartment") {
+    // Decks the register says nothing about are folded under one row. On a
+    // small register they outnumber the decks with data, and eleven rows of
+    // "plate only" was the first thing a new reader saw. The row says how many
+    // and why, and opens to the plates on request — nothing is hidden, it is
+    // summarised. A selected deck is always shown, folded or not.
+    const withData = decks.filter((d) => d.compartment_count > 0);
+    const plateOnly = decks.filter((d) => d.compartment_count === 0);
+    const selectedIsFolded = plateOnly.some((d) => d.code === selectedDeck);
+    const shownDecks = showEmpty || selectedIsFolded || withData.length === 0 ? decks : withData;
     return (
       <div style={shell}>
         <Head>Decks · top → btm</Head>
-        {decks.map((d) => {
+        {plateOnly.length > 0 && withData.length > 0 && !selectedIsFolded && (
+          <Row
+            selected={false}
+            onClick={() => setShowEmpty(!showEmpty)}
+            title="Decks whose drawing is on file but whose compartments are not in this hull's register yet — the plate opens, nothing is pinned on it"
+          >
+            <div style={{ fontSize: 11, color: DIM }}>
+              {showEmpty ? "▾" : "▸"} {plateOnly.length} deck{plateOnly.length === 1 ? "" : "s"} without register data · plates only
+            </div>
+          </Row>
+        )}
+        {shownDecks.map((d) => {
           const onThis = rows.filter((r) => r.compartment.deck_code === d.code);
           const held = onThis.filter((r) => r.readiness === "held").length;
           const restricted = onThis.filter((r) => r.state !== "ALLOW").length;

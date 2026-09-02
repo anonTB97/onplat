@@ -553,6 +553,60 @@ async fn packages_with_footprints(
     Ok(out)
 }
 
+/// Where a hull's booked hours come from, said on the response so a planner
+/// can tell a demo register from their own schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HoursSource {
+    /// The ingested schedule of record: every located, unfinished activity
+    /// is booked work in its space over its planned window.
+    ScheduleOfRecord,
+    /// The seeded work orders — the demo world, before any import.
+    SeededWorkOrders,
+}
+
+/// The work booked on the hull, as rows the readiness rollup can price.
+///
+/// Once a schedule of record is ingested, the schedule IS the work: each
+/// located activity with hours left becomes one booked row in its space over
+/// its planned window, so the deck and readiness tiles show the yard's own
+/// hours rather than the six seeded orders the demo shipped with. Without an
+/// ingest the seeded orders stand in, and the response says which.
+async fn booked_orders(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+) -> Result<(Vec<wadl_store::model::WorkOrderSummary>, HoursSource), ApiError> {
+    if state.store.schedule_source(scope, vessel).await?.is_none() {
+        return Ok((
+            state.store.list_work_orders(scope, vessel).await?,
+            HoursSource::SeededWorkOrders,
+        ));
+    }
+    let activities = state.store.list_activities(scope, vessel).await?;
+    let rows = activities
+        .into_iter()
+        .filter(|a| !a.is_milestone && a.status != wadl_store::model::ActivityStatus::Complete)
+        .filter_map(|a| {
+            let compartment_no = a.compartment_no?;
+            Some(wadl_store::model::WorkOrderSummary {
+                work_order_id: wadl_domain::ids::WorkOrderId::from_uuid(a.activity_id.as_uuid()),
+                code: a.work_order_code.unwrap_or_else(|| a.code.clone()),
+                title: a.name,
+                trade: a.trade,
+                system: String::new(),
+                compartment_no,
+                budget_hours: a.budget_hours,
+                earned_hours: a.earned_hours,
+                source_ref: a.source_ref,
+                source_verified: true,
+                planned: a.planned,
+            })
+        })
+        .collect();
+    Ok((rows, HoursSource::ScheduleOfRecord))
+}
+
 fn booked_work(
     compartment: &CompartmentNo,
     orders: &[wadl_store::model::WorkOrderSummary],
@@ -629,7 +683,9 @@ pub(crate) async fn deck_states(
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
     let hazards = state.store.live_hazards(&scope, vessel, at).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let orders = state.store.list_work_orders(&scope, vessel).await?;
+    // The deck board is an array of rows; the hours source rides on the
+    // readiness rollup, which is the object the tiles read.
+    let (orders, _hours_source) = booked_orders(&state, &scope, vessel).await?;
     let packages = packages_with_footprints(&state, &scope, vessel).await?;
     let stranded = state.store.stranded_hours(&scope, vessel).await?;
 
@@ -703,7 +759,7 @@ pub(crate) async fn readiness(
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
     let hazards = state.store.live_hazards(&scope, vessel, at).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let orders = state.store.list_work_orders(&scope, vessel).await?;
+    let (orders, hours_source) = booked_orders(&state, &scope, vessel).await?;
     // Distributed packages book their hours per *segment*, so a compartment in a
     // package footprint has no work order of its own. Without this the rollup
     // reports zero hours held in exactly the spaces the cascade suspends — the
@@ -769,7 +825,14 @@ pub(crate) async fn readiness(
         })
         .collect();
 
-    Ok(Json(json!(roll_up(&spaces, unattributed))))
+    // The rollup, with where its hours came from stamped on it — a planner
+    // reading "564 MH held" is entitled to know whether that is their
+    // schedule or the demo's six work orders.
+    let mut body = json!(roll_up(&spaces, unattributed));
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("hours_source".to_owned(), json!(hours_source));
+    }
+    Ok(Json(body))
 }
 
 /// Assembles the world mitigation options are computed against.
@@ -830,7 +893,7 @@ async fn mitigation_inputs(
         hazards: state.store.live_hazards(scope, vessel, at).await?,
         rules: state.store.rules_in_force(scope, vessel).await?,
         compartments: state.store.list_compartments(scope, vessel).await?,
-        orders: state.store.list_work_orders(scope, vessel).await?,
+        orders: booked_orders(state, scope, vessel).await?.0,
         packages: packages_with_footprints(state, scope, vessel).await?,
         stranded: state.store.stranded_hours(scope, vessel).await?,
     })
@@ -1349,6 +1412,113 @@ pub(crate) async fn list_hazards(
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let hazards = state.store.live_hazards(&scope, vessel, at).await?;
     Ok(Json(json!({ "hazards": hazards, "as_of": at })))
+}
+
+/// A field condition, as raised: where, what kind, what it is called, and
+/// since when.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct RaiseHazardBody {
+    /// The origin space — must be on the hull's register.
+    compartment: String,
+    /// The hazard kind, in the engine's serde names (`hot_work_live`, …).
+    kind: wadl_engine::HazardKind,
+    /// The fact as the deck says it — the ticket, the bus, the permit:
+    /// "CT-3160-4 · final coat, curing". Required: a hazard with no label is
+    /// a colour with no reason.
+    label: String,
+    /// When it was raised, epoch ms; defaults to the wall clock. Never in
+    /// the future — a condition is raised when it is a fact, not before.
+    #[serde(default)]
+    since_ms: Option<i64>,
+}
+
+/// Raises a field condition: the day's tag-out, the coating ticket, the hot
+/// work permit, the stop-work — the facts the engine evaluates against, which
+/// until this route could enter the product only as seed data. Validated
+/// against the register (a hazard in a space the hull does not know is a typo,
+/// not a fact) and against what is already live (one fact, once). Lands in
+/// the ledger as `HAZARD_RAISED` before the response returns; every verdict
+/// the hazard drives re-derives on the next read.
+pub(crate) async fn raise_hazard(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<RaiseHazardBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    // Scope first, body second (see `record_decision`).
+    state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let label = body.label.trim();
+    if label.is_empty() {
+        return Err(ApiError::OutOfRange(
+            "a field condition needs its label — the ticket, the bus, the permit — \
+             so the trace can say what is holding the space, not just that something is."
+                .to_owned(),
+        ));
+    }
+    let compartment = body.compartment.trim();
+    let register = state.store.list_compartments(&scope, vessel).await?;
+    if !register
+        .iter()
+        .any(|c| c.compartment_no.as_str() == compartment)
+    {
+        return Err(ApiError::OutOfRange(format!(
+            "{compartment} is not on this hull's register — a field condition is raised \
+             against a space the hull knows, or it is a typo the engine would never evaluate"
+        )));
+    }
+    let now_ms = state.clock.now().epoch_millis();
+    let since_ms = body.since_ms.unwrap_or(now_ms);
+    if since_ms > now_ms {
+        return Err(ApiError::OutOfRange(
+            "a field condition is raised when it is a fact, not before — since_ms is in the future"
+                .to_owned(),
+        ));
+    }
+    let live = state
+        .store
+        .live_hazards(&scope, vessel, state.clock.now())
+        .await?;
+    if live
+        .iter()
+        .any(|h| h.origin.as_str() == compartment && h.kind == body.kind)
+    {
+        return Err(ApiError::OutOfRange(format!(
+            "a {} hazard is already live in {compartment} — one fact, once; clear it \
+             before raising it again",
+            json!(body.kind).as_str().unwrap_or("?"),
+        )));
+    }
+
+    let hazard = state
+        .store
+        .raise_hazard(&scope, vessel, compartment, body.kind, since_ms, label)
+        .await?;
+    let detail = json!({
+        "compartment": compartment,
+        "kind": body.kind,
+        "label": label,
+        "since_ms": since_ms,
+        "raised_by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "HAZARD_RAISED",
+            &detail,
+            Some(compartment),
+            now_ms,
+        )
+        .await?;
+    Ok(Json(json!({ "hazard": hazard, "recorded": record })))
 }
 
 /// An administrative clearance, as posted: which recorded fact is verified

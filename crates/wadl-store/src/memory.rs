@@ -321,6 +321,19 @@ pub struct InMemoryStore {
     /// is the same shape the PostgreSQL store gives it (`cleared_at` set,
     /// nothing deleted). A `Vec` because the whole hull carries a handful.
     cleared_hazards: std::sync::Mutex<Vec<HazardClearance>>,
+    /// Field conditions raised through the API after boot, alongside the
+    /// seeded rows: the same fact shape, owned strings, and the same
+    /// clearance list applies to them.
+    raised_hazards: std::sync::Mutex<Vec<RaisedHazard>>,
+}
+
+/// A hazard raised at run time (see [`InMemoryStore::raised_hazards`]).
+struct RaisedHazard {
+    vessel: VesselId,
+    origin: String,
+    kind: HazardKind,
+    since_ms: i64,
+    label: String,
 }
 
 /// One recorded administrative clearance (see [`InMemoryStore::cleared_hazards`]).
@@ -504,8 +517,41 @@ impl InMemoryStore {
             manning_book: std::sync::RwLock::new(BTreeMap::new()),
             geometry: std::sync::RwLock::new(BTreeMap::new()),
             cleared_hazards: std::sync::Mutex::new(Vec::new()),
+            raised_hazards: std::sync::Mutex::new(Vec::new()),
         };
         (store, world)
+    }
+
+    /// Every hazard recorded on the hull — seeded and raised — before any
+    /// clearance is applied. The one place both sources are joined, so the
+    /// live read and the clearance cannot disagree about what exists.
+    fn all_hazards(&self, vessel: VesselId) -> Result<Vec<Hazard>, StoreError> {
+        let raised = self
+            .raised_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("raised-hazard lock poisoned".into()))?;
+        Ok(self
+            .hazards
+            .iter()
+            .filter(|h| h.vessel == vessel)
+            .map(|h| Hazard {
+                origin: CompartmentNo::new(h.origin),
+                kind: h.kind,
+                since: self.at_minutes(h.since_min),
+                label: h.label.to_owned(),
+            })
+            .chain(
+                raised
+                    .iter()
+                    .filter(|h| h.vessel == vessel)
+                    .map(|h| Hazard {
+                        origin: CompartmentNo::new(h.origin.as_str()),
+                        kind: h.kind,
+                        since: Timestamp::from_epoch_millis(h.since_ms),
+                        label: h.label.clone(),
+                    }),
+            )
+            .collect())
     }
 
     /// An instant `minutes` either side of the anchor.
@@ -2086,24 +2132,46 @@ impl Repositories for InMemoryStore {
             .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
         let at_ms = at.epoch_millis();
         Ok(self
-            .hazards
-            .iter()
-            .filter(|h| h.vessel == vessel)
+            .all_hazards(vessel)?
+            .into_iter()
             .filter(|h| {
                 !cleared.iter().any(|c| {
-                    c.vessel == h.vessel
-                        && c.origin == h.origin
+                    c.vessel == vessel
+                        && c.origin == h.origin.as_str()
                         && c.kind == h.kind
                         && c.cleared_at_ms <= at_ms
                 })
             })
-            .map(|h| Hazard {
-                origin: CompartmentNo::new(h.origin),
-                kind: h.kind,
-                since: self.at_minutes(h.since_min),
-                label: h.label.to_owned(),
-            })
             .collect())
+    }
+
+    async fn raise_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: HazardKind,
+        since_ms: i64,
+        label: &str,
+    ) -> Result<Hazard, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let mut raised = self
+            .raised_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("raised-hazard lock poisoned".into()))?;
+        raised.push(RaisedHazard {
+            vessel,
+            origin: compartment.to_owned(),
+            kind,
+            since_ms,
+            label: label.to_owned(),
+        });
+        Ok(Hazard {
+            origin: CompartmentNo::new(compartment),
+            kind,
+            since: Timestamp::from_epoch_millis(since_ms),
+            label: label.to_owned(),
+        })
     }
 
     async fn clear_hazard(
@@ -2124,19 +2192,13 @@ impl Repositories for InMemoryStore {
             .lock()
             .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
         let closing: Vec<Hazard> = self
-            .hazards
-            .iter()
-            .filter(|h| h.vessel == vessel && h.origin == compartment && h.kind == kind)
+            .all_hazards(vessel)?
+            .into_iter()
+            .filter(|h| h.origin.as_str() == compartment && h.kind == kind)
             .filter(|h| {
-                !cleared
-                    .iter()
-                    .any(|c| c.vessel == h.vessel && c.origin == h.origin && c.kind == h.kind)
-            })
-            .map(|h| Hazard {
-                origin: CompartmentNo::new(h.origin),
-                kind: h.kind,
-                since: self.at_minutes(h.since_min),
-                label: h.label.to_owned(),
+                !cleared.iter().any(|c| {
+                    c.vessel == vessel && c.origin == h.origin.as_str() && c.kind == h.kind
+                })
             })
             .collect();
         if !closing.is_empty() {

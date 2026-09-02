@@ -307,6 +307,24 @@ pub trait Repositories: Send + Sync {
         at: wadl_domain::time::Timestamp,
     ) -> Result<Vec<Hazard>, StoreError>;
 
+    /// Records a field condition raised on the hull — a coating ticket
+    /// opened, a bus energised, hot work started, a stop-work posted — from
+    /// `since_ms`, and returns it as the engine will see it. The caller has
+    /// already checked the space is on the register and that no live hazard
+    /// of the same kind already originates there; the store only records.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn raise_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: wadl_engine::HazardKind,
+        since_ms: i64,
+        label: &str,
+    ) -> Result<Hazard, StoreError>;
+
     /// Administratively clears the live hazards of `kind` originating in
     /// `compartment` — the recorded fact verified ended by its clearing
     /// authority ("tags hung, zero energy confirmed"), as distinct from a

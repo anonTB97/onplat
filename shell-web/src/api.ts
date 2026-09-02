@@ -434,6 +434,40 @@ export interface LiveHazard {
   label: string;
 }
 
+/**
+ * Raises a field condition on the hull — the day's tag-out, coating ticket,
+ * hot-work permit or stop-work — against a space the register knows. The
+ * server refuses a space it does not know, an empty label, a future instant,
+ * and a second live fact of the same kind in the same space; lands
+ * `HAZARD_RAISED` in the ledger; and every verdict re-derives on the next
+ * read. The caller refetches, never repaints.
+ */
+export async function raiseHazard(
+  id: Identity,
+  vesselId: string,
+  body: { compartment: string; kind: string; label: string; since_ms?: number },
+): Promise<{ hazard: LiveHazard; recorded: unknown }> {
+  const res = await fetch(`/api/vessels/${vesselId}/hazards`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const problem = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(problem?.detail ?? `raise hazard → ${res.status}`);
+  }
+  return (await res.json()) as { hazard: LiveHazard; recorded: unknown };
+}
+
+/** The hazard kinds the engine evaluates, in yard words, for a raise form. */
+export const HAZARD_KINDS: { kind: string; label: string; gloss: string }[] = [
+  { kind: "hot_work_live", label: "Hot work live", gloss: "a welding, cutting or grinding permit is open here" },
+  { kind: "coating_open", label: "Coating open", gloss: "a coating or preservation ticket is curing here" },
+  { kind: "energised_bus", label: "Energised bus", gloss: "a bus is live with no verified zero-energy state" },
+  { kind: "flammable_stow", label: "Flammable stow", gloss: "flammables are stowed or open here" },
+  { kind: "stop_work", label: "Stop-work", gloss: "an inspection authority has posted a stop-work" },
+];
+
 // The raw live hazards on a hull. Served separately from the traces so the
 // surface can show WHAT is shut (the fact) alongside WHY (its consequences).
 export async function listHazards(

@@ -1225,6 +1225,42 @@ impl Repositories for PgStore {
             .collect()
     }
 
+    async fn raise_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: HazardKind,
+        since_ms: i64,
+        label: &str,
+    ) -> Result<Hazard, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let raised_at = chrono::DateTime::from_timestamp_millis(since_ms)
+            .ok_or_else(|| StoreError::Backend("raised_at out of range".to_owned()))?;
+        // The row's org is the caller's: RLS scopes the read back through the
+        // vessel, and the vessel is already known to be the caller's.
+        sqlx::query(
+            "INSERT INTO hazard (org_id, vessel_id, compartment_no, kind, raised_at, label)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(scope.org.as_uuid())
+        .bind(vessel.as_uuid())
+        .bind(compartment)
+        .bind(kind_name(kind))
+        .bind(raised_at)
+        .bind(label)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Hazard {
+            origin: CompartmentNo::new(compartment),
+            kind,
+            since: Timestamp::from_epoch_millis(since_ms),
+            label: label.to_owned(),
+        })
+    }
+
     async fn rules_in_force(
         &self,
         scope: &TenantScope,

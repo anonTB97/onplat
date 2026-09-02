@@ -55,6 +55,10 @@ impl AppState {
 }
 
 /// Builds the router. The registered routes match [`routes::inventory`].
+// A route table, one line per route: its length is the API's size, and
+// splitting it would hide the inventory the leak tests and the SSP are
+// generated from.
+#[allow(clippy::too_many_lines)]
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
@@ -104,7 +108,10 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::acknowledge_issue),
         )
         .route("/api/vessels/:id/ledger", get(handlers::ledger))
-        .route("/api/vessels/:id/hazards", get(handlers::list_hazards))
+        .route(
+            "/api/vessels/:id/hazards",
+            get(handlers::list_hazards).post(handlers::raise_hazard),
+        )
         .route(
             "/api/vessels/:id/hazards/clear",
             post(handlers::clear_hazard),

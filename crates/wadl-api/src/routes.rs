@@ -70,6 +70,12 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
     ("GET", "/api/vessels/:id/hazards", true, None),
     (
         "POST",
+        "/api/vessels/:id/hazards",
+        true,
+        Some(r#"{"compartment":"3-148-2-E","kind":"hot_work_live","label":"leak test"}"#),
+    ),
+    (
+        "POST",
         "/api/vessels/:id/hazards/clear",
         true,
         Some(r#"{"compartment":"3-148-2-E","kind":"energised_bus","basis":"leak test"}"#),

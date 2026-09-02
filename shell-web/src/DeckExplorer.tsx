@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { clampZoom, planZoomAt, sheetZoomAt, wheelFactor } from "./camera";
 import {
   clearHazard,
+  HAZARD_KINDS,
+  raiseHazard,
   compartmentState,
   deckStates,
   getZoneChart,
@@ -1482,6 +1484,121 @@ function ManningPanel({
  * conditions (hot work in progress) end themselves; this door is for the ones
  * that end on a person's verification.
  */
+/**
+ * Raising a field condition in the selected space — the other half of the
+ * clear loop. The day's tag-out or permit is posted here, against this
+ * space, with the kind and the label the deck would use; the server validates
+ * it against the register and what is already live, writes the ledger entry,
+ * and the whole screen refetches so every space the new fact holds re-derives.
+ */
+function RaiseControl({
+  identity, vesselId, compartment, onRaised,
+}: {
+  identity: Identity;
+  vesselId: string;
+  compartment: string;
+  onRaised: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState<string>(HAZARD_KINDS[0]?.kind ?? "hot_work_live");
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const chosen = HAZARD_KINDS.find((k) => k.kind === kind);
+
+  const submit = () => {
+    if (busy || label.trim().length === 0) return;
+    setBusy(true);
+    setError(null);
+    raiseHazard(identity, vesselId, { compartment, kind, label: label.trim() })
+      .then(() => {
+        setOpen(false);
+        setLabel("");
+        setBusy(false);
+        onRaised();
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+      });
+  };
+
+  const field: React.CSSProperties = {
+    font: "inherit", fontSize: 12, padding: "5px 8px", background: "#0d0e11", color: C.bright,
+    border: `1px solid ${LINE}`, borderRadius: 5, boxSizing: "border-box",
+  };
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
+      {!open && (
+        <button
+          onClick={() => setOpen(true)}
+          style={{
+            font: "inherit", fontSize: 11.5, cursor: "pointer",
+            background: "transparent", color: C.accent, border: `1px solid ${LINE}`,
+            borderRadius: 5, padding: "3px 9px",
+          }}
+          title="Post a field condition — a tag-out, a coating ticket, a hot-work permit, a stop-work — against this space"
+        >
+          Raise a field condition here…
+        </button>
+      )}
+      {open && (
+        <div>
+          <div style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>
+            Raise a field condition in <span style={{ fontFamily: "monospace", textTransform: "none" }}>{compartment}</span>
+          </div>
+          <div style={{ fontSize: 11, color: DIM, lineHeight: 1.45, marginTop: 3 }}>
+            A fact on the deck, as of now. It writes a ledger entry and every space this
+            condition reaches re-derives immediately. Clear it from the same panel when it ends.
+          </div>
+          <select value={kind} onChange={(e) => setKind(e.target.value)} style={{ ...field, marginTop: 6, width: "100%" }}>
+            {HAZARD_KINDS.map((k) => (
+              <option key={k.kind} value={k.kind}>{k.label} — {k.gloss}</option>
+            ))}
+          </select>
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            placeholder={chosen?.kind === "hot_work_live" ? "Label — e.g. HW-0912 · welding permit, deck plate" : "Label — the ticket, the bus, the permit, as the deck says it"}
+            autoFocus
+            style={{ ...field, marginTop: 6, width: "100%" }}
+          />
+          <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={submit}
+              disabled={busy || label.trim().length === 0}
+              style={{
+                font: "inherit", fontSize: 11.5, fontWeight: 700,
+                cursor: busy || label.trim().length === 0 ? "default" : "pointer",
+                background: label.trim().length === 0 ? "transparent" : "rgba(220,38,38,0.14)",
+                color: label.trim().length === 0 ? DIM : C.dangerSoft,
+                border: `1px solid ${label.trim().length === 0 ? LINE : "rgba(220,38,38,0.55)"}`,
+                borderRadius: 5, padding: "3px 10px",
+              }}
+            >
+              {busy ? "Recording…" : "Raise — write the ledger entry"}
+            </button>
+            <button
+              onClick={() => {
+                setOpen(false);
+                setError(null);
+              }}
+              style={{ font: "inherit", fontSize: 11.5, cursor: "pointer", background: "transparent", color: DIM, border: "none" }}
+            >
+              Cancel
+            </button>
+            {error && <span style={{ fontSize: 11, color: C.danger }}>{error}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ClearControl({
   identity, vesselId, hazard, onCleared,
 }: {
@@ -1757,6 +1874,13 @@ function TracePanel({
                     </div>
                   );
                 })()}
+
+                <RaiseControl
+                  identity={identity}
+                  vesselId={vesselId}
+                  compartment={row.compartment.compartment_no}
+                  onRaised={onCleared}
+                />
 
                 {/* Directly under the trace, because the two answer consecutive
                     questions: the trace says why the space is shut, and this says

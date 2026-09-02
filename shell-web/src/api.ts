@@ -1265,3 +1265,199 @@ export async function revertGeometry(id: Identity, vesselId: string): Promise<vo
   });
   if (!res.ok) throw new Error(`geometry revert → ${res.status}`);
 }
+
+/* ------------------------------------------ the ship, through the product */
+
+/** A door's refusal as the sentence the server wrote, not the JSON it came in. */
+async function doorRefusal(res: Response, door: string): Promise<Error> {
+  const problem = (await res.json().catch(() => null)) as { detail?: string } | null;
+  return new Error(problem?.detail ?? `${door} → ${res.status}`);
+}
+
+/** One deck of a compartment register, ordered downward by `ordinal`. */
+export interface RegisterDeck {
+  code: string;
+  label: string;
+  ordinal: number;
+}
+
+/** One space of a compartment register — the hull's own placard list. */
+export interface RegisterSpace {
+  compartment_no: string;
+  name: string;
+  deck_code: string;
+  zone: string;
+  category: string;
+  /** Frame station when the register carries it; else parsed from the placard. */
+  frame?: number;
+  /** `port`, `starboard` or `centreline` when the register carries it. */
+  side?: string;
+}
+
+/** What a candidate register would change, computed before Confirm. */
+export interface RegisterFindings {
+  /** Placards the numbering scheme cannot place and that carry no frame. */
+  unplaceable: string[];
+  /** Decks with no space on them. */
+  empty_decks: string[];
+  /** Live field conditions whose space the new register does not carry. */
+  orphaned_hazards: { compartment: string; label: string }[];
+  /** Scheduled activities located to spaces the new register does not carry. */
+  activities_losing_their_space: number;
+}
+
+/** The compartment register as served: ingested, or the seeded template. */
+export interface RegisterInfo {
+  register: { label: string; decks: number; spaces: number } | null;
+  served: "ingested" | "seeded";
+  spaces_served: number;
+  decks_served: number;
+}
+
+// The hull's compartment register — what every read is built from.
+export async function getRegister(id: Identity, vesselId: string): Promise<RegisterInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/register`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`register → ${res.status}`);
+  return (await res.json()) as RegisterInfo;
+}
+
+/**
+ * Ingests the hull's compartment register, all-or-nothing. `dryRun` previews
+ * the findings and stores nothing. Once stored, every screen serves it and
+ * the seeded register stops existing for this hull until a revert.
+ */
+export async function importRegister(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  decks: RegisterDeck[],
+  spaces: RegisterSpace[],
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; decks: number; spaces: number; findings: RegisterFindings }> {
+  const res = await fetch(`/api/vessels/${vesselId}/register${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, decks, spaces }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "register");
+  return (await res.json()) as never;
+}
+
+export async function revertRegister(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/register/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`register revert → ${res.status}`);
+}
+
+/** One coupling: a physical path a hazard can travel between two spaces. */
+export interface CouplingRow {
+  from: string;
+  to: string;
+  /** The coupling type's code — what the rules bind to. */
+  code: string;
+  /** Store the reverse path too. */
+  symmetric?: boolean;
+  /** `authored` by a person, or `derived` by the door from deck order and frames. */
+  provenance?: "authored" | "derived";
+}
+
+/** A coupling type the hull's rules can bind to. */
+export interface CouplingType {
+  code: string;
+  propagates: string[];
+  max_reach: number;
+}
+
+/** The coupling register as served, and the graph the traces actually walk. */
+export interface CouplingsInfo {
+  register: { label: string; edges: number; authored: number; derived: number } | null;
+  served: "ingested" | "seeded";
+  edges_served: number;
+  types: CouplingType[];
+}
+
+// The hull's coupling register with the graph edge count the traces walk.
+export async function getCouplings(id: Identity, vesselId: string): Promise<CouplingsInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/couplings`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`couplings → ${res.status}`);
+  return (await res.json()) as CouplingsInfo;
+}
+
+/**
+ * Ingests the hull's coupling register, all-or-nothing. `deriveVertical` asks
+ * the door to propose deck penetrations from deck order and frame overlap,
+ * each marked `derived`; `dryRun` previews every proposed edge and stores
+ * nothing.
+ */
+export async function importCouplings(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  edges: CouplingRow[],
+  deriveVertical: boolean,
+  dryRun: boolean,
+): Promise<{
+  stored: boolean;
+  label: string;
+  authored: number;
+  derived: number;
+  derived_edges: CouplingRow[];
+  edges: number;
+}> {
+  const res = await fetch(`/api/vessels/${vesselId}/couplings${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, edges, derive_vertical: deriveVertical }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "couplings");
+  return (await res.json()) as never;
+}
+
+export async function revertCouplings(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/couplings/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`couplings revert → ${res.status}`);
+}
+
+/** One line of a hazard log — the day's tag-out or permit list. */
+export interface HazardLogRow {
+  compartment: string;
+  /** The engine's kind name, e.g. `energised_bus`. */
+  kind: string;
+  label: string;
+  /** When it was raised, epoch ms; the wall clock when absent. */
+  since_ms?: number;
+}
+
+/**
+ * Raises every field condition in a log that is not already live. The same
+ * validation as a single raise, applied to the whole file before any row
+ * lands; a row already live is skipped, not refused. `dryRun` answers with
+ * what would be raised and what is already live, storing nothing.
+ */
+export async function importHazardLog(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  rows: HazardLogRow[],
+  dryRun: boolean,
+): Promise<{
+  stored: boolean;
+  label: string;
+  rows: number;
+  would_raise?: { compartment: string; kind: string; label: string }[];
+  raised?: LiveHazard[];
+  already_live: { compartment: string; kind: string }[];
+}> {
+  const res = await fetch(`/api/vessels/${vesselId}/hazards/import${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, rows }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "hazard log");
+  return (await res.json()) as never;
+}

@@ -223,6 +223,83 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<(), StoreError>;
 
+    /// The hull's ingested compartment register — its own decks and spaces
+    /// — or `None` while the seeded register stands in.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::CompartmentRegister>, StoreError>;
+
+    /// Installs (or replaces) the hull's compartment register. From the next
+    /// read on, `list_compartments` and `list_decks` serve it.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: crate::memory::CompartmentRegister,
+    ) -> Result<(), StoreError>;
+
+    /// Discards the ingested compartment register; the seed is served again.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// The hull's ingested coupling register, or `None` while the seeded
+    /// edges stand in.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::CouplingRegister>, StoreError>;
+
+    /// Installs (or replaces) the hull's coupling register. From the next
+    /// read on, `adjacency_graph` walks it.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: crate::memory::CouplingRegister,
+    ) -> Result<(), StoreError>;
+
+    /// Discards the ingested coupling register; the seeded edges are walked again.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// The coupling types a hull's rules bind to — what a coupling register's
+    /// rows are validated against.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn coupling_types(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<crate::model::CouplingTypeSummary>, StoreError>;
+
     /// The hull's ingested manning book — available people per trade, per
     /// half-shift — or `None` when the boards can show demand only.
     ///

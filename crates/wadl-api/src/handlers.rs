@@ -1887,6 +1887,38 @@ pub(crate) struct DryRun {
     pub(crate) dry_run: Option<bool>,
 }
 
+/// One ledger line per document that changes hands.
+///
+/// Every door commit and every revert lands here as `DOCUMENT_REPLACED` or
+/// `DOCUMENT_REVERTED`, with the kind, the label and the counts in the hashed
+/// detail. A tamper-evident record that let a whole zone chart or manning
+/// book be swapped silently was a record with a hole in it exactly where an
+/// auditor would look first.
+async fn ledger_document(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    action: &str,
+    kind: &str,
+    label: Option<&str>,
+    counts: Value,
+) -> Result<(), ApiError> {
+    let now_ms = state.clock.now().epoch_millis();
+    let detail = json!({
+        "kind": kind,
+        "label": label,
+        "counts": counts,
+        "by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    state
+        .store
+        .append_audit(scope, vessel, action, &detail, None, now_ms)
+        .await?;
+    Ok(())
+}
+
 /// Reverts the hull to its generated register, discarding the ingested
 /// schedule of record. The undo the import door needs to be safe to try.
 pub(crate) async fn revert_schedule(
@@ -1896,6 +1928,16 @@ pub(crate) async fn revert_schedule(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.clear_schedule_of_record(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "schedule_of_record",
+        None,
+        json!({}),
+    )
+    .await?;
     Ok(Json(json!({ "reverted": true })))
 }
 
@@ -2064,6 +2106,16 @@ pub(crate) async fn import_zones(
             },
         )
         .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "zone_register",
+        Some(&label),
+        json!({ "zones": zones }),
+    )
+    .await?;
     Ok(Json(json!({
         "stored": true,
         "label": label,
@@ -2145,6 +2197,16 @@ pub(crate) async fn import_budgets(
     let label = book.label.clone();
     let items = book.items.len();
     state.store.set_budget_book(&scope, vessel, book).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "budget_book",
+        Some(&label),
+        json!({ "items": items }),
+    )
+    .await?;
     let activities = state.store.list_activities(&scope, vessel).await?;
     let reconciliation = reconcile(&state, &scope, vessel, &activities).await?;
     Ok(Json(json!({
@@ -2207,6 +2269,16 @@ pub(crate) async fn revert_budgets(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.clear_budget_book(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "budget_book",
+        None,
+        json!({}),
+    )
+    .await?;
     Ok(Json(json!({ "reverted": true })))
 }
 
@@ -2311,6 +2383,16 @@ pub(crate) async fn import_manning(
     let label = book.label.clone();
     let crews = book.crews.len();
     state.store.set_manning_book(&scope, vessel, book).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "manning_book",
+        Some(&label),
+        json!({ "crews": crews }),
+    )
+    .await?;
     Ok(Json(json!({
         "stored": true,
         "label": label,
@@ -2530,6 +2612,16 @@ pub(crate) async fn import_geometry(
         .store
         .set_geometry_register(&scope, vessel, register)
         .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "geometry_register",
+        Some(&label),
+        json!({ "spaces": spaces, "deck_bands": deck_bands }),
+    )
+    .await?;
     Ok(Json(json!({
         "stored": true,
         "label": label,
@@ -2547,6 +2639,16 @@ pub(crate) async fn revert_geometry(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.clear_geometry_register(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "geometry_register",
+        None,
+        json!({}),
+    )
+    .await?;
     Ok(Json(json!({ "reverted": true })))
 }
 
@@ -2558,6 +2660,16 @@ pub(crate) async fn revert_manning(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.clear_manning_book(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "manning_book",
+        None,
+        json!({}),
+    )
+    .await?;
     Ok(Json(json!({ "reverted": true })))
 }
 
@@ -2569,7 +2681,722 @@ pub(crate) async fn revert_zones(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.clear_zone_register(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "zone_register",
+        None,
+        json!({}),
+    )
+    .await?;
     Ok(Json(json!({ "reverted": true })))
+}
+
+/* ------------------------------------------------------- the ship itself */
+
+/// The body of a compartment-register import: the hull's decks and spaces.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportRegister {
+    /// Where the list came from, e.g. the yard's compartment list extract.
+    pub(crate) label: String,
+    /// The decks, with ordinals ascending downward.
+    #[serde(default)]
+    pub(crate) decks: Vec<wadl_store::model::RegisterDeckSummary>,
+    /// One row per space.
+    #[serde(default)]
+    pub(crate) spaces: Vec<wadl_store::model::RegisterSpaceSummary>,
+}
+
+/// The hull's compartment register as served: the ingested document if one
+/// is loaded, and either way what the reads are currently built from.
+pub(crate) async fn get_register(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let register = state.store.compartment_register(&scope, vessel).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let decks = state.store.list_decks(&scope, vessel).await?;
+    Ok(Json(json!({
+        "register": register.as_ref().map(|r| json!({
+            "label": r.label,
+            "decks": r.decks.len(),
+            "spaces": r.spaces.len(),
+        })),
+        "served": if register.is_some() { "ingested" } else { "seeded" },
+        "spaces_served": compartments.len(),
+        "decks_served": decks.len(),
+    })))
+}
+
+/// What a candidate register would change: placards the numbering scheme
+/// cannot place and that carry no frame, decks with nothing on them, live
+/// field conditions whose space the new register does not carry, and
+/// scheduled work located to spaces it does not carry. Computed at dry-run
+/// so the consequences are on the table before Confirm.
+async fn register_findings(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    body: &ImportRegister,
+) -> Result<Value, ApiError> {
+    let known: std::collections::BTreeSet<&str> = body
+        .spaces
+        .iter()
+        .map(|s| s.compartment_no.as_str())
+        .collect();
+    let unplaceable: Vec<&str> = body
+        .spaces
+        .iter()
+        .filter(|s| {
+            s.frame.is_none()
+                && CompartmentNo::new(s.compartment_no.as_str())
+                    .parse_usn()
+                    .is_none()
+        })
+        .map(|s| s.compartment_no.as_str())
+        .collect();
+    let empty_decks: Vec<&str> = body
+        .decks
+        .iter()
+        .filter(|d| !body.spaces.iter().any(|s| s.deck_code == d.code))
+        .map(|d| d.code.as_str())
+        .collect();
+    let hazards = state
+        .store
+        .live_hazards(scope, vessel, state.clock.now())
+        .await?;
+    let orphaned_hazards: Vec<Value> = hazards
+        .iter()
+        .filter(|h| !known.contains(h.origin.as_str()))
+        .map(|h| json!({ "compartment": h.origin, "label": h.label }))
+        .collect();
+    let activities = state.store.list_activities(scope, vessel).await?;
+    let orphaned_activities = activities
+        .iter()
+        .filter(|a| {
+            a.compartment_no
+                .as_ref()
+                .is_some_and(|no| !known.contains(no.as_str()))
+        })
+        .count();
+    Ok(json!({
+        "unplaceable": unplaceable,
+        "empty_decks": empty_decks,
+        "orphaned_hazards": orphaned_hazards,
+        "activities_losing_their_space": orphaned_activities,
+    }))
+}
+
+/// Every reason a candidate register is refused whole: no label, no decks or
+/// spaces, a deck listed twice or sharing an ordinal, a placard listed twice
+/// or on a deck the register does not carry, a side that is not one of the
+/// three the hull has. Capped so the refusal stays readable.
+fn register_rejections(body: &ImportRegister) -> Vec<String> {
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the register carries no label".to_owned());
+    }
+    if body.decks.is_empty() {
+        rejections.push("the register carries no decks".to_owned());
+    }
+    if body.spaces.is_empty() {
+        rejections.push("the register carries no spaces".to_owned());
+    }
+    let mut deck_codes = std::collections::BTreeSet::new();
+    let mut ordinals = std::collections::BTreeSet::new();
+    for d in &body.decks {
+        if d.code.trim().is_empty() {
+            rejections.push(format!("a deck at ordinal {} has no code", d.ordinal));
+        }
+        if !deck_codes.insert(d.code.as_str()) {
+            rejections.push(format!("deck {} is listed twice", d.code));
+        }
+        if !ordinals.insert(d.ordinal) {
+            rejections.push(format!(
+                "deck {} shares ordinal {} with another deck",
+                d.code, d.ordinal
+            ));
+        }
+    }
+    let mut placards = std::collections::BTreeSet::new();
+    for s in &body.spaces {
+        if s.compartment_no.trim().is_empty() {
+            rejections.push("a space row has no placard".to_owned());
+        }
+        if !placards.insert(s.compartment_no.as_str()) {
+            rejections.push(format!("{} is listed twice", s.compartment_no));
+        }
+        if !deck_codes.contains(s.deck_code.as_str()) {
+            rejections.push(format!(
+                "{} is on deck {:?}, which the register does not list",
+                s.compartment_no, s.deck_code
+            ));
+        }
+        if let Some(side) = s.side.as_deref() {
+            if !matches!(side, "port" | "starboard" | "centreline") {
+                rejections.push(format!(
+                    "{}: side {side:?} is not port, starboard or centreline",
+                    s.compartment_no
+                ));
+            }
+        }
+    }
+    if rejections.len() > 12 {
+        rejections.truncate(12);
+        rejections.push("…".to_owned());
+    }
+    rejections
+}
+
+/// Ingests the hull's own compartment register — the ship, through the
+/// product. All-or-nothing with every reason listed; `?dry_run=true` previews
+/// the findings and stores nothing. Once stored, every read serves it and
+/// the seeded register stops existing for this hull.
+pub(crate) async fn import_register(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportRegister = read_import_body(req).await?;
+
+    let rejections = register_rejections(&body);
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the register was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let findings = register_findings(&state, &scope, vessel, &body).await?;
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": body.label,
+            "decks": body.decks.len(),
+            "spaces": body.spaces.len(),
+            "findings": findings,
+        })));
+    }
+    let label = body.label.clone();
+    let (decks, spaces) = (body.decks.len(), body.spaces.len());
+    state
+        .store
+        .set_compartment_register(
+            &scope,
+            vessel,
+            wadl_store::memory::CompartmentRegister {
+                label: body.label,
+                decks: body.decks,
+                spaces: body.spaces,
+            },
+        )
+        .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "compartment_register",
+        Some(&label),
+        json!({ "decks": decks, "spaces": spaces }),
+    )
+    .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "decks": decks,
+        "spaces": spaces,
+        "findings": findings,
+    })))
+}
+
+/// Discards the ingested compartment register; the seed is served again.
+pub(crate) async fn revert_register(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state
+        .store
+        .clear_compartment_register(&scope, vessel)
+        .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "compartment_register",
+        None,
+        json!({}),
+    )
+    .await?;
+    Ok(Json(json!({ "reverted": true })))
+}
+
+/// The body of a coupling-register import.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportCouplings {
+    /// Where the list came from.
+    pub(crate) label: String,
+    /// Authored rows.
+    #[serde(default)]
+    pub(crate) edges: Vec<wadl_store::model::CouplingRowSummary>,
+    /// Also propose `deck_penetration` edges from deck order and frame
+    /// overlap — "directly above" derived from the register rather than
+    /// authored one pair at a time.
+    #[serde(default)]
+    pub(crate) derive_vertical: bool,
+}
+
+/// The hull's coupling register as served, with the coupling types a row
+/// may name and how many edges the cascade currently walks.
+pub(crate) async fn get_couplings(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let register = state.store.coupling_register(&scope, vessel).await?;
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let types = state.store.coupling_types(&scope, vessel).await?;
+    Ok(Json(json!({
+        "register": register.as_ref().map(|r| json!({
+            "label": r.label,
+            "edges": r.edges.len(),
+            "authored": r.edges.iter().filter(|e| e.provenance == "authored").count(),
+            "derived": r.edges.iter().filter(|e| e.provenance == "derived").count(),
+        })),
+        "served": if register.is_some() { "ingested" } else { "seeded" },
+        "edges_served": graph.edge_count(),
+        "types": types,
+    })))
+}
+
+/// Proposes `deck_penetration` edges from the register: a space directly
+/// above another when their decks are adjacent by ordinal, their frame
+/// extents overlap (surveyed extents from the geometry register where it
+/// has them, the frame station otherwise), and they sit on the same side
+/// or one is on the centreline. Heat goes down, so the edge runs from the
+/// upper space to the lower.
+fn derive_vertical_edges(
+    compartments: &[wadl_store::model::CompartmentSummary],
+    authored: &[wadl_store::model::CouplingRowSummary],
+) -> Vec<wadl_store::model::CouplingRowSummary> {
+    let extent = |c: &wadl_store::model::CompartmentSummary| -> Option<(i32, i32)> {
+        match (c.fwd_frame, c.aft_frame, c.frame) {
+            (Some(f), Some(a), _) => Some((f, a)),
+            (_, _, Some(f)) => Some((f, f)),
+            _ => None,
+        }
+    };
+    let compatible_side = |a: &str, b: &str| a == b || a == "centreline" || b == "centreline";
+    let mut out = Vec::new();
+    for upper in compartments {
+        let Some((uf, ua)) = extent(upper) else {
+            continue;
+        };
+        for lower in compartments {
+            if lower.deck_ordinal != upper.deck_ordinal + 1 {
+                continue;
+            }
+            let Some((lf, la)) = extent(lower) else {
+                continue;
+            };
+            if uf > la || lf > ua || !compatible_side(&upper.side, &lower.side) {
+                continue;
+            }
+            let from = upper.compartment_no.as_str();
+            let to = lower.compartment_no.as_str();
+            if authored
+                .iter()
+                .any(|e| e.from == from && e.to == to && e.code == "deck_penetration")
+            {
+                continue;
+            }
+            out.push(wadl_store::model::CouplingRowSummary {
+                from: from.to_owned(),
+                to: to.to_owned(),
+                code: "deck_penetration".to_owned(),
+                symmetric: false,
+                provenance: "derived".to_owned(),
+            });
+        }
+    }
+    out
+}
+
+/// Every reason a candidate coupling register is refused whole: no label,
+/// nothing to store, a coupling type the hull's rules do not bind to, an end
+/// that is not on the register, a space coupled to itself, a row listed
+/// twice, or a provenance that is neither authored nor derived.
+fn coupling_rejections(
+    body: &ImportCouplings,
+    types: &[wadl_store::model::CouplingTypeSummary],
+    compartments: &[wadl_store::model::CompartmentSummary],
+) -> Vec<String> {
+    let known: std::collections::BTreeSet<&str> = compartments
+        .iter()
+        .map(|c| c.compartment_no.as_str())
+        .collect();
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the register carries no label".to_owned());
+    }
+    if body.edges.is_empty() && !body.derive_vertical {
+        rejections.push("the register carries no edges and asks for none to be derived".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for e in &body.edges {
+        if !types.iter().any(|t| t.code == e.code) {
+            rejections.push(format!(
+                "{} → {}: coupling type {:?} is not one this hull's rules know ({})",
+                e.from,
+                e.to,
+                e.code,
+                types
+                    .iter()
+                    .map(|t| t.code.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for no in [&e.from, &e.to] {
+            if !known.contains(no.as_str()) {
+                rejections.push(format!("{no} is not on this hull's register"));
+            }
+        }
+        if e.from == e.to {
+            rejections.push(format!("{} is coupled to itself", e.from));
+        }
+        if !seen.insert((e.from.as_str(), e.to.as_str(), e.code.as_str())) {
+            rejections.push(format!(
+                "{} → {} ({}) is listed twice",
+                e.from, e.to, e.code
+            ));
+        }
+        if !matches!(e.provenance.as_str(), "authored" | "derived") {
+            rejections.push(format!(
+                "{} → {}: provenance must be authored or derived",
+                e.from, e.to
+            ));
+        }
+    }
+    if rejections.len() > 12 {
+        rejections.truncate(12);
+        rejections.push("…".to_owned());
+    }
+    rejections
+}
+
+/// Ingests the hull's coupling register — the paths a hazard can travel.
+/// Rows are validated against the coupling types the hull's rules bind to
+/// and against the compartment register; `derive_vertical` adds proposed
+/// deck penetrations, each marked `derived`. All-or-nothing; `?dry_run=true`
+/// previews, including every derived edge, and stores nothing.
+pub(crate) async fn import_couplings(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportCouplings = read_import_body(req).await?;
+    let types = state.store.coupling_types(&scope, vessel).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let rejections = coupling_rejections(&body, &types, &compartments);
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the register was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let mut compartments = compartments;
+    overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
+    let derived = if body.derive_vertical {
+        derive_vertical_edges(&compartments, &body.edges)
+    } else {
+        Vec::new()
+    };
+    let authored = body.edges.len();
+    let mut edges = body.edges;
+    edges.extend(derived.iter().cloned());
+    let preview: Vec<&wadl_store::model::CouplingRowSummary> = derived.iter().take(50).collect();
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": body.label,
+            "authored": authored,
+            "derived": derived.len(),
+            "derived_edges": preview,
+            "edges": edges.len(),
+        })));
+    }
+    let label = body.label.clone();
+    let total = edges.len();
+    state
+        .store
+        .set_coupling_register(
+            &scope,
+            vessel,
+            wadl_store::memory::CouplingRegister {
+                label: body.label,
+                edges,
+            },
+        )
+        .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "coupling_register",
+        Some(&label),
+        json!({ "authored": authored, "derived": derived.len() }),
+    )
+    .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "authored": authored,
+        "derived": derived.len(),
+        "derived_edges": preview,
+        "edges": total,
+    })))
+}
+
+/// Discards the ingested coupling register; the seeded edges are walked again.
+pub(crate) async fn revert_couplings(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_coupling_register(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "coupling_register",
+        None,
+        json!({}),
+    )
+    .await?;
+    Ok(Json(json!({ "reverted": true })))
+}
+
+/// One line of a hazard log — the day's tag-out or permit list.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HazardLogRow {
+    /// The origin space.
+    compartment: String,
+    /// The hazard kind, in the engine's serde names.
+    kind: wadl_engine::HazardKind,
+    /// The fact as the deck says it.
+    label: String,
+    /// When it was raised, epoch ms; defaults to the wall clock.
+    #[serde(default)]
+    since_ms: Option<i64>,
+}
+
+/// The body of a hazard-log import.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportHazardLog {
+    /// Where the log came from, e.g. the tag-out log's morning export.
+    pub(crate) label: String,
+    /// The lines.
+    #[serde(default)]
+    pub(crate) rows: Vec<HazardLogRow>,
+}
+
+/// Every reason a hazard log is refused whole: no label, no rows, a row
+/// without a label, a row on a space the hull does not carry, or a row raised
+/// in the future. Capped so the refusal stays readable.
+fn hazard_log_rejections(
+    body: &ImportHazardLog,
+    register: &[wadl_store::model::CompartmentSummary],
+    now_ms: i64,
+) -> Vec<String> {
+    let known: std::collections::BTreeSet<&str> =
+        register.iter().map(|c| c.compartment_no.as_str()).collect();
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the log carries no label".to_owned());
+    }
+    if body.rows.is_empty() {
+        rejections.push("the log carries no rows".to_owned());
+    }
+    for (n, row) in body.rows.iter().enumerate() {
+        let line = n + 1;
+        if row.label.trim().is_empty() {
+            rejections.push(format!("line {line}: no label"));
+        }
+        if !known.contains(row.compartment.trim()) {
+            rejections.push(format!(
+                "line {line}: {} is not on this hull's register",
+                row.compartment.trim()
+            ));
+        }
+        if row.since_ms.is_some_and(|s| s > now_ms) {
+            rejections.push(format!("line {line}: raised in the future"));
+        }
+    }
+    if rejections.len() > 12 {
+        rejections.truncate(12);
+        rejections.push("…".to_owned());
+    }
+    rejections
+}
+
+/// Raises one logged row and ledgers it as `HAZARD_RAISED`, naming the log
+/// it came from so the entry reads the same as a raise made by hand.
+async fn raise_logged_row(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    log_label: &str,
+    row: &HazardLogRow,
+    now_ms: i64,
+) -> Result<wadl_engine::Hazard, ApiError> {
+    let compartment = row.compartment.trim();
+    let label = row.label.trim();
+    let since_ms = row.since_ms.unwrap_or(now_ms);
+    let hazard = state
+        .store
+        .raise_hazard(scope, vessel, compartment, row.kind, since_ms, label)
+        .await?;
+    let detail = json!({
+        "compartment": compartment,
+        "kind": row.kind,
+        "label": label,
+        "since_ms": since_ms,
+        "raised_by_org": scope.org.to_string(),
+        "from_log": log_label,
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    state
+        .store
+        .append_audit(
+            scope,
+            vessel,
+            "HAZARD_RAISED",
+            &detail,
+            Some(compartment),
+            now_ms,
+        )
+        .await?;
+    Ok(hazard)
+}
+
+/// Raises the field conditions in a hazard log that are not already live.
+///
+/// The same validation as a single raise, applied to the whole file before
+/// any row lands: an unknown space, an empty label or a future instant
+/// refuses the log whole. A row whose fact is already live is skipped, not
+/// refused — the morning log lists what is open, and most of it was open
+/// yesterday too. `?dry_run=true` answers with what would be raised and what
+/// is already live, storing nothing. Each raise lands as `HAZARD_RAISED`,
+/// and the commit as one `HAZARD_LOG_IMPORTED` with the counts.
+pub(crate) async fn import_hazard_log(
+    State(state): State<AppState>,
+    Caller(scope): Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportHazardLog = read_import_body(req).await?;
+    let now = state.clock.now();
+    let now_ms = now.epoch_millis();
+
+    let register = state.store.list_compartments(&scope, vessel).await?;
+    let rejections = hazard_log_rejections(&body, &register, now_ms);
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the log was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let live = state.store.live_hazards(&scope, vessel, now).await?;
+    let is_live = |row: &HazardLogRow| {
+        live.iter()
+            .any(|h| h.origin.as_str() == row.compartment.trim() && h.kind == row.kind)
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut would_raise: Vec<&HazardLogRow> = Vec::new();
+    let mut already_live: Vec<Value> = Vec::new();
+    for row in &body.rows {
+        let key = (
+            row.compartment.trim().to_owned(),
+            json!(row.kind).to_string(),
+        );
+        if is_live(row) || !seen.insert(key) {
+            already_live.push(json!({ "compartment": row.compartment.trim(), "kind": row.kind }));
+        } else {
+            would_raise.push(row);
+        }
+    }
+    let preview: Vec<Value> = would_raise
+        .iter()
+        .map(|r| json!({ "compartment": r.compartment.trim(), "kind": r.kind, "label": r.label.trim() }))
+        .collect();
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": body.label,
+            "rows": body.rows.len(),
+            "would_raise": preview,
+            "already_live": already_live,
+        })));
+    }
+
+    let mut raised = Vec::with_capacity(would_raise.len());
+    for row in would_raise {
+        raised.push(raise_logged_row(&state, &scope, vessel, &body.label, row, now_ms).await?);
+    }
+    let summary = json!({
+        "label": body.label,
+        "raised": raised.len(),
+        "already_live": already_live.len(),
+        "by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let summary = serde_json::to_string(&summary).unwrap_or_default();
+    state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "HAZARD_LOG_IMPORTED",
+            &summary,
+            None,
+            now_ms,
+        )
+        .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": body.label,
+        "rows": body.rows.len(),
+        "raised": raised,
+        "already_live": already_live,
+    })))
 }
 
 /// The distributed packages on a hull.

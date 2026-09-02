@@ -89,6 +89,76 @@ pub struct CompartmentSummary {
     pub geometry_source: String,
 }
 
+/// One space in an ingested compartment register — the yard's own list of
+/// what the hull is made of, which until this document entered only as seed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegisterSpaceSummary {
+    /// Placard number as printed.
+    pub compartment_no: String,
+    /// Human name.
+    pub name: String,
+    /// Deck code — must name a deck the same register carries.
+    pub deck_code: String,
+    /// Zone label.
+    pub zone: String,
+    /// Category (decides secure status and hazard defaults).
+    pub category: String,
+    /// Frame station when the register carries it; otherwise parsed from the
+    /// placard where the numbering scheme allows, and labelled as a parse.
+    #[serde(default)]
+    pub frame: Option<i32>,
+    /// `port`, `starboard` or `centreline` when the register carries it.
+    #[serde(default)]
+    pub side: Option<String>,
+}
+
+/// One deck in an ingested compartment register.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegisterDeckSummary {
+    /// Deck code as printed, e.g. `3rd`, `Main`, `03`.
+    pub code: String,
+    /// Human label.
+    pub label: String,
+    /// Ordering key, ascending downward — what "directly above" is read from.
+    pub ordinal: i32,
+}
+
+/// One coupling in an ingested coupling register: a physical path a hazard
+/// can travel between two spaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CouplingRowSummary {
+    /// The space the path starts in.
+    pub from: String,
+    /// The space it reaches.
+    pub to: String,
+    /// The coupling type's code — what rules bind to (`deck_penetration`, …).
+    pub code: String,
+    /// Store the reverse path too (a shared bulkhead has no preferred sense).
+    #[serde(default)]
+    pub symmetric: bool,
+    /// `authored` when a person listed it, `derived` when the register door
+    /// proposed it from deck order and frame overlap.
+    #[serde(default = "authored")]
+    pub provenance: String,
+}
+
+fn authored() -> String {
+    "authored".to_owned()
+}
+
+/// A coupling type a hull's rules can bind to, as the store knows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CouplingTypeSummary {
+    /// The traversal's type id — distinct per code.
+    pub id: wadl_domain::ids::CouplingTypeId,
+    /// The code rules bind to.
+    pub code: String,
+    /// What the coupling carries: `heat`, `vapour`, `energy`, `load`, `egress`.
+    pub propagates: Vec<String>,
+    /// How many hops the coupling type reaches at most.
+    pub max_reach: u8,
+}
+
 /// One surveyed space in a geometry register: the compartment's true frame
 /// extent, from a Compartment & Access drawing or the general plans. The
 /// placard number encodes the FORWARD boundary, which is what makes a

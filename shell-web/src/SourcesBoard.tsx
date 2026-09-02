@@ -13,8 +13,19 @@
 // Reverts live here as well as on their home screens: taking a document back
 // out is a provenance decision, and this is the provenance screen.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
+  getCouplings,
+  getRegister,
+  importCouplings,
+  importHazardLog,
+  importRegister,
+  listHazards,
+  revertCouplings,
+  revertRegister,
+  type CouplingsInfo,
+  type LiveHazard,
+  type RegisterInfo,
   getZoneChart,
   importBudgetBook,
   importSchedule,
@@ -39,7 +50,17 @@ import {
 } from "./api";
 import { DiscardButton } from "./DiscardButton";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
-import { fmtBytes, parseBudgetCsv, parseGeometryCsv, parseManningCsv, parseZoneCsv, deltaSummary } from "./ingest";
+import {
+  fmtBytes,
+  parseBudgetCsv,
+  parseCouplingCsv,
+  parseGeometryCsv,
+  parseHazardLogCsv,
+  parseManningCsv,
+  parseRegisterCsv,
+  parseZoneCsv,
+  deltaSummary,
+} from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { commitBtnStyle, C, errText, mh, msgColor } from "./theme";
@@ -75,6 +96,13 @@ export default function SourcesBoard({
   const [staged, setStaged] = useState<Staged | null>(null);
   const [manning, setManning] = useState<ManningBook | null>(null);
   const [geometry, setGeometry] = useState<GeometryInfo | null>(null);
+  const [shipRegister, setShipRegister] = useState<RegisterInfo | null>(null);
+  const [couplings, setCouplings] = useState<CouplingsInfo | null>(null);
+  const [hazards, setHazards] = useState<LiveHazard[]>([]);
+  /** Whether the coupling door should propose deck penetrations from deck
+   *  order and frame overlap. On by default: a register without vertical
+   *  paths lets heat go nowhere, which is a lie the trace would then tell. */
+  const [deriveVertical, setDeriveVertical] = useState(true);
   /** What the door is doing right now — a P6 export is megabytes, and reading
    *  or ingesting one deserves a visible verb rather than a frozen screen. */
   const [busy, setBusy] = useState<string | null>(null);
@@ -259,6 +287,114 @@ export default function SourcesBoard({
       });
   };
 
+  const stageRegister = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const { decks, spaces } = parseRegisterCsv(text);
+        return importRegister(identity, vesselId, file.name, decks, spaces, true).then((r) => {
+          setBusy(null);
+          const f = r.findings;
+          const orphans = f.orphaned_hazards;
+          setStaged({
+            kind: "Compartment register",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              `${r.decks} decks · ${r.spaces} spaces — Confirm replaces the served register ` +
+              `(${shipRegister?.spaces_served ?? "?"} spaces) on every screen` +
+              (f.unplaceable.length > 0
+                ? ` · ⚠ ${f.unplaceable.length} cannot be placed (no frame, placard unparsable): ${f.unplaceable.slice(0, 6).join(", ")}${f.unplaceable.length > 6 ? ", …" : ""}`
+                : "") +
+              (f.empty_decks.length > 0 ? ` · ${f.empty_decks.length} deck${f.empty_decks.length === 1 ? "" : "s"} with nothing on ${f.empty_decks.length === 1 ? "it" : "them"}: ${f.empty_decks.join(", ")}` : "") +
+              (orphans.length > 0
+                ? ` · ⚠ ${orphans.length} live field condition${orphans.length === 1 ? "" : "s"} lose${orphans.length === 1 ? "s" : ""} ${orphans.length === 1 ? "its" : "their"} space: ${orphans.slice(0, 4).map((o) => o.compartment).join(", ")}${orphans.length > 4 ? ", …" : ""}`
+                : "") +
+              (f.activities_losing_their_space > 0
+                ? ` · ⚠ ${f.activities_losing_their_space} scheduled activit${f.activities_losing_their_space === 1 ? "y" : "ies"} located to spaces it does not carry`
+                : " · every located activity keeps its space"),
+            commit: () =>
+              importRegister(identity, vesselId, file.name, decks, spaces, false).then(
+                (x) => `✓ ${x.label}: this hull is now ${x.spaces} spaces on ${x.decks} decks`,
+              ),
+          });
+        });
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
+
+  const stageCouplings = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const edges = parseCouplingCsv(text);
+        return importCouplings(identity, vesselId, file.name, edges, deriveVertical, true).then((r) => {
+          setBusy(null);
+          const sample = r.derived_edges.slice(0, 4).map((e) => `${e.from} ↓ ${e.to}`).join(", ");
+          setStaged({
+            kind: "Coupling register",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              `${r.authored} authored edge${r.authored === 1 ? "" : "s"}` +
+              (deriveVertical
+                ? ` · ${r.derived} deck penetration${r.derived === 1 ? "" : "s"} derived from deck order and frame overlap${sample ? ` (${sample}${r.derived > 4 ? ", …" : ""})` : ""}`
+                : " · nothing derived") +
+              ` — Confirm replaces the ${couplings?.edges_served ?? "?"} edges every trace walks today`,
+            commit: () =>
+              importCouplings(identity, vesselId, file.name, edges, deriveVertical, false).then(
+                (x) => `✓ ${x.label}: traces now walk ${x.edges} edges (${x.authored} authored, ${x.derived} derived)`,
+              ),
+          });
+        });
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
+
+  const stageHazardLog = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const rows = parseHazardLogCsv(text);
+        return importHazardLog(identity, vesselId, file.name, rows, true).then((r) => {
+          setBusy(null);
+          const raise = r.would_raise ?? [];
+          setStaged({
+            kind: "Field-condition log",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              `${r.rows} rows · would raise ${raise.length}` +
+              (raise.length > 0
+                ? ` (${raise.slice(0, 5).map((x) => `${x.compartment} ${x.kind}`).join(", ")}${raise.length > 5 ? ", …" : ""})`
+                : "") +
+              ` · ${r.already_live.length} already live and left alone` +
+              " — each raise lands in the ledger by name; nothing is cleared by a log",
+            commit: () =>
+              importHazardLog(identity, vesselId, file.name, rows, false).then(
+                (x) => `✓ ${x.label}: ${x.raised?.length ?? 0} raised, ${x.already_live.length} already live`,
+              ),
+          });
+        });
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(String(e));
+      });
+  };
+
   const confirmStaged = () => {
     const p = staged;
     if (!p) return;
@@ -285,13 +421,19 @@ export default function SourcesBoard({
       getZoneChart(identity, vesselId),
       getManningBook(identity, vesselId).catch(() => null),
       getGeometry(identity, vesselId).catch(() => null),
+      getRegister(identity, vesselId).catch(() => null),
+      getCouplings(identity, vesselId).catch(() => null),
+      listHazards(identity, vesselId, asOf).catch(() => []),
     ])
-      .then(([r, z, m, g]) => {
+      .then(([r, z, m, g, sr, cp, hz]) => {
         if (stale) return;
         setRegister(r);
         setZones(z);
         setManning(m);
         setGeometry(g);
+        setShipRegister(sr);
+        setCouplings(cp);
+        setHazards(hz);
       })
       .catch((e: unknown) => {
         if (stale) return;
@@ -339,6 +481,7 @@ export default function SourcesBoard({
         kicker={`Data Sources · ${hullLabel}`}
         title="What this hull is built from"
         stats={[
+          { value: shipRegister?.served ?? "seeded", label: "compartment register" },
           { value: register.schedule_source ? "ingested" : "generated", label: "schedule of record" },
           { value: zones.source ? "authored" : "inferred", label: "zone chart" },
           { value: register.reconciliation.source ? "ingested" : "seeded", label: "budget book" },
@@ -380,6 +523,101 @@ export default function SourcesBoard({
       )}
 
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(400px,1fr))", alignItems: "start" }}>
+        <SourceCard
+          kind="Compartment register"
+          status={shipRegister?.register ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "SEEDED", tone: "#94a3b8" }}
+          name={shipRegister?.register?.label ?? "the seeded demo register — a notional CVN-73 slice"}
+          lines={[
+            {
+              text: shipRegister
+                ? `${shipRegister.spaces_served} spaces on ${shipRegister.decks_served} decks — the hull every screen is built on`
+                : "register unavailable",
+              gloss:
+                "The base layer. Every space, deck, zone and category the schedule locates to, the plan draws and the trace walks comes from this document. Once a register is ingested it IS the hull; the seeded template stops existing for it until a revert.",
+            },
+            ...(shipRegister?.register
+              ? [{ text: `${shipRegister.register.decks} decks, ${shipRegister.register.spaces} spaces as ingested`, tone: C.dim }]
+              : [{ text: "no register ingested — the seeded slice stands in, and says so", tone: C.dim }]),
+          ]}
+          upload={{
+            label: "⭱ Upload register CSV",
+            accept: ".csv,text/csv,text/plain",
+            title:
+              "Ingest the hull's compartment list (CSV lines: deck,<code>,<label>,<ordinal> and space,<no>,<name>,<deck>,<zone>,<category>[,<frame>,<side>]). The preview names every space that cannot be placed, every live field condition and scheduled activity that would lose its space. All-or-nothing.",
+            onFile: stageRegister,
+          }}
+          importHint="Drawn on the Deck Explorer"
+          onOpenHome={() => onOpenModule("deckExplorer")}
+          onRevert={
+            shipRegister?.register
+              ? () => {
+                  setMsg("⏳ discarding the compartment register…");
+                  void revertRegister(identity, vesselId)
+                    .then(() => {
+                      setMsg("✓ back to the seeded register");
+                      setNonce((n) => n + 1);
+                    })
+                    .catch((e: unknown) => setMsg(errText(e)));
+                }
+              : undefined
+          }
+        />
+
+        <SourceCard
+          kind="Coupling register"
+          status={couplings?.register ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "SEEDED", tone: "#94a3b8" }}
+          name={couplings?.register?.label ?? "the seeded couplings — the demo cascade's paths"}
+          lines={[
+            {
+              text: couplings
+                ? `${couplings.edges_served} edges walked by every trace · types: ${couplings.types.map((t) => `${t.code} (${t.propagates.join("+")}, ${t.max_reach} hop${t.max_reach === 1 ? "" : "s"})`).join(" · ")}`
+                : "couplings unavailable",
+              gloss:
+                "The paths a hazard can travel: deck penetrations, shared bulkheads, exhaust trunks, electrical buses. A rule binds to a coupling type; a trace walks the edges. No edge, no cascade — which is why the door can derive vertical adjacency rather than let heat go nowhere.",
+            },
+            ...(couplings?.register
+              ? [{
+                  text: `${couplings.register.authored} authored · ${couplings.register.derived} derived from deck order and frame overlap`,
+                  tone: couplings.register.derived > 0 ? C.warn : C.dim,
+                  gloss: "Derived edges are proposals from geometry, marked as such wherever a trace walks them. Authored edges are a person's claim.",
+                }]
+              : []),
+          ]}
+          extra={
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 10.5, color: C.dim, cursor: "pointer" }} title="When on, the door proposes a deck_penetration edge from every space to the space directly below it — adjacent deck ordinal, overlapping frames, compatible side — and marks each one derived.">
+              <input
+                type="checkbox"
+                checked={deriveVertical}
+                onChange={(e) => setDeriveVertical(e.target.checked)}
+                style={{ margin: 0 }}
+              />
+              derive vertical adjacency on import
+            </label>
+          }
+          upload={{
+            label: "⭱ Upload couplings CSV",
+            accept: ".csv,text/csv,text/plain",
+            title:
+              "Ingest the hull's coupling register (CSV: from,to,code[,symmetric]). Every end must be on the register and every code a type the rules bind to. The preview lists every derived edge before Confirm. All-or-nothing.",
+            onFile: stageCouplings,
+          }}
+          importHint="Walked by every trace on the Deck Explorer"
+          onOpenHome={() => onOpenModule("deckExplorer")}
+          onRevert={
+            couplings?.register
+              ? () => {
+                  setMsg("⏳ discarding the coupling register…");
+                  void revertCouplings(identity, vesselId)
+                    .then(() => {
+                      setMsg("✓ back to the seeded couplings");
+                      setNonce((n) => n + 1);
+                    })
+                    .catch((e: unknown) => setMsg(errText(e)));
+                }
+              : undefined
+          }
+        />
+
         <SourceCard
           kind="Schedule of record"
           status={register.schedule_source ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "GENERATED", tone: "#94a3b8" }}
@@ -634,6 +872,34 @@ export default function SourcesBoard({
         />
 
         <SourceCard
+          kind="Field-condition log"
+          status={hazards.length > 0 ? { label: `${hazards.length} LIVE`, tone: "#f59e0b" } : { label: "NONE LIVE", tone: "#94a3b8" }}
+          name={hazards.length > 0 ? `${hazards.length} field condition${hazards.length === 1 ? "" : "s"} live as of the board's instant` : "no field condition is live as of the board's instant"}
+          lines={[
+            {
+              text: "the day's tag-out, permit and stop-work list, raised by the file rather than one at a time",
+              gloss:
+                "Not a document the screens serve — each row becomes a raise, ledgered by name under the log it came from. A row already live is left alone. Nothing is cleared by a log: clearance is a person's act with a basis, made on the Deck Explorer.",
+            },
+            ...(hazards.length > 0
+              ? [{
+                  text: hazards.slice(0, 6).map((h) => `${h.origin} ${h.kind}`).join(" · ") + (hazards.length > 6 ? ` · +${hazards.length - 6} more` : ""),
+                  tone: C.dim,
+                }]
+              : []),
+          ]}
+          upload={{
+            label: "⭱ Upload log CSV",
+            accept: ".csv,text/csv,text/plain",
+            title:
+              "Raise the day's field conditions from a log (CSV: compartment,kind,label[,since]). Kinds in the engine's names or the yard's words. The preview says what would be raised and what is already live. The whole file is refused on one unknown space, empty label or future instant.",
+            onFile: stageHazardLog,
+          }}
+          importHint="Raised and cleared one at a time on the Deck Explorer"
+          onOpenHome={() => onOpenModule("deckExplorer")}
+        />
+
+        <SourceCard
           kind="Deck plates"
           status={{ label: "REFERENCE", tone: "#94a3b8" }}
           name={SHEET_SOURCE}
@@ -662,6 +928,7 @@ function SourceCard({
   name,
   lines,
   upload,
+  extra,
   importHint,
   onOpenHome,
   onRevert,
@@ -672,6 +939,8 @@ function SourceCard({
   lines: { text: string; tone?: string; gloss?: string }[];
   /** The document's own door: a picker, and the whole card as a drop target. */
   upload?: { label: string; accept: string; title: string; onFile: (f: File) => void };
+  /** A door's own control, rendered under the lines — e.g. a derivation toggle. */
+  extra?: ReactNode;
   importHint?: string;
   onOpenHome?: () => void;
   onRevert?: () => void;
@@ -753,6 +1022,7 @@ function SourceCard({
             {l.text}
           </div>
         ))}
+        {extra}
         {upload && (
           <div style={{ fontSize: 10, color: C.faint }}>…or drop the file anywhere on this card</div>
         )}

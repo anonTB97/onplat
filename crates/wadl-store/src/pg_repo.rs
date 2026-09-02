@@ -428,7 +428,10 @@ use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
 use wadl_plan::{Package, Segment, SpaceWork};
 
-use crate::memory::{BudgetBook, GeometryRegister, ManningBook, ScheduleOfRecord, ZoneRegister};
+use crate::memory::{
+    BudgetBook, CompartmentRegister, CouplingRegister, GeometryRegister, ManningBook,
+    ScheduleOfRecord, ZoneRegister,
+};
 
 /// The jsonb payload of a `geometry_register` document row: the register minus
 /// its label (the label is the document row's own column).
@@ -436,6 +439,19 @@ use crate::memory::{BudgetBook, GeometryRegister, ManningBook, ScheduleOfRecord,
 struct GeometryDoc {
     spaces: Vec<crate::model::SpaceGeometrySummary>,
     decks: Vec<crate::model::DeckCoverageSummary>,
+}
+
+/// The stored shape of a compartment register (label rides on the row).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RegisterDoc {
+    decks: Vec<crate::model::RegisterDeckSummary>,
+    spaces: Vec<crate::model::RegisterSpaceSummary>,
+}
+
+/// The stored shape of a coupling register.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CouplingDoc {
+    edges: Vec<crate::model::CouplingRowSummary>,
 }
 use crate::model::{
     ActivitySummary, AuditRecord, PackageSummary, ScheduleEdgeSummary, StrandedItem,
@@ -688,6 +704,11 @@ impl Repositories for PgStore {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<Vec<CompartmentSummary>, StoreError> {
+        // The yard's own register, once ingested, IS the register — the same
+        // rule the demo store applies, from the same shared conversion.
+        if let Some(reg) = self.compartment_register(scope, vessel).await? {
+            return Ok(crate::memory::register_compartments(&reg));
+        }
         self.pg_list_compartments(scope, vessel).await
     }
 
@@ -696,6 +717,9 @@ impl Repositories for PgStore {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<Vec<DeckSummary>, StoreError> {
+        if let Some(reg) = self.compartment_register(scope, vessel).await? {
+            return Ok(crate::memory::register_decks(&reg));
+        }
         self.pg_list_decks(scope, vessel).await
     }
 
@@ -958,6 +982,131 @@ impl Repositories for PgStore {
             .await
     }
 
+    async fn compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<CompartmentRegister>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "compartment_register")
+            .await?
+            .map(|(label, doc)| {
+                let parts: RegisterDoc = serde_json::from_value(doc)
+                    .map_err(|e| StoreError::Backend(format!("compartment_register doc: {e}")))?;
+                Ok(CompartmentRegister {
+                    label,
+                    decks: parts.decks,
+                    spaces: parts.spaces,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: CompartmentRegister,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let doc = serde_json::to_value(RegisterDoc {
+            decks: register.decks,
+            spaces: register.spaces,
+        })
+        .map_err(|e| StoreError::Backend(format!("compartment_register doc: {e}")))?;
+        self.put_document(
+            scope.org,
+            vessel,
+            "compartment_register",
+            &register.label,
+            doc,
+        )
+        .await
+    }
+
+    async fn clear_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "compartment_register")
+            .await
+    }
+
+    async fn coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<CouplingRegister>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "coupling_register")
+            .await?
+            .map(|(label, doc)| {
+                let parts: CouplingDoc = serde_json::from_value(doc)
+                    .map_err(|e| StoreError::Backend(format!("coupling_register doc: {e}")))?;
+                Ok(CouplingRegister {
+                    label,
+                    edges: parts.edges,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: CouplingRegister,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let doc = serde_json::to_value(CouplingDoc {
+            edges: register.edges,
+        })
+        .map_err(|e| StoreError::Backend(format!("coupling_register doc: {e}")))?;
+        self.put_document(scope.org, vessel, "coupling_register", &register.label, doc)
+            .await
+    }
+
+    async fn clear_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "coupling_register")
+            .await
+    }
+
+    async fn coupling_types(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<crate::model::CouplingTypeSummary>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let rows = sqlx::query(
+            "SELECT coupling_type_id, code, propagates, default_max_hops
+               FROM coupling_type
+              ORDER BY code",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let hops: i32 = row.get("default_max_hops");
+                crate::model::CouplingTypeSummary {
+                    id: CouplingTypeId::from_uuid(row.get("coupling_type_id")),
+                    code: row.get("code"),
+                    propagates: row.get("propagates"),
+                    max_reach: u8::try_from(hops).unwrap_or(1),
+                }
+            })
+            .collect())
+    }
+
     async fn manning_book(
         &self,
         scope: &TenantScope,
@@ -1101,6 +1250,10 @@ impl Repositories for PgStore {
         vessel: VesselId,
     ) -> Result<AdjacencyGraph, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
+        if let Some(reg) = self.coupling_register(scope, vessel).await? {
+            let types = self.coupling_types(scope, vessel).await?;
+            return crate::memory::register_graph(&reg, &types);
+        }
         let mut tx = self.with_tenant(scope.org).await?;
         // Class template minus this hull's suppressions. 'added'/'modified'
         // overrides follow once an authoring surface exists to create them;

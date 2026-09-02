@@ -149,6 +149,26 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::revert_geometry),
         )
         .route(
+            "/api/vessels/:id/register",
+            get(handlers::get_register).post(handlers::import_register),
+        )
+        .route(
+            "/api/vessels/:id/register/revert",
+            post(handlers::revert_register),
+        )
+        .route(
+            "/api/vessels/:id/couplings",
+            get(handlers::get_couplings).post(handlers::import_couplings),
+        )
+        .route(
+            "/api/vessels/:id/couplings/revert",
+            post(handlers::revert_couplings),
+        )
+        .route(
+            "/api/vessels/:id/hazards/import",
+            post(handlers::import_hazard_log),
+        )
+        .route(
             "/api/vessels/:id/schedule-of-record",
             post(handlers::import_schedule),
         )

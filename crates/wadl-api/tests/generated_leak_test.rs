@@ -602,6 +602,125 @@ async fn leak_post_api_vessels_id_geometry_revert() {
 }
 
 #[tokio::test]
+async fn leak_get_api_vessels_id_register() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/register"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("GET", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant GET /api/vessels/:id/register must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_register() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/register"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","decks":[{"code":"3rd","label":"Third Deck","ordinal":3}],"spaces":[{"compartment_no":"3-148-2-E","name":"leak","deck_code":"3rd","zone":"Z5","category":"E"}]}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/register must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_register_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/register/revert"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/register/revert must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_get_api_vessels_id_couplings() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/couplings"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("GET", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant GET /api/vessels/:id/couplings must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_couplings() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/couplings"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","edges":[{"from":"3-148-2-E","to":"3-160-2-Q","code":"deck_penetration"}]}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/couplings must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_couplings_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/couplings/revert"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/couplings/revert must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_hazards_import() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/hazards/import"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","rows":[{"compartment":"3-148-2-E","kind":"stop_work","label":"leak"}]}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/hazards/import must be 404"
+    );
+}
+
+#[tokio::test]
 async fn leak_post_api_vessels_id_schedule_of_record() {
     let (_, w) = wadl_api::demo_app();
     let org = w.yard_org.as_uuid().to_string();
@@ -714,5 +833,5 @@ async fn control_in_tenant_get_vessel_is_ok() {
 
 #[test]
 fn every_scoped_id_route_has_a_leak_test() {
-    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 36);
+    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 43);
 }

@@ -321,6 +321,10 @@ pub struct InMemoryStore {
     /// is the same shape the PostgreSQL store gives it (`cleared_at` set,
     /// nothing deleted). A `Vec` because the whole hull carries a handful.
     cleared_hazards: std::sync::Mutex<Vec<HazardClearance>>,
+    /// The hull's own compartment register, once ingested — replaces the seed.
+    compartment_register: std::sync::RwLock<BTreeMap<VesselId, CompartmentRegister>>,
+    /// The hull's own coupling register, once ingested — replaces the seed.
+    coupling_register: std::sync::RwLock<BTreeMap<VesselId, CouplingRegister>>,
     /// Field conditions raised through the API after boot, alongside the
     /// seeded rows: the same fact shape, owned strings, and the same
     /// clearance list applies to them.
@@ -406,6 +410,209 @@ pub struct GeometryRegister {
     pub spaces: Vec<crate::model::SpaceGeometrySummary>,
     /// Zero or more coverage bands per deck.
     pub decks: Vec<crate::model::DeckCoverageSummary>,
+}
+
+/// An ingested compartment register: the hull's own decks and spaces.
+///
+/// Once one is set for a hull it IS the register — the seeded rows stop being
+/// served — because a yard onboarding its ship is replacing a demo, not
+/// annotating it. Reverting restores the seed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompartmentRegister {
+    /// Where it came from, e.g. `CVN73-compartment-list.csv`.
+    pub label: String,
+    /// The decks, with the ordinal "directly above" is read from.
+    pub decks: Vec<crate::model::RegisterDeckSummary>,
+    /// One row per space.
+    pub spaces: Vec<crate::model::RegisterSpaceSummary>,
+}
+
+/// An ingested coupling register: the physical paths a hazard can travel.
+///
+/// Same replacement semantics as the compartment register: when one is set,
+/// the cascade walks these edges and only these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CouplingRegister {
+    /// Where it came from.
+    pub label: String,
+    /// Directed rows; `symmetric` rows are expanded when the graph is built.
+    pub edges: Vec<crate::model::CouplingRowSummary>,
+}
+
+/// The coupling types a hull's rules bind to, by code: the traversal's type
+/// id, what the coupling carries, and how far it reaches. The seed's own
+/// edges use the same ids, so an ingested register and the seed agree.
+const COUPLING_TYPES: &[(&str, u128, &[Propagation], u8)] = &[
+    (
+        "deck_penetration",
+        0x01,
+        &[Propagation::Heat, Propagation::Vapour],
+        1,
+    ),
+    (
+        "shared_bulkhead",
+        0x02,
+        &[Propagation::Heat, Propagation::Vapour],
+        2,
+    ),
+    ("exhaust_trunk", 0x03, &[Propagation::Vapour], 3),
+    ("electrical_bus", 0x04, &[Propagation::Energy], 1),
+];
+
+/// A propagation's name as documents and the database spell it.
+#[must_use]
+pub const fn propagation_name(p: Propagation) -> &'static str {
+    match p {
+        Propagation::Heat => "heat",
+        Propagation::Vapour => "vapour",
+        Propagation::Energy => "energy",
+        Propagation::Load => "load",
+        Propagation::Egress => "egress",
+    }
+}
+
+/// The inverse of [`propagation_name`].
+///
+/// # Errors
+/// [`StoreError::Backend`] for a name the engine does not know.
+pub fn propagation_from_name(raw: &str) -> Result<Propagation, StoreError> {
+    match raw {
+        "heat" => Ok(Propagation::Heat),
+        "vapour" => Ok(Propagation::Vapour),
+        "energy" => Ok(Propagation::Energy),
+        "load" => Ok(Propagation::Load),
+        "egress" => Ok(Propagation::Egress),
+        other => Err(StoreError::Backend(format!(
+            "unknown propagation {other:?}"
+        ))),
+    }
+}
+
+/// The demo store's coupling types, as the trait serves them.
+#[must_use]
+pub fn seeded_coupling_types() -> Vec<crate::model::CouplingTypeSummary> {
+    COUPLING_TYPES
+        .iter()
+        .map(
+            |(code, id_n, propagates, reach)| crate::model::CouplingTypeSummary {
+                id: CouplingTypeId::from_uuid(id(*id_n)),
+                code: (*code).to_owned(),
+                propagates: propagates
+                    .iter()
+                    .map(|p| propagation_name(*p).to_owned())
+                    .collect(),
+                max_reach: *reach,
+            },
+        )
+        .collect()
+}
+
+/// The register's spaces as the API serves them. Shared by both stores so an
+/// ingested register reads the same whichever backend holds it.
+#[must_use]
+pub fn register_compartments(reg: &CompartmentRegister) -> Vec<CompartmentSummary> {
+    let ordinals: BTreeMap<&str, i32> = reg
+        .decks
+        .iter()
+        .map(|d| (d.code.as_str(), d.ordinal))
+        .collect();
+    let mut rows: Vec<CompartmentSummary> = reg
+        .spaces
+        .iter()
+        .map(|s| {
+            let compartment_no = CompartmentNo::new(s.compartment_no.as_str());
+            let usn = compartment_no.parse_usn();
+            let authored = s.frame.is_some();
+            CompartmentSummary {
+                frame: s.frame.or_else(|| usn.as_ref().map(|u| u.frame.get())),
+                fwd_frame: None,
+                aft_frame: None,
+                side: s.side.clone().unwrap_or_else(|| {
+                    usn.as_ref().map_or_else(
+                        || "unknown".to_owned(),
+                        |u| format!("{:?}", u.side).to_lowercase(),
+                    )
+                }),
+                geometry_source: if authored {
+                    "register"
+                } else if usn.is_some() {
+                    "parsed"
+                } else {
+                    "unknown"
+                }
+                .to_owned(),
+                compartment_no,
+                name: s.name.clone(),
+                deck_code: s.deck_code.clone(),
+                deck_ordinal: ordinals.get(s.deck_code.as_str()).copied().unwrap_or(0),
+                zone: s.zone.clone(),
+                category: s.category.clone(),
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        a.deck_ordinal
+            .cmp(&b.deck_ordinal)
+            .then_with(|| a.compartment_no.cmp(&b.compartment_no))
+    });
+    rows
+}
+
+/// The register's decks as the API serves them, with the space count.
+#[must_use]
+pub fn register_decks(reg: &CompartmentRegister) -> Vec<DeckSummary> {
+    let mut decks: Vec<DeckSummary> = reg
+        .decks
+        .iter()
+        .map(|d| DeckSummary {
+            code: d.code.clone(),
+            label: d.label.clone(),
+            ordinal: d.ordinal,
+            compartment_count: reg.spaces.iter().filter(|s| s.deck_code == d.code).count(),
+        })
+        .collect();
+    decks.sort_by_key(|d| d.ordinal);
+    decks
+}
+
+/// The coupling register as the engine's graph: every row resolved against
+/// the hull's coupling types, symmetric rows stored both ways.
+///
+/// # Errors
+/// [`StoreError::Backend`] when a row names a coupling type the hull does not
+/// have — the door refuses that before storing, so this is a consistency
+/// check, not a validation surface.
+pub fn register_graph(
+    reg: &CouplingRegister,
+    types: &[crate::model::CouplingTypeSummary],
+) -> Result<AdjacencyGraph, StoreError> {
+    let mut edges = Vec::with_capacity(reg.edges.len() * 2);
+    for row in &reg.edges {
+        let ty = types.iter().find(|t| t.code == row.code).ok_or_else(|| {
+            StoreError::Backend(format!(
+                "coupling register names type {:?}, which this hull does not have",
+                row.code
+            ))
+        })?;
+        let propagates = ty
+            .propagates
+            .iter()
+            .map(|p| propagation_from_name(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let edge = |from: &str, to: &str| CouplingEdge {
+            from: CompartmentNo::new(from),
+            to: CompartmentNo::new(to),
+            coupling_type: ty.id,
+            code: CouplingCode::new(row.code.as_str()),
+            propagates: propagates.clone(),
+            max_reach: HopDepth::new(ty.max_reach),
+        };
+        edges.push(edge(&row.from, &row.to));
+        if row.symmetric {
+            edges.push(edge(&row.to, &row.from));
+        }
+    }
+    Ok(AdjacencyGraph::new(edges))
 }
 
 /// An ingested manning book: the crews the yard actually has, per trade.
@@ -517,6 +724,8 @@ impl InMemoryStore {
             manning_book: std::sync::RwLock::new(BTreeMap::new()),
             geometry: std::sync::RwLock::new(BTreeMap::new()),
             cleared_hazards: std::sync::Mutex::new(Vec::new()),
+            compartment_register: std::sync::RwLock::new(BTreeMap::new()),
+            coupling_register: std::sync::RwLock::new(BTreeMap::new()),
             raised_hazards: std::sync::Mutex::new(Vec::new()),
         };
         (store, world)
@@ -1622,6 +1831,15 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<Vec<CompartmentSummary>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
+        // The yard's own register, once ingested, IS the register.
+        if let Some(reg) = self
+            .compartment_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+        {
+            return Ok(register_compartments(reg));
+        }
         Ok(self
             .compartments
             .iter()
@@ -1866,6 +2084,97 @@ impl Repositories for InMemoryStore {
         Ok(())
     }
 
+    async fn compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<CompartmentRegister>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .compartment_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned())
+    }
+
+    async fn set_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: CompartmentRegister,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.compartment_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, register);
+        Ok(())
+    }
+
+    async fn clear_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.compartment_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<CouplingRegister>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .coupling_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned())
+    }
+
+    async fn set_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: CouplingRegister,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.coupling_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, register);
+        Ok(())
+    }
+
+    async fn clear_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.coupling_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn coupling_types(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<crate::model::CouplingTypeSummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(seeded_coupling_types())
+    }
+
     async fn manning_book(
         &self,
         scope: &TenantScope,
@@ -2071,6 +2380,14 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<Vec<DeckSummary>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
+        if let Some(reg) = self
+            .compartment_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+        {
+            return Ok(register_decks(reg));
+        }
         // The deck register is the CLASS's, not a roll-up of whichever
         // compartments happen to be keyed. Deriving it from the register made a
         // deck disappear the moment nothing was keyed on it, which is wrong twice
@@ -2098,6 +2415,14 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<AdjacencyGraph, StoreError> {
         self.scoped_vessel(scope, vessel)?;
+        if let Some(reg) = self
+            .coupling_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+        {
+            return register_graph(reg, &seeded_coupling_types());
+        }
         Ok(AdjacencyGraph::new(
             self.couplings
                 .iter()

@@ -115,6 +115,34 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         ),
     ),
     ("POST", "/api/vessels/:id/geometry/revert", true, None),
+    ("GET", "/api/vessels/:id/register", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/register",
+        true,
+        Some(
+            r#"{"label":"leak test","decks":[{"code":"3rd","label":"Third Deck","ordinal":3}],"spaces":[{"compartment_no":"3-148-2-E","name":"leak","deck_code":"3rd","zone":"Z5","category":"E"}]}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/register/revert", true, None),
+    ("GET", "/api/vessels/:id/couplings", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/couplings",
+        true,
+        Some(
+            r#"{"label":"leak test","edges":[{"from":"3-148-2-E","to":"3-160-2-Q","code":"deck_penetration"}]}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/couplings/revert", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/hazards/import",
+        true,
+        Some(
+            r#"{"label":"leak test","rows":[{"compartment":"3-148-2-E","kind":"stop_work","label":"leak"}]}"#,
+        ),
+    ),
     (
         "POST",
         "/api/vessels/:id/schedule-of-record",

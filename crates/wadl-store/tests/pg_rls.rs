@@ -741,3 +741,110 @@ async fn a_raised_hazard_is_a_row_under_the_callers_org_and_clears_like_any_othe
         .iter()
         .any(|h| h.label == "SW-pg · transient stop-work"));
 }
+
+#[tokio::test]
+async fn the_ship_registers_round_trip_and_replace_the_seed() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN73);
+    store
+        .clear_compartment_register(&scope, hull)
+        .await
+        .unwrap();
+    store.clear_coupling_register(&scope, hull).await.unwrap();
+    let seeded_spaces = store.list_compartments(&scope, hull).await.unwrap().len();
+    let seeded_edges = store
+        .adjacency_graph(&scope, hull)
+        .await
+        .unwrap()
+        .edge_count();
+
+    store
+        .set_compartment_register(
+            &scope,
+            hull,
+            wadl_store::memory::CompartmentRegister {
+                label: "CVN73-compartment-list.csv".to_owned(),
+                decks: vec![wadl_store::model::RegisterDeckSummary {
+                    code: "3rd".to_owned(),
+                    label: "Third Deck".to_owned(),
+                    ordinal: 3,
+                }],
+                spaces: vec![wadl_store::model::RegisterSpaceSummary {
+                    compartment_no: "3-148-2-E".to_owned(),
+                    name: "Switchgear".to_owned(),
+                    deck_code: "3rd".to_owned(),
+                    zone: "Z5".to_owned(),
+                    category: "Electrical".to_owned(),
+                    frame: Some(148),
+                    side: Some("port".to_owned()),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let served = store.list_compartments(&scope, hull).await.unwrap();
+    assert_eq!(served.len(), 1, "the ingested register replaces the seed");
+    assert_eq!(
+        served.first().map(|c| c.geometry_source.as_str()),
+        Some("register")
+    );
+    assert_eq!(store.list_decks(&scope, hull).await.unwrap().len(), 1);
+
+    let types = store.coupling_types(&scope, hull).await.unwrap();
+    assert!(
+        types.iter().any(|t| t.code == "deck_penetration"),
+        "{types:?}"
+    );
+    store
+        .set_coupling_register(
+            &scope,
+            hull,
+            wadl_store::memory::CouplingRegister {
+                label: "couplings.csv".to_owned(),
+                edges: vec![wadl_store::model::CouplingRowSummary {
+                    from: "3-148-2-E".to_owned(),
+                    to: "3-160-2-Q".to_owned(),
+                    code: "deck_penetration".to_owned(),
+                    symmetric: true,
+                    provenance: "authored".to_owned(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .adjacency_graph(&scope, hull)
+            .await
+            .unwrap()
+            .edge_count(),
+        2,
+        "a symmetric row is two edges"
+    );
+
+    // Neither document leaks to the other tenant.
+    let navy = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.compartment_register(&navy, hull).await,
+        Err(StoreError::NotFound)
+    ));
+
+    store
+        .clear_compartment_register(&scope, hull)
+        .await
+        .unwrap();
+    store.clear_coupling_register(&scope, hull).await.unwrap();
+    assert_eq!(
+        store.list_compartments(&scope, hull).await.unwrap().len(),
+        seeded_spaces
+    );
+    assert_eq!(
+        store
+            .adjacency_graph(&scope, hull)
+            .await
+            .unwrap()
+            .edge_count(),
+        seeded_edges
+    );
+}

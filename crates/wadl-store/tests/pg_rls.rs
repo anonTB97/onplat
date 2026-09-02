@@ -47,7 +47,9 @@ use wadl_store::TenantScope;
 /// "not cleared at all" — the pre-time-aware contract these assertions were
 /// written against.
 fn far_future() -> Timestamp {
-    Timestamp::from_epoch_millis(i64::MAX / 4)
+    // 2100-01-01T00:00:00Z: past every instant these tests stamp, and inside
+    // the range a timestamptz bind accepts (an i64::MAX-scale instant is not).
+    Timestamp::from_epoch_millis(4_102_444_800_000)
 }
 
 const YARD_ORG: u128 = 0x01;
@@ -675,4 +677,67 @@ async fn a_clearance_closes_the_row_and_respects_both_gates() {
         .execute(&pool)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_raised_hazard_is_a_row_under_the_callers_org_and_clears_like_any_other() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN73);
+    let raised_at = 4_070_908_800_000; // 2099-01-01Z — unique to this test
+    let raised = store
+        .raise_hazard(
+            &scope,
+            hull,
+            "2-152-0-Q",
+            wadl_engine::HazardKind::StopWork,
+            raised_at,
+            "SW-pg · transient stop-work",
+        )
+        .await
+        .unwrap();
+    assert_eq!(raised.origin.as_str(), "2-152-0-Q");
+
+    // Served live, under the caller's org, and not to the other tenant.
+    let live = store
+        .live_hazards(&scope, hull, far_future())
+        .await
+        .unwrap();
+    assert!(live
+        .iter()
+        .any(|h| h.label == "SW-pg · transient stop-work"));
+    let navy = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.live_hazards(&navy, hull, far_future()).await,
+        Err(StoreError::NotFound)
+    ));
+
+    // A read before it was raised still serves it (raising is the engine's
+    // `since` to judge); a clearance ends it from its own instant onward.
+    let cleared = store
+        .clear_hazard(
+            &scope,
+            hull,
+            "2-152-0-Q",
+            wadl_engine::HazardKind::StopWork,
+            "released in writing",
+            raised_at + 60_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.len(), 1);
+    let before = store
+        .live_hazards(&scope, hull, Timestamp::from_epoch_millis(raised_at + 1))
+        .await
+        .unwrap();
+    assert!(before
+        .iter()
+        .any(|h| h.label == "SW-pg · transient stop-work"));
+    let after = store
+        .live_hazards(&scope, hull, far_future())
+        .await
+        .unwrap();
+    assert!(!after
+        .iter()
+        .any(|h| h.label == "SW-pg · transient stop-work"));
 }

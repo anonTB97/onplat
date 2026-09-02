@@ -66,19 +66,28 @@ docs/adr/        Architecture decision records.
 scripts/dev.sh
 ```
 
-That builds and starts the API on `127.0.0.1:8080` (loopback only), waits until it
-is actually healthy, then starts the shell on `5173`. Open
-<http://localhost:5173>. Ctrl-C stops both. No database is needed — the demo runs
-on the seeded in-memory store.
+That builds the API in release (the demo hull is carrier-sized and the debug
+build is noticeably slower on it; `WADL_PROFILE=debug` keeps the fast compile),
+starts it on `127.0.0.1:8080` (loopback only), waits until `/health` answers,
+then starts the shell on `5173`. Open <http://localhost:5173>. Ctrl-C stops
+both. No database is needed — the demo runs on the in-memory store.
+
+The demo boots on the reference hull: the generated CVN-73 documents in
+`reference/cvn73` loaded through the same doors a yard would use, and the
+sample P6 export `reference/p6-sample/CVN73-PIA26-full.xer` as the schedule of
+record (476 spaces, 5,706 activities, six zones — `docs/zone-scheme.md`).
+`WADL_DEMO=seed` serves the small 24-space seed instead. A scripted,
+role-by-role walk over the hull is in `docs/demo-script.md`.
 
 **In a Codespace:** *Code ▾ → Codespaces → Create codespace*. The devcontainer
 pre-installs the toolchain, the wasm target and the shell's dependencies, so
 `scripts/dev.sh` is the only command you need; click the forwarded **5173** link
 in the Ports tab.
 
-Worth a look once it is up: **Deck Explorer** → Fourth Deck → `4-164-2-Q` for a
-decision trace; **Distributed Packages** for the stranded man-hours; and the hull
-dropdown → an *(unassigned)* hull to see the RBAC refusal.
+Worth a look once it is up: **Zone Manager** → **Deck Explorer** with Z4 in
+focus and the next-door strip; **Sequence Board** → *Not executable* →
+`A51350` → *Propose to P6*; **Conflicts & Risk** for the man-hours at risk;
+and the hull dropdown → an *(unassigned)* hull to see the RBAC refusal.
 
 ## Build and check
 

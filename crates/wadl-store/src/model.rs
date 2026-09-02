@@ -23,6 +23,21 @@ pub struct DeckSummary {
     pub compartment_count: usize,
 }
 
+/// The store's own health, as `/health` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StoreHealth {
+    /// `memory` or `postgresql`.
+    pub backend: String,
+    /// Whether a round trip to the store succeeded just now.
+    pub reachable: bool,
+    /// The latest migration applied, when the store has migrations.
+    pub schema_version: Option<String>,
+    /// The document shape version this build writes.
+    pub document_schema_version: u32,
+    /// Why the store is unreachable, when it is.
+    pub detail: Option<String>,
+}
+
 /// A hull as it appears in the portfolio and breadcrumb.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VesselSummary {

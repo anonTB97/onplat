@@ -26,6 +26,12 @@ pub trait Repositories: Send + Sync {
     /// The hulls visible to `scope`: in-tenant AND assigned.
     async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary>;
 
+    /// Whether the store can answer, and at which schema — what `/health`
+    /// reports. A database-backed store round-trips a query and reads the
+    /// migration it is at; the in-memory world is always reachable and says
+    /// so. Never a tenant read: health is answered before any identity is.
+    async fn health(&self) -> crate::model::StoreHealth;
+
     /// One hull, or [`StoreError::NotFound`] if it is out of tenant or not
     /// assigned. A hull in another tenant is `NotFound`, never "forbidden".
     ///

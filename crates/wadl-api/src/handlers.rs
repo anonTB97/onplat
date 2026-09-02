@@ -103,8 +103,28 @@ impl AsOf {
     }
 }
 
-pub(crate) async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok", "decision_support_only": true }))
+/// `GET /health` — whether this process can answer, and whether its store
+/// can. A load balancer reads the status code; an operator reads the body:
+/// which backend, whether a round trip just succeeded, the migration the
+/// database is at, and the document shape this build writes. Unreachable
+/// store → 503, so a pool that lost its database drops out of rotation
+/// instead of serving 500s to every screen.
+pub(crate) async fn health(State(state): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
+    let store = state.store.health().await;
+    let status = if store.reachable {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(json!({
+            "status": if store.reachable { "ok" } else { "degraded" },
+            "decision_support_only": true,
+            "store": store,
+            "now": state.clock.now(),
+        })),
+    )
 }
 
 pub(crate) async fn list_vessels(
@@ -850,6 +870,13 @@ struct MitigationInputs {
     orders: Vec<wadl_store::model::WorkOrderSummary>,
     packages: Vec<PackageWork>,
     stranded: wadl_store::model::StrandedReport,
+    /// The loads already priced, by instant. The planner asks for the hull's
+    /// loads once per subject it triages and once per instant a plan waits
+    /// to; on a carrier-sized register that was hundreds of full passes over
+    /// thousands of booked rows per read, all returning the same answer. A
+    /// mutex rather than a cell so the inputs stay `Send` across the awaits
+    /// that assemble them.
+    load_cache: std::sync::Mutex<std::collections::HashMap<i64, Vec<wadl_mitigate::SpaceLoad>>>,
 }
 
 impl MitigationInputs {
@@ -859,7 +886,17 @@ impl MitigationInputs {
     /// is evaluated at a future instant and must be priced there too — and because
     /// the hours have to come from the same [`booked_work`] every other board uses.
     fn loads(&self, at: Timestamp) -> Vec<wadl_mitigate::SpaceLoad> {
-        self.compartments
+        let key = at.epoch_millis();
+        if let Some(hit) = self
+            .load_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+        {
+            return hit;
+        }
+        let loads: Vec<wadl_mitigate::SpaceLoad> = self
+            .compartments
             .iter()
             .map(|c| wadl_mitigate::SpaceLoad {
                 booked: booked_work(
@@ -872,7 +909,11 @@ impl MitigationInputs {
                 .remaining,
                 compartment: c.compartment_no.clone(),
             })
-            .collect()
+            .collect();
+        if let Ok(mut cache) = self.load_cache.lock() {
+            cache.insert(key, loads.clone());
+        }
+        loads
     }
 
     fn contains(&self, compartment: &CompartmentNo) -> bool {
@@ -896,6 +937,7 @@ async fn mitigation_inputs(
         orders: booked_orders(state, scope, vessel).await?.0,
         packages: packages_with_footprints(state, scope, vessel).await?,
         stranded: state.store.stranded_hours(scope, vessel).await?,
+        load_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 

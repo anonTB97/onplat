@@ -547,8 +547,18 @@ impl PgStore {
         vessel: VesselId,
         kind: &str,
         label: &str,
-        doc: serde_json::Value,
+        mut doc: serde_json::Value,
     ) -> Result<(), StoreError> {
+        // Every stored document says which shape it was written in, so a
+        // later reader can tell a document written before a field existed
+        // from one written after — and refuse, or migrate, rather than guess.
+        // Readers ignore the key; it is for the operator and the next schema.
+        if let Some(obj) = doc.as_object_mut() {
+            obj.insert(
+                "schema_version".to_owned(),
+                serde_json::Value::from(crate::DOCUMENT_SCHEMA_VERSION),
+            );
+        }
         let mut tx = self.with_tenant(org).await?;
         sqlx::query(
             "INSERT INTO ingested_document (org_id, vessel_id, kind, label, doc)
@@ -685,6 +695,33 @@ impl PgStore {
 
 #[async_trait::async_trait]
 impl Repositories for PgStore {
+    async fn health(&self) -> crate::model::StoreHealth {
+        // One round trip, as the connecting role, outside any tenant scope:
+        // the migration the database is at is the answer, and reaching it
+        // proves the pool. Nothing tenant-owned is read.
+        let probe = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT max(version) FROM _sqlx_migrations WHERE success",
+        )
+        .fetch_one(self.pool())
+        .await;
+        match probe {
+            Ok(version) => crate::model::StoreHealth {
+                backend: "postgresql".to_owned(),
+                reachable: true,
+                schema_version: version.map(|v| v.to_string()),
+                document_schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+                detail: None,
+            },
+            Err(e) => crate::model::StoreHealth {
+                backend: "postgresql".to_owned(),
+                reachable: false,
+                schema_version: None,
+                document_schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+                detail: Some(e.to_string()),
+            },
+        }
+    }
+
     async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary> {
         // The trait's signature is infallible (the demo store cannot fail);
         // a backend failure here serves an empty portfolio rather than a lie.

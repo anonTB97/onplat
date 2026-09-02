@@ -146,6 +146,10 @@ export default function IssuesBoard({
   const [error, setError] = useState<string | null>(null);
   const [lens, setLens] = useState<LensId>("all");
   const [openOnly, setOpenOnly] = useState(false);
+  /** Rows rendered before the board asks: a carrier's board runs to hundreds
+   *  of issues, ranked worst first, and the first fifty are the shift's
+   *  work. The rest are counted and one click away. */
+  const [limit, setLimit] = useState(50);
   const [ackFor, setAckFor] = useState<string | null>(null);
   const [ackNote, setAckNote] = useState("");
   const [ackErr, setAckErr] = useState<string | null>(null);
@@ -233,7 +237,7 @@ export default function IssuesBoard({
       <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 8 }}>
       <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 860 }}>
         <tbody>
-          {shown.map((i, idx) => {
+          {shown.slice(0, limit).map((i, idx) => {
             const k = KIND[i.kind];
             const space = fixSpace(i);
             const done = answered(i);
@@ -348,6 +352,22 @@ export default function IssuesBoard({
               </tr>
             );
           })}
+          {shown.length > limit && (
+            <tr>
+              <td colSpan={6} style={{ padding: "8px 12px", fontSize: 11.5, color: C.dim, borderTop: `1px solid ${C.line}` }}>
+                <button
+                  onClick={() => setLimit((n) => n + 200)}
+                  title="Render the next two hundred rows. Every issue is already counted in the board's totals and the alert bell; only the table is paged."
+                  style={{ font: "inherit", fontSize: 11.5, cursor: "pointer", padding: "3px 10px", borderRadius: 5, color: C.accent, background: "transparent", border: `1px solid ${C.accent}55` }}
+                >
+                  Show {Math.min(200, shown.length - limit)} more
+                </button>
+                <span style={{ marginLeft: 10 }}>
+                  {limit} of {shown.length} rows rendered, worst first — the totals above count all of them.
+                </span>
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
       </div>

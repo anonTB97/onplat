@@ -1808,6 +1808,16 @@ fn schedule_edges_from(activities: &[ActivitySummary]) -> Vec<ScheduleEdgeSummar
 
 #[async_trait::async_trait]
 impl Repositories for InMemoryStore {
+    async fn health(&self) -> crate::model::StoreHealth {
+        crate::model::StoreHealth {
+            backend: "memory".to_owned(),
+            reachable: true,
+            schema_version: None,
+            document_schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+            detail: None,
+        }
+    }
+
     async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary> {
         self.vessels
             .iter()

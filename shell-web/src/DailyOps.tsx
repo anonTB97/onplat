@@ -73,6 +73,10 @@ function shiftWindow(asOfMs: number, shift: Shift): { start: number; end: number
   }
 }
 
+/** Rows a trade's column shows before it folds — the morning's read, with
+ *  the rest counted in the header and one click away. */
+const COLUMN_ROWS = 25;
+
 export default function DailyOps({
   identity,
   vesselId,
@@ -158,6 +162,8 @@ export default function DailyOps({
       win !== null && refusalOverlaps(a, win.start, win.end);
   }, [win]);
 
+  /** Trade columns the reader unfolded past COLUMN_ROWS. */
+  const [unfolded, setUnfolded] = useState<Set<string>>(new Set());
   // Per trade, heaviest slice first — the order a superintendent walks the
   // morning meeting in. In shift mode the weight is the shift's own hours.
   const byTrade = useMemo(() => {
@@ -372,7 +378,7 @@ export default function DailyOps({
               </span>
             </header>
             <div>
-              {g.list.map((a) => {
+              {(unfolded.has(g.trade) ? g.list : g.list.slice(0, COLUMN_ROWS)).map((a) => {
                 const heldNow = a.compartment_no !== null && refused.has(a.compartment_no);
                 const doomed = a.executability.verdict === "not_executable";
                 return (
@@ -462,6 +468,18 @@ export default function DailyOps({
                   </div>
                 );
               })}
+              {/* The fold: a trade with two hundred activities in the shift is
+                  counted in the header and shown in full on request; the
+                  first rows — largest remaining first — are the morning. */}
+              {!unfolded.has(g.trade) && g.list.length > COLUMN_ROWS && (
+                <button
+                  onClick={() => setUnfolded((s) => new Set(s).add(g.trade))}
+                  title="Show every activity in this trade's column. The header's counts and hours already cover all of them."
+                  style={{ width: "100%", textAlign: "left", font: "inherit", fontSize: 11, cursor: "pointer", padding: "7px 12px", color: C.accent, background: "transparent", border: "none", borderTop: `1px solid ${C.hairline}` }}
+                >
+                  + {g.list.length - COLUMN_ROWS} more in {g.trade} — show all
+                </button>
+              )}
             </div>
           </section>
         ))}

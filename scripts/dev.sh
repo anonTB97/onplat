@@ -46,15 +46,31 @@ trap cleanup EXIT INT TERM
 
 echo "→ building the API"
 echo "  (first build is cold and takes a few minutes)"
-cargo build -q -p wadl-api --bin serve
+# A release build: the demo hull is carrier-sized (docs/zone-scheme.md), and
+# the issue board over 5,700 activities is a two-second read in debug and a
+# third of a second in release. WADL_PROFILE=debug keeps the fast compile.
+profile="${WADL_PROFILE:-release}"
+if [[ "$profile" == "release" ]]; then
+  cargo build -q --release -p wadl-api --bin serve
+else
+  cargo build -q -p wadl-api --bin serve
+fi
 
 # Run the binary directly rather than through `cargo run`. cargo would sit
 # between us and the server as a parent that does not forward signals, so
 # shutdown would depend on walking its children; owning the pid makes teardown
 # immediate and unambiguous.
-serve_bin="${CARGO_TARGET_DIR:-target}/debug/serve"
+serve_bin="${CARGO_TARGET_DIR:-target}/${profile}/serve"
+# The demo boots on the reference hull — the documents in reference/cvn73
+# through the doors' own paths, and the sample P6 export as the schedule of
+# record. WADL_DEMO=seed serves the 24-space seed instead.
+demo_env=()
+if [[ "${WADL_DEMO:-hull}" != "seed" ]]; then
+  demo_env=(WADL_DEMO_DOCS=reference/cvn73 WADL_SCHEDULE_XER=reference/p6-sample/CVN73-PIA26-full.xer)
+  echo "→ demo hull: reference/cvn73 + CVN73-PIA26-full.xer (WADL_DEMO=seed for the seed alone)"
+fi
 echo "→ starting the API on 127.0.0.1:${API_PORT}"
-"$serve_bin" &
+env "${demo_env[@]}" "$serve_bin" &
 api_pid=$!
 
 # Wait for the API to answer rather than guessing at a sleep: if the shell comes

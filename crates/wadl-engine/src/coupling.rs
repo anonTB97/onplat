@@ -111,21 +111,47 @@ impl From<&str> for CouplingCode {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AdjacencyGraph {
     edges: Vec<CouplingEdge>,
+    /// Edge positions by source compartment, built on first use and never
+    /// serialised: a traversal on a carrier-sized graph (hundreds of spaces,
+    /// thousands of edges) walked from every live hazard for every space and
+    /// every activity was scanning the whole edge list at every hop. The
+    /// index makes a hop cost what a hop should — its own out-edges.
+    #[serde(skip)]
+    by_from: std::sync::OnceLock<std::collections::HashMap<CompartmentNo, Vec<usize>>>,
 }
 
 impl AdjacencyGraph {
     /// Builds a graph from directed edges.
     #[must_use]
     pub fn new(edges: Vec<CouplingEdge>) -> Self {
-        Self { edges }
+        Self {
+            edges,
+            by_from: std::sync::OnceLock::new(),
+        }
     }
 
-    /// All edges leaving `from`.
+    fn index(&self) -> &std::collections::HashMap<CompartmentNo, Vec<usize>> {
+        self.by_from.get_or_init(|| {
+            let mut map: std::collections::HashMap<CompartmentNo, Vec<usize>> =
+                std::collections::HashMap::new();
+            for (i, e) in self.edges.iter().enumerate() {
+                map.entry(e.from.clone()).or_default().push(i);
+            }
+            map
+        })
+    }
+
+    /// All edges leaving `from`, in authored order.
     pub fn out_edges<'a>(
         &'a self,
         from: &'a CompartmentNo,
     ) -> impl Iterator<Item = &'a CouplingEdge> + 'a {
-        self.edges.iter().filter(move |e| &e.from == from)
+        self.index()
+            .get(from)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|&i| self.edges.get(i))
     }
 
     /// Total edge count.

@@ -188,6 +188,8 @@ export const ICONS: Record<string, React.ReactNode> = {
   guide: ic("M12 5c-2-1.4-4.5-2-7-2v16c2.5 0 5 .6 7 2 2-1.4 4.5-2 7-2V3c-2.5 0-5 .6-7 2z|M12 5v16"),
   // A chained record: the page, and the links down its spine.
   ledger: ic("M6 3h12v18H6z|M10 8h5|M10 12h5|M10 16h3|M8 6v0.01|M8 10v0.01|M8 14v0.01|M8 18v0.01"),
+  // A printed sheet with a folded corner: the cut a person takes away.
+  reports: ic("M7 3h7l5 5v13H7z|M14 3v5h5|M9.5 12h5|M9.5 15.5h5|M9.5 19h3"),
   // A database cylinder: the documents the screens are built from.
   sources: ic("M4 6.5c0-1.4 3.6-2.5 8-2.5s8 1.1 8 2.5S16.4 9 12 9 4 7.9 4 6.5z|M4 6.5v11c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-11|M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5"),
 };

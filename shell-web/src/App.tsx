@@ -36,6 +36,7 @@ import CascadeBoard from "./CascadeBoard";
 import SourcesBoard from "./SourcesBoard";
 import LedgerBoard from "./LedgerBoard";
 import LeverageBoard from "./LeverageBoard";
+import Reports from "./Reports";
 import SequenceBoard from "./SequenceBoard";
 import { fmtInstant, isProjection, TimeControl, type Horizon } from "./TimeControl";
 import WorkOrders from "./WorkOrders";
@@ -60,7 +61,7 @@ const MODULES: ModuleDef[] = [
   { group: "Data", label: "Data Sources", id: "sources", icon: "sources", built: true },
   { group: "", label: "Portfolio", id: "portfolio", icon: "portfolio", built: true },
   { group: "Record", label: "Decisions Ledger", id: "ledger", icon: "ledger", built: true },
-  { group: "", label: "Reports", id: "placeholder", icon: "ledger", built: false },
+  { group: "", label: "Reports", id: "reports", icon: "reports", built: true },
   { group: "Help", label: "Field Guide", id: "guide", icon: "guide", built: true },
 ];
 
@@ -541,6 +542,20 @@ export default function App() {
               identity={DEMO_IDENTITY}
               vesselId={selected}
               hullLabel={hullLabel}
+              onOpenSpace={jump}
+            />
+          )}
+
+          {!error && selected && module.id === "reports" && (
+            <Reports
+              identity={DEMO_IDENTITY}
+              vesselId={selected}
+              hullLabel={hullLabel}
+              asOf={asOf}
+              spaces={rows}
+              issues={issues}
+              verdictsOk={outOfScope ? null : verdictsOk}
+              role={persona.name}
               onOpenSpace={jump}
             />
           )}

@@ -60,7 +60,8 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
         kicker="Field Guide"
         title="How to run this tool"
         stats={[
-          { value: "3", label: "import doors", title: "Schedule (P6 XER), zone chart (CSV), budget book (CSV) — each with a dry run, a confirm, and a revert." },
+          { value: "5", label: "import doors", title: "Schedule (P6 XER), zone chart, budget book, manning book, geometry register (CSV) — each with a dry run, a confirm, and a revert." },
+          { value: "5", label: "reports", title: "Shift sheet, zone day sheet, compartment card, conflict log, field-condition register — dated cuts that print and export." },
           { value: "4", label: "location grades", title: "Authored · derived (≈) · WBS zone hint · unlocated. Guessing is allowed because it is graded and reported; guessing silently is forbidden." },
           { value: "1", label: "ledger", title: "Every decision a planner records lands in one tamper-evident, hash-chained ledger." },
         ]}

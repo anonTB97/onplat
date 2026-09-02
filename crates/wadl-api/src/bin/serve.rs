@@ -19,7 +19,12 @@
 //!   sets this, behind whatever terminates TLS.
 //! * `WADL_STATIC_DIR` — a built `shell-web/dist` to serve as the site; unset
 //!   means API-only (development, where vite serves the shell).
-//! * `WADL_SCHEDULE_XER` — a P6 export to load as the schedule of record.
+//! * `WADL_DEMO_DOCS` — a directory of the hull's documents (compartment
+//!   register, zone chart, geometry, couplings, field-condition log, and a
+//!   `*.xer`) to load at boot through the doors' own paths; the served hull
+//!   IS the documents. `reference/cvn73` is the shipped one.
+//! * `WADL_SCHEDULE_XER` — a P6 export to load as the schedule of record
+//!   (overrides any `*.xer` in `WADL_DEMO_DOCS`).
 //! * `WADL_MAX_IN_FLIGHT`, `WADL_REQUEST_TIMEOUT_SECS` — overload limits;
 //!   defaults in [`wadl_api::hardening::Limits`].
 //! * `WADL_PROXY_KEY` — arms proxy-asserted identity: requests must carry a
@@ -70,12 +75,65 @@ async fn build_store(
     }
 
     let (store, world) = InMemoryStore::demo_at(clock.now());
+    // `WADL_DEMO_DOCS=<dir>` loads the hull's documents — compartment
+    // register, zone chart, geometry, couplings, the morning's log — through
+    // the same paths the doors use, so the served hull IS the documents and
+    // the 24-space seed is only what stands in when a document is absent.
+    // A `*.xer` in the directory is the schedule of record unless
+    // `WADL_SCHEDULE_XER` names one explicitly.
+    let mut xer_path = std::env::var("WADL_SCHEDULE_XER").ok();
+    if let Ok(dir) = std::env::var("WADL_DEMO_DOCS") {
+        let dir = std::path::PathBuf::from(&dir);
+        let loaded = wadl_api::documents::load_demo_docs(
+            &store,
+            &world.yard_scope(),
+            world.cvn73,
+            &dir,
+            clock.now().epoch_millis(),
+        )
+        .await
+        .map_err(|e| {
+            eprintln!("WADL_DEMO_DOCS {} rejected: {e}", dir.display());
+            std::io::Error::other("demo documents rejected")
+        })?;
+        println!("demo documents from {}:", dir.display());
+        if let Some((name, decks, spaces)) = &loaded.register {
+            println!("  register:            {name} — {spaces} spaces on {decks} decks");
+        }
+        if let Some((name, blocks)) = &loaded.zones {
+            println!("  zone chart:          {name} — {blocks} blocks");
+        }
+        if let Some((name, spaces, bands)) = &loaded.geometry {
+            println!("  geometry:            {name} — {spaces} surveyed, {bands} deck bands");
+        }
+        if let Some((name, authored, derived)) = &loaded.couplings {
+            println!("  couplings:           {name} — {authored} authored, {derived} derived");
+        }
+        if let Some((name, raised)) = &loaded.hazards {
+            println!("  field conditions:    {name} — {raised} raised");
+        }
+        if xer_path.is_none() {
+            let mut xers: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.filter_map(Result::ok)
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().is_some_and(|x| x == "xer"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            xers.sort();
+            xer_path = xers
+                .into_iter()
+                .next()
+                .map(|p| p.to_string_lossy().into_owned());
+        }
+    }
     // `WADL_SCHEDULE_XER=<path>` loads a real P6 export as the in-focus hull's
     // schedule of record: the register, Daily Ops, executability and the issue
     // board all serve the export instead of the generated demo rows, and the
     // reconciliation report starts saying what the export does not cover. This
     // is the seam the generator was built to survive, demonstrable end to end.
-    if let Ok(path) = std::env::var("WADL_SCHEDULE_XER") {
+    if let Some(path) = xer_path {
         let label = std::path::Path::new(&path)
             .file_name()
             .map_or_else(|| path.clone(), |f| f.to_string_lossy().into_owned());

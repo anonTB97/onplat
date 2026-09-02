@@ -21,6 +21,7 @@
 )]
 
 pub mod auth;
+pub mod documents;
 mod error;
 mod handlers;
 pub mod hardening;

@@ -33,42 +33,45 @@ AV_START = datetime(2026, 7, 27, 6, 0)
 AV_END = datetime(2027, 1, 23, 18, 0)
 DATA_DATE = datetime(2026, 8, 10, 6, 0)
 
-# The hull's compartment register (compartment, zone, name) — the crosswalk
-# the yard actually holds. Mirrors the demo store's 24 spaces.
-SPACES = [
-    ("1-136-0-Q", "Z4", "Hangar Bay 2"),
-    ("3-185-0-L", "Z7", "CPO Living Space"),
-    ("4-102-2-E", "Z2", "Switchboard Room No. 1"),
-    ("4-110-2-W", "Z3", "Reserve Feed Water Tank"),
-    ("4-120-4-Q", "Z3", "Fan Room"),
-    ("4-141-0-C", "Z5", "Aft IC & Gyro Room"),
-    ("4-149-2-Q", "Z5", "Forced Draft Blower Room No. 3"),
-    ("2-160-2-Q", "Z6", "Uptake Space No. 3"),
-    ("3-156-2-Q", "Z6", "Auxiliary Machinery Room No. 4"),
-    ("3-160-2-Q", "Z6", "Passage & Trunk"),
-    ("3-164-2-Q", "Z6", "Ship's Store"),
-    ("4-160-2-Q", "Z6", "Pump Room No. 2"),
-    ("4-164-2-Q", "Z6", "Cable Trunk & IC Space"),
-    ("3-152-0-Q", "Z6", "Cableway Trunk Zone 3 overhead"),
-    ("3-184-0-Q", "Z7", "AC Plant No. 2 Machinery Room"),
-    ("1-160-0-Q", "Z6", "Hangar Bay 3"),
-    ("2-152-0-Q", "Z6", "Scullery"),
-    ("2-160-1-Q", "Z6", "Mess Decks"),
-    ("2-176-0-Q", "Z7", "Wardroom Terminal Space"),
-    ("3-140-0-Q", "Z5", "Cableway Trunk Fr 140"),
-    ("3-148-0-L", "Z5", "Chief Petty Officer Berthing"),
-    ("3-148-2-E", "Z5", "Switchgear Room No. 2"),
-    ("3-172-0-M", "Z7", "AC Plant No. 2"),
-    ("3-192-2-E", "Z7", "IC Terminal Room"),
-]
+# The hull's compartment register — the crosswalk the yard actually holds —
+# read from the generated document so the schedule locates to the spaces the
+# hull serves (tools/gen_cvn73_hull.py, docs/zone-scheme.md). Each entry is
+# (compartment, zone, name, category); the category sets how much work a
+# space attracts and which systems it attracts.
+REGISTER = Path(__file__).resolve().parent.parent / "reference/cvn73/CVN73-register.csv"
+SPACES = []
+for line in REGISTER.read_text().splitlines():
+    if not line or line.startswith("#"):
+        continue
+    cols = line.split(",")
+    if cols[0] == "space":
+        SPACES.append((cols[1], cols[4], cols[2], cols[5]))
 
 ZONES = {
-    "Z2": "Zone 2 — Forward Electrical & Stores",
-    "Z3": "Zone 3 — Forward Auxiliaries",
-    "Z4": "Zone 4 — Hangar & Midships",
-    "Z5": "Zone 5 — Aft Auxiliaries & Berthing",
-    "Z6": "Zone 6 — Aft Machinery & Mess",
-    "Z7": "Zone 7 — Aft Living & Plants",
+    "Z1": "Zone 1 — Flight Deck & Island",
+    "Z2": "Zone 2 — Hangar & Gallery",
+    "Z3": "Zone 3 — Forward Below-Decks",
+    "Z4": "Zone 4 — Propulsion Plant & Midships",
+    "Z5": "Zone 5 — Aft Below-Decks",
+    "Z6": "Zone 6 — Tanks, Voids & Inner Bottom",
+}
+
+# How many work chains a space attracts and which systems, by category. A
+# machinery room in a PIA carries a dozen jobs; a void carries a tank entry
+# and a coat. Weights index into SYSTEMS by SWLIN.
+CATEGORY_PROFILE = {
+    "Machinery / electrical": ((3, 6), {"560": 4, "505": 3, "300": 2, "512": 2, "130": 1, "631": 1, "508": 1}),
+    "Machinery / operational": ((2, 5), {"560": 3, "505": 2, "300": 2, "130": 2, "631": 1, "512": 1}),
+    "Electrical": ((2, 4), {"300": 5, "430": 2, "512": 1, "631": 1}),
+    "Reactor plant (restricted)": ((1, 3), {"560": 2, "505": 2, "300": 1, "130": 1}),
+    "Living": ((1, 3), {"631": 3, "512": 2, "300": 1, "430": 1, "508": 1}),
+    "Aviation": ((1, 4), {"130": 3, "631": 2, "560": 2, "505": 1, "300": 1}),
+    "Command & surveillance": ((1, 2), {"430": 3, "300": 2, "512": 1}),
+    "Stowage": ((0, 2), {"631": 3, "130": 1, "512": 1}),
+    "Magazine": ((1, 2), {"631": 2, "512": 1, "300": 1, "130": 1}),
+    "Passage / trunk": ((0, 2), {"631": 2, "508": 2, "512": 1, "300": 1}),
+    "Tanks & voids": ((1, 2), {"631": 4, "130": 2, "505": 1}),
+    "Fuel / JP-5": ((1, 3), {"505": 3, "631": 2, "130": 1, "560": 1}),
 }
 
 # Trades: (rsrc_id, short_name, long name, calendar)
@@ -137,8 +140,8 @@ ZONE_SERVICES = [
 # The availability's phase waves, as (offset-days-from-start, spread-days).
 WAVES = [(0, 25), (14, 45), (45, 70), (95, 60), (130, 45)]
 
-SEEDED_WI = {"Z2": "WI-1905", "Z3": "WI-3318", "Z4": "WI-4471",
-             "Z5": "WI-3905", "Z6": "WI-5571", "Z7": "WI-3402"}
+SEEDED_WI = {"Z1": "WI-4471", "Z2": "WI-1905", "Z3": "WI-3318",
+             "Z4": "WI-3905", "Z5": "WI-5571", "Z6": "WI-3402"}
 
 lines = []
 task_rows = []
@@ -249,9 +252,13 @@ def wave_window(phase, dur_days):
 
 # ---- Per-space work chains ---------------------------------------------
 zone_last_steps = {z: [] for z in ZONES}
-for space, zone, space_name in SPACES:
-    n_chains = random.randint(9, 14)
-    picks = random.choices(SYSTEMS, k=n_chains)
+SYSTEM_BY_SWLIN = {s[0]: s for s in SYSTEMS}
+for space, zone, space_name, category in SPACES:
+    (lo, hi), weights = CATEGORY_PROFILE.get(category, ((1, 3), {"631": 2, "560": 1}))
+    n_chains = random.randint(lo, hi)
+    picks = random.choices(
+        [SYSTEM_BY_SWLIN[k] for k in weights], weights=list(weights.values()), k=n_chains,
+    )
     for ci, (swlin, _, trade, sys_names, steps) in enumerate(picks):
         sys_name = random.choice(sys_names).replace("{n}", f"{random.randint(1, 9)}{chr(65 + ci % 6)}")
         wi = SEEDED_WI[zone] if random.random() < 0.22 else f"WI-{random.randint(6000, 9899)}"

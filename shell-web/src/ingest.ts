@@ -21,14 +21,24 @@ import {
   type ZoneBound,
 } from "./api";
 
-/** CSV: `zone,lo_frame,hi_frame` — the yard's zone chart. */
+/**
+ * CSV: `zone,lo_frame,hi_frame[,top_deck,bottom_deck]` — the yard's zone
+ * chart, one block per row. A zone may own several blocks; a block with a
+ * deck band owns that frame band on those decks only (docs/zone-scheme.md).
+ */
 export function parseZoneCsv(text: string): ZoneBound[] {
   const bounds: ZoneBound[] = [];
   for (const line of text.split("\n")) {
     const t = line.trim();
     if (!t || t.startsWith("#")) continue;
-    const [zone, lo, hi] = t.split(",").map((p) => p.trim());
-    bounds.push({ zone: zone ?? "", lo_frame: Number(lo), hi_frame: Number(hi) });
+    const [zone, lo, hi, top, bottom] = t.split(",").map((p) => p.trim());
+    bounds.push({
+      zone: zone ?? "",
+      lo_frame: Number(lo),
+      hi_frame: Number(hi),
+      ...(top ? { top_deck: top } : {}),
+      ...(bottom ? { bottom_deck: bottom } : {}),
+    });
   }
   return bounds;
 }

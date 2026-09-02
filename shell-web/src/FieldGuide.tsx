@@ -103,9 +103,13 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
             the screens return to what the tool can honestly serve without it.
           </p>
           <p style={{ margin: 0, ...dim }}>
-            A realistic trial file ships in the repo:{" "}
-            <span style={mono}>reference/p6-sample/CVN73-PIA26-full.xer</span> — 1,561 activities
-            across all six zones, statused to a data date, with every grading path represented.
+            A realistic hull ships in the repo as documents: <span style={mono}>reference/cvn73/</span>{" "}
+            — a 476-space compartment register on twelve decks, a zone chart of 3-D blocks, a
+            coupling register, a geometry register and a morning&apos;s field-condition log — and{" "}
+            <span style={mono}>reference/p6-sample/CVN73-PIA26-full.xer</span>, about 5,700
+            activities across all six zones, statused to a data date, with every grading path
+            represented. The demo boots on them (<span style={mono}>WADL_DEMO_DOCS</span>); the
+            scheme is written up in <span style={mono}>docs/zone-scheme.md</span>.
           </p>
         </Section>
 

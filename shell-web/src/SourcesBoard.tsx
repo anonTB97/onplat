@@ -700,7 +700,7 @@ export default function SourcesBoard({
               ? [
                   {
                     text: oob.length > 0
-                      ? `register disagrees: ${oob.map((o) => `${o.compartment} (Fr ${o.frame} vs ${o.zone} ${o.lo_frame}–${o.hi_frame})`).join(" · ")}`
+                      ? `register disagrees: ${oob.map((o) => `${o.compartment} (${o.deck_code} Fr ${o.frame} vs ${o.zone} ${o.bounds})`).join(" · ")}`
                       : "register agrees with the chart",
                     tone: oob.length > 0 ? C.danger : C.ok,
                     gloss: "One of the two documents is wrong; the tool's job is to say so, not to pick.",
@@ -715,7 +715,7 @@ export default function SourcesBoard({
             label: "⭱ Upload zone CSV",
             accept: ".csv,text/csv,text/plain",
             title:
-              "Ingest the yard's zone chart (CSV: zone,lo_frame,hi_frame). All-or-nothing; the audit is previewed before anything is stored.",
+              "Ingest the yard's zone chart (CSV: zone,lo_frame,hi_frame[,top_deck,bottom_deck] — one block per row; a zone may own several, and the blocks partition every deck). All-or-nothing; the audit is previewed before anything is stored.",
             onFile: stageZones,
           }}
           importHint="Also on Deck Explorer"

@@ -424,10 +424,19 @@ pub struct ScheduleEdgeSummary {
 pub struct ZoneBoundSummary {
     /// The zone, e.g. `Z5`.
     pub zone: String,
-    /// The forward-most frame of the zone (inclusive).
+    /// The forward-most frame of the block (inclusive).
     pub lo_frame: i32,
-    /// The aft-most frame of the zone (inclusive).
+    /// The aft-most frame of the block (inclusive).
     pub hi_frame: i32,
+    /// The upper deck of the block, by register deck code. A zone is a
+    /// block of decks as well as a band of frames (docs/zone-scheme.md): the
+    /// flight deck is one zone end to end, the plant is another beneath it.
+    /// Absent, with `bottom_deck`, the block spans every deck.
+    #[serde(default)]
+    pub top_deck: Option<String>,
+    /// The lower deck of the block, by register deck code.
+    #[serde(default)]
+    pub bottom_deck: Option<String>,
 }
 
 /// One work item's budget line from an ingested budget book.

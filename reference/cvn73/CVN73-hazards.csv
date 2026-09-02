@@ -1,0 +1,29 @@
+# CVN-73 field-condition log — the morning's tag-outs, permits, coating tickets and stop-works.
+# compartment,kind,label[,since]   kinds: hot_work_live coating_open energised_bus flammable_stow stop_work
+5-212-2-Q,hot_work_live,HW permit 2633 · weld repair – Shaft alley No. 4
+5-96-0-E,hot_work_live,HW permit 2656 · weld repair – Main Machinery Room No. 1 – lower level
+3-156-2-Q,hot_work_live,HW permit 2674 · weld repair – Auxiliary Machinery Room No. 4
+5-212-1-Q,hot_work_live,HW permit 2673 · weld repair – Shaft alley No. 3
+4-176-0-E,hot_work_live,HW permit 2683 · weld repair – Main Machinery Room No. 3 – upper level
+4-140-0-E,hot_work_live,HW permit 2681 · weld repair – Main Machinery Room No. 2 – upper level
+3-212-1-L,coating_open,CT-2123 · deck coat curing – Crew berthing No. 3
+2-91-2-L,coating_open,CT-916 · deck coat curing – Crew berthing No. 9
+3-42-2-L,coating_open,CT-429 · deck coat curing – Crew berthing No. 1
+2-188-2-L,coating_open,CT-1882 · deck coat curing – Crew berthing No. 2
+3-201-1-L,coating_open,CT-2016 · deck coat curing – Crew berthing No. 1
+7-96-2-J,flammable_stow,Tank entry · JP-5 storage tank No. 10 gas-freed for coating – vapour present
+6-216-1-J,flammable_stow,Tank entry · JP-5 service tank No. 3 gas-freed for coating – vapour present
+7-64-2-J,flammable_stow,Tank entry · JP-5 storage tank No. 6 gas-freed for coating – vapour present
+7-80-1-J,flammable_stow,Tank entry · JP-5 storage tank No. 7 gas-freed for coating – vapour present
+3-148-2-E,energised_bus,Bus live · Switchgear Room No. 2 — no verified zero-energy state
+4-40-2-E,energised_bus,Bus live · Emergency diesel generator room No. 2 — no verified zero-energy state
+4-180-2-E,energised_bus,Bus live · Switchgear Room No. 3 — no verified zero-energy state
+4-100-1-E,energised_bus,Bus live · Switchgear Room No. 1 — no verified zero-energy state
+4-60-1-M,stop_work,Weapons dept stop-work · Forward magazine No. 1 – upper level pending ordnance inspection
+6-236-0-M,stop_work,Weapons dept stop-work · Aft magazine No. 3 pending ordnance inspection
+04-24-2-Q,hot_work_live,HW permit 2762 · track weld – Catapult No. 2 track
+04-20-1-Q,hot_work_live,HW permit 2798 · track weld – Catapult No. 1 track
+03-236-2-Q,coating_open,CT-AG1 · engine room preservation curing
+03-190-2-L,coating_open,CT-RR · overhead coat curing – Ready Room No. 6
+03-166-1-L,coating_open,CT-RR · overhead coat curing – Ready Room No. 3
+1-180-0-Q,hot_work_live,HW permit 2870 · padeye repair – Hangar Bay 3

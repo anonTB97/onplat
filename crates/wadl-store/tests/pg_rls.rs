@@ -368,6 +368,8 @@ async fn ingested_documents_are_all_or_nothing_and_tenant_scoped() {
                     zone: "Z6".to_owned(),
                     lo_frame: 140,
                     hi_frame: 180,
+                    top_deck: None,
+                    bottom_deck: None,
                 }],
             },
         )

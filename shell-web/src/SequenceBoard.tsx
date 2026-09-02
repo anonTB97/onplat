@@ -161,6 +161,10 @@ export default function SequenceBoard({
   const [altsSettled, setAltsSettled] = useState(false);
   /** The row under inspection — any click on an activity opens it. */
   const [inspect, setInspect] = useState<Activity | null>(null);
+  /** Rows the table renders before it asks: a carrier's register is
+   *  thousands of rows, and a table that mounts them all is the slowest
+   *  screen in the product. The rest are one click away, and counted. */
+  const [tableLimit, setTableLimit] = useState(400);
 
   useEffect(() => {
     setError(null);
@@ -624,11 +628,20 @@ export default function SequenceBoard({
         );
       })()}
 
-      {boardView === "digest" && (
+      {/* The lanes and the digest place work by the hull's register — the
+          shell's shared verdict read. Until it lands, every activity would
+          fall into the "no zone" lane and the board would reshuffle a
+          moment later; a short wait is more honest than a wrong first frame. */}
+      {(boardView === "digest" || boardView === "lanes" || boardView === "spaceLanes") &&
+        spaces.length === 0 && (
+          <Loading label="Reading the hull's register…" />
+        )}
+
+      {boardView === "digest" && spaces.length > 0 && (
         <LoadDigest activities={activities} spaces={spaces} asOf={asOfMs} />
       )}
 
-      {(boardView === "lanes" || boardView === "spaceLanes") && (
+      {(boardView === "lanes" || boardView === "spaceLanes") && spaces.length > 0 && (
         <ZoneLanes
           activities={activities}
           spaces={spaces}
@@ -768,7 +781,7 @@ export default function SequenceBoard({
             </tr>
           </thead>
           <tbody>
-            {rows.map((a) => (
+            {rows.slice(0, tableLimit).map((a) => (
               <Fragment key={a.activity_id}>
               <tr
                 onClick={() => setInspect(a)}
@@ -988,6 +1001,26 @@ export default function SequenceBoard({
               )}
               </Fragment>
             ))}
+            {rows.length > tableLimit && (
+              <tr>
+                <td colSpan={10} style={{ ...td, padding: "8px 12px", color: C.dim }}>
+                  <button
+                    onClick={() => setTableLimit((n) => n + 1000)}
+                    title="Render the next thousand rows. Every row is already counted above and in the exports; only the table is paged."
+                    style={{
+                      font: "inherit", fontSize: 11.5, cursor: "pointer", padding: "3px 10px",
+                      borderRadius: 5, color: C.accent, background: "transparent", border: `1px solid ${C.accent}55`,
+                    }}
+                  >
+                    Show {Math.min(1000, rows.length - tableLimit).toLocaleString()} more
+                  </button>
+                  <span style={{ marginLeft: 10, fontSize: 11 }}>
+                    {tableLimit.toLocaleString()} of {rows.length.toLocaleString()} rows rendered — the
+                    filters, the sort and the exports cover all of them.
+                  </span>
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

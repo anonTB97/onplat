@@ -172,7 +172,19 @@ export default function App() {
     // Both reads succeed or the pair is marked failed: a bell that counted
     // issues over spaces it could not read would be half an answer wearing
     // the confidence of a whole one.
-    Promise.all([deckStates(DEMO_IDENTITY, selected, asOf), listIssues(DEMO_IDENTITY, selected, asOf)])
+    const rowsRead = deckStates(DEMO_IDENTITY, selected, asOf);
+    const issuesRead = listIssues(DEMO_IDENTITY, selected, asOf);
+    // The register lands as soon as it is read — the lanes, the plates and
+    // the search all place work by it — while the verdict's confidence waits
+    // for the pair. On a carrier-sized hull the issues read is the slow one.
+    rowsRead
+      .then((r) => {
+        if (!stale) setRows(r);
+      })
+      .catch(() => {
+        /* the pair below reports the failure */
+      });
+    Promise.all([rowsRead, issuesRead])
       .then(([r, i]) => {
         if (stale) return;
         setRows(r);

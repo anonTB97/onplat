@@ -52,7 +52,7 @@ import { parseZoneCsv } from "./ingest";
 import { HORIZONS, type Horizon } from "./TimeControl";
 import { windowLoadBySpace, windowLoadTotal, type SpaceLoad } from "./windowLoad";
 import { DiscardButton } from "./DiscardButton";
-import { zoneBands, type ZoneGeometry } from "./zones";
+import { bandCoversDeck, zoneBands, type ZoneGeometry } from "./zones";
 import { fmtDate, fmtDay, fmtMonth } from "./clock";
 import { blockLabel, blockStart, utcDayStart } from "./watch";
 import { demandByTrade, demandByZone, zoneInteractions } from "./manning";
@@ -252,6 +252,7 @@ export default function DeckExplorer({
           no: r.compartment.compartment_no,
           zone: r.compartment.zone,
           frame: r.compartment.frame,
+          deckOrdinal: r.compartment.deck_ordinal,
         })),
         0,
         Math.max(
@@ -261,8 +262,9 @@ export default function DeckExplorer({
         zoneChart?.source
           ? { label: zoneChart.source, bounds: zoneChart.bounds }
           : null,
+        new Map(decks.map((d) => [d.code, d.ordinal])),
       ),
-    [rows, zoneChart],
+    [rows, zoneChart, decks],
   );
 
   // The chart itself. Failure degrades to inferred bands rather than an
@@ -921,7 +923,7 @@ export default function DeckExplorer({
                   <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     <label
                       style={{ ...seg(false), display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer" }}
-                      title="Ingest the yard's zone chart (CSV: zone,lo_frame,hi_frame). All-or-nothing; previews its audit before storing."
+                      title="Ingest the yard's zone chart (CSV: zone,lo_frame,hi_frame[,top_deck,bottom_deck] — one block per row; a zone may own several). All-or-nothing; previews its audit before storing."
                     >
                       ⭱ Zone chart
                       <input
@@ -1079,6 +1081,7 @@ export default function DeckExplorer({
                       : null
                   }
                   sheet={sheet}
+                  deckOrdinal={deckOrdinal}
                   rows={onDeck}
                   selected={selected}
                   onSelect={toggleSelect}
@@ -1184,7 +1187,7 @@ export default function DeckExplorer({
                       >
                         out of authored bounds:{" "}
                         {zoneChart?.audit.out_of_bounds
-                          .map((o) => `${o.compartment} (Fr ${o.frame} vs ${o.zone} ${o.lo_frame}–${o.hi_frame})`)
+                          .map((o) => `${o.compartment} (${o.deck_code} Fr ${o.frame} vs ${o.zone} ${o.bounds})`)
                           .join(" · ")}
                       </span>
                     )}
@@ -1995,8 +1998,10 @@ function SheetView({
   deckBands,
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
   dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zones, zoneAlerts, zoneRows,
-  load, windowDays, horizonLabel, conflicts,
+  load, windowDays, horizonLabel, conflicts, deckOrdinal,
 }: {
+  /** This plate's deck ordinal — a zone block draws here only if it covers the deck. */
+  deckOrdinal: number;
   sheet: DeckSheet;
   rows: DeckStateRow[];
   selected: string | null;
@@ -2331,16 +2336,18 @@ function SheetView({
             <g pointerEvents="none">
               {/* The hull's tiled bands from zones.ts — the same boundaries the
                   whole-ship view draws, clipped by this plate's own camera. */}
-              {zones.bands.map((band) => {
+              {zones.bands.filter((band) => bandCoversDeck(band, deckOrdinal)).map((band) => {
                 const colour = zoneColour(band.zone);
                 const xHi = sheetX(cal, band.hi);
                 const xLo = sheetX(cal, band.lo);
                 const [bandX, bandW] = xHi < xLo ? [xHi, xLo - xHi] : [xLo, xHi - xLo];
                 // Authored bounds draw solid — a chart's word; inferred stay
-                // dashed — a guess, and the edge says so.
+                // dashed — a guess, and the edge says so. A block that does
+                // not cover this deck is not drawn on it: the flight deck's
+                // zone never shades the plant beneath it.
                 const dash = band.authored ? undefined : `${8 * u} ${6 * u}`;
                 return (
-                  <g key={band.zone}>
+                  <g key={band.key}>
                     <rect x={bandX} y={0} width={bandW} height={H} fill={colour} opacity={0.08} />
                     <line x1={bandX} y1={0} x2={bandX} y2={H} stroke={colour} strokeWidth={(band.authored ? 1.8 : 1.4) * u} strokeDasharray={dash} opacity={0.55} />
                     <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={H} stroke={colour} strokeWidth={(band.authored ? 1.8 : 1.4) * u} strokeDasharray={dash} opacity={0.55} />

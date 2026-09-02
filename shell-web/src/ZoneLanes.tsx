@@ -42,6 +42,11 @@ const W = 1240;
 const GUTTER_W = 225;
 const PLOT_W = W - GUTTER_W - 8;
 const ROW_H = 15;
+/** Rows a lane draws before it folds: a carrier zone stacks hundreds of
+ *  concurrent bars, and a lane two screens tall is a wall, not a calendar.
+ *  The fold is counted and named on the lane, never silent, and opens on a
+ *  click. */
+const MAX_ROWS = 28;
 const AXIS_H = 30;
 const EVENTS_H = 26;
 const DAY = 86_400_000;
@@ -69,7 +74,12 @@ interface Lane {
    *  compartment grain, or the honest nowhere-bucket. */
   zone: string;
   bars: Bar[];
+  /** Stacked rows the lane's bars need. */
   rows: number;
+  /** Rows actually drawn — `rows`, or the fold when the lane is collapsed. */
+  shown: number;
+  /** Bars behind the fold, counted on the lane. */
+  hidden: number;
   top: number;
   h: number;
   weekCount: number;
@@ -132,6 +142,8 @@ export function ZoneLanes({
     return () => window.removeEventListener("keydown", onKey);
   }, [showKey]);
   const [showAlts, setShowAlts] = useState(true);
+  /** Lanes the reader unfolded past MAX_ROWS. */
+  const [unfolded, setUnfolded] = useState<Set<string>>(new Set());
   const logic: LogicMode = logicChoice ?? (edges.length > 800 ? "inversions" : "all");
   const svgRef = useRef<SVGSVGElement | null>(null);
   // The wheel handler is a native non-passive listener (React's is passive, and
@@ -231,13 +243,18 @@ export function ZoneLanes({
       return { a, start, end, level };
     });
     const rows = Math.max(1, levelEnds.length);
+    const shown = unfolded.has(zone) ? rows : Math.min(rows, MAX_ROWS);
+    const hidden = bars.filter((b) => b.level >= shown).length;
     const inWeek = mine.filter((a) => (a.planned?.start ?? 0) < weekEnd && (a.planned?.end ?? 0) > now);
     const lane: Lane = {
       zone,
       bars,
       rows,
+      shown,
+      hidden,
       top,
-      h: rows * ROW_H + 14,
+      // A folded lane keeps one strip for the fold's own line.
+      h: shown * ROW_H + 14 + (hidden > 0 ? ROW_H : 0),
       weekCount: inWeek.length,
       weekHours: inWeek.reduce((s, a) => s + a.remaining_hours, 0),
       refused: mine.filter((a) => a.executability.verdict === "not_executable").length,
@@ -287,6 +304,9 @@ export function ZoneLanes({
   const geom = new Map<string, BarGeom>();
   for (const lane of lanes) {
     for (const b of lane.bars) {
+      // A bar behind the fold has no position; the logic that reaches it is
+      // not drawn rather than drawn to nowhere.
+      if (b.level >= lane.shown) continue;
       geom.set(b.a.code, { t0: b.start, t1: b.end, y: lane.top + 7 + b.level * ROW_H + (ROW_H - 4) / 2 });
     }
   }
@@ -520,7 +540,26 @@ export function ZoneLanes({
 
           {lanes.map((lane) => (
             <g key={lane.zone}>
+              {/* The fold: what this lane is NOT drawing, counted, and the
+                  way to see it. Behind-the-fold bars stay on the register and
+                  in every count above; only the rows are folded. */}
+              {lane.hidden > 0 && (
+                <g
+                  onClick={() => {
+                    if (drag.current?.moved) return;
+                    setUnfolded((s) => new Set(s).add(lane.zone));
+                  }}
+                  style={{ cursor: "pointer" }}
+                >
+                  <title>{`${lane.hidden} more bars stack below row ${lane.shown} — click to unfold this lane (or narrow the window, or switch to Space lanes)`}</title>
+                  <rect x={GUTTER_W} y={lane.top + 7 + lane.shown * ROW_H} width={PLOT_W} height={ROW_H - 4} fill="rgba(148,163,184,0.06)" stroke={C.subtle} strokeWidth={0.8} strokeDasharray="4 3" />
+                  <text x={GUTTER_W + 8} y={lane.top + 7 + lane.shown * ROW_H + ROW_H - 8} fill="#94a3b8" fontSize={8.5} fontFamily="monospace">
+                    {`+${lane.hidden} more in this lane · folded at ${lane.shown} rows · click to unfold`}
+                  </text>
+                </g>
+              )}
               {lane.bars.map((b) => {
+                if (b.level >= lane.shown) return null;
                 if (b.end < win.v0 || b.start > win.v1) return null;
                 const doomed = b.a.executability.verdict === "not_executable";
                 const bx = x(b.start);

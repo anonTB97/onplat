@@ -1960,33 +1960,72 @@ pub(crate) struct ImportSchedule {
 /// about the same placard.
 fn zone_audit(
     compartments: &[wadl_store::model::CompartmentSummary],
+    decks: &[wadl_store::model::DeckSummary],
     bounds: &[wadl_store::model::ZoneBoundSummary],
 ) -> Value {
-    let by_zone: std::collections::BTreeMap<&str, &wadl_store::model::ZoneBoundSummary> =
-        bounds.iter().map(|b| (b.zone.as_str(), b)).collect();
+    let ordinal: std::collections::BTreeMap<&str, i32> =
+        decks.iter().map(|d| (d.code.as_str(), d.ordinal)).collect();
+    // A zone owns one or more BLOCKS — a frame band on a band of decks. A
+    // space is in bounds when any block of its zone contains its deck and
+    // its frame (docs/zone-scheme.md).
+    let mut blocks: std::collections::BTreeMap<&str, Vec<&wadl_store::model::ZoneBoundSummary>> =
+        std::collections::BTreeMap::new();
+    for b in bounds {
+        blocks.entry(b.zone.as_str()).or_default().push(b);
+    }
+    let contains = |b: &wadl_store::model::ZoneBoundSummary, frame: i32, deck_ordinal: i32| {
+        if frame < b.lo_frame || frame > b.hi_frame {
+            return false;
+        }
+        match (&b.top_deck, &b.bottom_deck) {
+            (Some(top), Some(bottom)) => {
+                let (Some(&t), Some(&bo)) =
+                    (ordinal.get(top.as_str()), ordinal.get(bottom.as_str()))
+                else {
+                    return false;
+                };
+                deck_ordinal >= t && deck_ordinal <= bo
+            }
+            _ => true,
+        }
+    };
+    let describe = |bs: &[&wadl_store::model::ZoneBoundSummary]| {
+        bs.iter()
+            .map(|b| match (&b.top_deck, &b.bottom_deck) {
+                (Some(t), Some(bo)) if t == bo => {
+                    format!("Fr {}–{} on {t}", b.lo_frame, b.hi_frame)
+                }
+                (Some(t), Some(bo)) => format!("Fr {}–{} on {t}–{bo}", b.lo_frame, b.hi_frame),
+                _ => format!("Fr {}–{}", b.lo_frame, b.hi_frame),
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
     let mut out_of_bounds = Vec::new();
     let mut zones_seen = std::collections::BTreeSet::new();
     for c in compartments {
         zones_seen.insert(c.zone.as_str());
-        let (Some(frame), Some(bound)) = (c.frame, by_zone.get(c.zone.as_str())) else {
+        let (Some(frame), Some(bs)) = (c.frame, blocks.get(c.zone.as_str())) else {
             continue;
         };
-        if frame < bound.lo_frame || frame > bound.hi_frame {
+        if !bs.iter().any(|b| contains(b, frame, c.deck_ordinal)) {
             out_of_bounds.push(json!({
                 "compartment": c.compartment_no,
                 "zone": c.zone,
                 "frame": frame,
-                "lo_frame": bound.lo_frame,
-                "hi_frame": bound.hi_frame,
+                "deck_code": c.deck_code,
+                "lo_frame": bs.first().map_or(0, |b| b.lo_frame),
+                "hi_frame": bs.first().map_or(0, |b| b.hi_frame),
+                "bounds": describe(bs),
             }));
         }
     }
     let unbounded_zones: Vec<&str> = zones_seen
         .iter()
-        .filter(|z| !by_zone.contains_key(**z))
+        .filter(|z| !blocks.contains_key(**z))
         .copied()
         .collect();
-    let unassigned_bounds: Vec<&str> = by_zone
+    let unassigned_bounds: Vec<&str> = blocks
         .keys()
         .filter(|z| !zones_seen.contains(**z))
         .copied()
@@ -2013,6 +2052,7 @@ pub(crate) async fn zones(
     state.store.get_vessel(&scope, vessel).await?;
     let register = state.store.zone_register(&scope, vessel).await?;
     let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let decks = state.store.list_decks(&scope, vessel).await?;
     let (source, bounds) = match register {
         Some(r) => (Some(r.label), r.bounds),
         None => (None, Vec::new()),
@@ -2020,7 +2060,7 @@ pub(crate) async fn zones(
     Ok(Json(json!({
         "source": source,
         "bounds": bounds,
-        "audit": zone_audit(&compartments, &bounds),
+        "audit": zone_audit(&compartments, &decks, &bounds),
     })))
 }
 
@@ -2050,32 +2090,8 @@ pub(crate) async fn import_zones(
     let vessel = VesselId::from_uuid(id);
     state.store.get_vessel(&scope, vessel).await?;
     let body: ImportZones = read_import_body(req).await?;
-
-    let mut rejections: Vec<String> = Vec::new();
-    if body.label.trim().is_empty() {
-        rejections.push("the chart carries no label".to_owned());
-    }
-    if body.bounds.is_empty() {
-        rejections.push("the chart carries no bounds".to_owned());
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for b in &body.bounds {
-        if b.zone.trim().is_empty() {
-            rejections.push(format!(
-                "a bound {}–{} names no zone",
-                b.lo_frame, b.hi_frame
-            ));
-        }
-        if b.lo_frame > b.hi_frame {
-            rejections.push(format!(
-                "{}: lo frame {} is aft of hi frame {}",
-                b.zone, b.lo_frame, b.hi_frame
-            ));
-        }
-        if !seen.insert(b.zone.as_str()) {
-            rejections.push(format!("{} is bounded twice", b.zone));
-        }
-    }
+    let decks = state.store.list_decks(&scope, vessel).await?;
+    let rejections = zone_rejections(&body, &decks);
     if !rejections.is_empty() {
         return Err(ApiError::OutOfRange(format!(
             "the chart was refused whole: {}",
@@ -2084,7 +2100,7 @@ pub(crate) async fn import_zones(
     }
 
     let compartments = state.store.list_compartments(&scope, vessel).await?;
-    let audit = zone_audit(&compartments, &body.bounds);
+    let audit = zone_audit(&compartments, &decks, &body.bounds);
     if dry.dry_run.unwrap_or(false) {
         return Ok(Json(json!({
             "stored": false,
@@ -2122,6 +2138,85 @@ pub(crate) async fn import_zones(
         "zones": zones,
         "audit": audit,
     })))
+}
+
+/// Every reason a candidate zone chart is refused whole: no label, no
+/// bounds, a bound naming no zone, frames aft-to-forward, a block naming one
+/// deck of its band or a deck the register does not carry, a top deck below
+/// its bottom, or the same block twice. Capped so the refusal stays readable.
+fn zone_rejections(body: &ImportZones, decks: &[wadl_store::model::DeckSummary]) -> Vec<String> {
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the chart carries no label".to_owned());
+    }
+    if body.bounds.is_empty() {
+        rejections.push("the chart carries no bounds".to_owned());
+    }
+    let ordinal: std::collections::BTreeMap<&str, i32> =
+        decks.iter().map(|d| (d.code.as_str(), d.ordinal)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for b in &body.bounds {
+        if b.zone.trim().is_empty() {
+            rejections.push(format!(
+                "a bound {}–{} names no zone",
+                b.lo_frame, b.hi_frame
+            ));
+        }
+        if b.lo_frame > b.hi_frame {
+            rejections.push(format!(
+                "{}: lo frame {} is aft of hi frame {}",
+                b.zone, b.lo_frame, b.hi_frame
+            ));
+        }
+        // A block names both decks of its band or neither; the decks must be
+        // ones the register carries, and the top must not sit below the bottom.
+        match (&b.top_deck, &b.bottom_deck) {
+            (None, None) => {}
+            (Some(top), Some(bottom)) => {
+                for code in [top, bottom] {
+                    if !ordinal.contains_key(code.as_str()) {
+                        rejections.push(format!(
+                            "{}: deck {code:?} is not one this hull's register carries",
+                            b.zone
+                        ));
+                    }
+                }
+                if let (Some(t), Some(bo)) =
+                    (ordinal.get(top.as_str()), ordinal.get(bottom.as_str()))
+                {
+                    if t > bo {
+                        rejections.push(format!(
+                            "{}: top deck {top} sits below bottom deck {bottom}",
+                            b.zone
+                        ));
+                    }
+                }
+            }
+            _ => rejections.push(format!(
+                "{}: a block names one deck of its band, not both",
+                b.zone
+            )),
+        }
+        // The same zone may own several blocks; the same block twice is a
+        // copy-paste error the chart should not carry.
+        if !seen.insert((
+            b.zone.as_str(),
+            b.lo_frame,
+            b.hi_frame,
+            b.top_deck.as_deref(),
+            b.bottom_deck.as_deref(),
+        )) {
+            rejections.push(format!(
+                "{} Fr {}–{} is listed twice",
+                b.zone, b.lo_frame, b.hi_frame
+            ));
+        }
+    }
+    if rejections.len() > 12 {
+        rejections.truncate(12);
+        rejections.push("…".to_owned());
+    }
+    rejections
 }
 
 /// The body of a budget-book import: one line per work item.
@@ -2983,58 +3078,7 @@ pub(crate) async fn get_couplings(
     })))
 }
 
-/// Proposes `deck_penetration` edges from the register: a space directly
-/// above another when their decks are adjacent by ordinal, their frame
-/// extents overlap (surveyed extents from the geometry register where it
-/// has them, the frame station otherwise), and they sit on the same side
-/// or one is on the centreline. Heat goes down, so the edge runs from the
-/// upper space to the lower.
-fn derive_vertical_edges(
-    compartments: &[wadl_store::model::CompartmentSummary],
-    authored: &[wadl_store::model::CouplingRowSummary],
-) -> Vec<wadl_store::model::CouplingRowSummary> {
-    let extent = |c: &wadl_store::model::CompartmentSummary| -> Option<(i32, i32)> {
-        match (c.fwd_frame, c.aft_frame, c.frame) {
-            (Some(f), Some(a), _) => Some((f, a)),
-            (_, _, Some(f)) => Some((f, f)),
-            _ => None,
-        }
-    };
-    let compatible_side = |a: &str, b: &str| a == b || a == "centreline" || b == "centreline";
-    let mut out = Vec::new();
-    for upper in compartments {
-        let Some((uf, ua)) = extent(upper) else {
-            continue;
-        };
-        for lower in compartments {
-            if lower.deck_ordinal != upper.deck_ordinal + 1 {
-                continue;
-            }
-            let Some((lf, la)) = extent(lower) else {
-                continue;
-            };
-            if uf > la || lf > ua || !compatible_side(&upper.side, &lower.side) {
-                continue;
-            }
-            let from = upper.compartment_no.as_str();
-            let to = lower.compartment_no.as_str();
-            if authored
-                .iter()
-                .any(|e| e.from == from && e.to == to && e.code == "deck_penetration")
-            {
-                continue;
-            }
-            out.push(wadl_store::model::CouplingRowSummary {
-                from: from.to_owned(),
-                to: to.to_owned(),
-                code: "deck_penetration".to_owned(),
-                symmetric: false,
-                provenance: "derived".to_owned(),
-            });
-        }
-    }
-    out
-}
+use crate::documents::derive_vertical_edges;
 
 /// Every reason a candidate coupling register is refused whole: no label,
 /// nothing to store, a coupling type the hull's rules do not bind to, an end

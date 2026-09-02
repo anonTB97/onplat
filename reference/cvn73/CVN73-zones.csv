@@ -1,0 +1,13 @@
+# CVN-73 zone chart — 3-D blocks: a zone owns a frame band on a band of decks.
+# zone,lo_frame,hi_frame,top_deck,bottom_deck  (frames inclusive; decks by register code)
+# The blocks of all zones partition every deck — see docs/zone-scheme.md.
+Z1,0,273,flight,flight
+Z2,44,232,gallery,Main
+Z3,0,43,gallery,Main
+Z3,0,95,2nd,2ndplat
+Z4,96,191,2nd,2ndplat
+Z4,116,175,hold,db
+Z5,233,273,gallery,Main
+Z5,192,273,2nd,2ndplat
+Z6,0,115,hold,db
+Z6,176,273,hold,db

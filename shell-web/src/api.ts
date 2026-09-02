@@ -1040,6 +1040,11 @@ export interface ZoneBound {
   zone: string;
   lo_frame: number;
   hi_frame: number;
+  /** The block's deck band, by register deck code — a zone is a block of
+   *  decks as well as a band of frames (docs/zone-scheme.md). Absent on
+   *  both: the block spans every deck. */
+  top_deck?: string | null;
+  bottom_deck?: string | null;
 }
 
 /** The server's join of chart to register — computed once, on the API. */
@@ -1049,8 +1054,11 @@ export interface ZoneAudit {
     compartment: string;
     zone: string;
     frame: number;
+    deck_code: string;
     lo_frame: number;
     hi_frame: number;
+    /** The zone's blocks, in words — "Fr 96–191 on 2nd–2ndplat; Fr 116–175 on hold–db". */
+    bounds: string;
   }[];
   /** Zones carrying spaces the chart does not bound. */
   unbounded_zones: string[];

@@ -28,7 +28,7 @@ import { clampZoom, planZoomAt, wheelFactor } from "./camera";
 import { plateSlice } from "./VerticalTrace";
 import { sheetForDeck } from "./deckSheets";
 import { ACTIVITY_STATUS, C, STATE_STYLE, zoneColour } from "./theme";
-import type { ZoneGeometry } from "./zones";
+import { bandCoversDeck, type ZoneGeometry } from "./zones";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -380,14 +380,22 @@ export function ShipView({
                 const x2 = xOf(band.lo);
                 const [bandX, bandW] = x1 < x2 ? [x1, x2 - x1] : [x2, x1 - x2];
                 // Authored bounds draw solid — a chart's word; inferred bands
-                // stay dashed — this module's guess, and it says so.
+                // stay dashed — this module's guess, and it says so. A block
+                // is a rectangle over the LANES it covers: this is where the
+                // 3-D scheme becomes visible — the flight deck's zone stops at
+                // its lane, the plant's block reaches the inner bottom.
                 const dash = band.authored ? undefined : "7 5";
+                const covered = ordered.filter((d) => bandCoversDeck(band, d.ordinal));
+                const first = covered[0];
+                const last = covered[covered.length - 1];
+                if (first === undefined || last === undefined) return null;
+                const y0 = laneTop.get(first.code) ?? 0;
+                const y1 = (laneTop.get(last.code) ?? 0) + LANE_H;
                 return (
-                  <g key={band.zone} pointerEvents="none">
-                    <rect x={bandX} y={0} width={bandW} height={lanesH} fill={colour} opacity={0.06} />
-                    <line x1={bandX} y1={0} x2={bandX} y2={lanesH} stroke={colour} strokeWidth={band.authored ? 1.3 : 1} strokeDasharray={dash} opacity={0.5} />
-                    <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={lanesH} stroke={colour} strokeWidth={band.authored ? 1.3 : 1} strokeDasharray={dash} opacity={0.5} />
-                    <text x={bandX + 5} y={9} fill={colour} fontSize={9 / zoom} fontWeight={700} letterSpacing={0.8}>
+                  <g key={band.key} pointerEvents="none">
+                    <rect x={bandX} y={y0} width={bandW} height={y1 - y0} fill={colour} opacity={0.07} />
+                    <rect x={bandX} y={y0} width={bandW} height={y1 - y0} fill="none" stroke={colour} strokeWidth={band.authored ? 1.3 : 1} strokeDasharray={dash} opacity={0.55} />
+                    <text x={bandX + 5} y={y0 + 9} fill={colour} fontSize={9 / zoom} fontWeight={700} letterSpacing={0.8}>
                       {band.zone}
                     </text>
                   </g>
@@ -611,9 +619,11 @@ export function ShipView({
             <span style={{ width: 1, height: 12, background: LINE }} />
             <span
               style={{ color: zones.overlaps.length > 0 ? "#fbbf24" : C.ok }}
-              title="Each band is its zone's spaces' true extent, padded two frames — inferred from the register until a zones register carries authored bounds. Overlaps are reported as facts: legitimate where zones are functional rather than longitudinal, and the place to look hard where a scheme is supposed to partition."
+              title={zones.source
+                ? "Each block is the chart's word: a frame band on a band of decks, drawn over the lanes it covers. Overlaps are reported as facts on decks two zones share — the place to look hard where a scheme is supposed to partition."
+                : "Each band is its zone's spaces' true extent, padded two frames — inferred from the register until a zone chart carries authored blocks. Overlaps are reported as facts: legitimate where zones are functional rather than longitudinal, and the place to look hard where a scheme is supposed to partition."}
             >
-              bands inferred from the register ·{" "}
+              {zones.source ? `blocks authored by ${zones.source}` : "bands inferred from the register"} ·{" "}
               {zones.overlaps.length > 0
                 ? zones.overlaps
                     .map((o) => `${o.a}∩${o.b} Fr ${o.lo}–${o.hi} (${o.spaces} spaces)`)

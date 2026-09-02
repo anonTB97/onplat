@@ -140,7 +140,12 @@ async fn a_malformed_chart_is_refused_whole_with_every_reason() {
             "bounds": [
                 { "zone": "Z5", "lo_frame": 160, "hi_frame": 140 },
                 { "zone": "Z5", "lo_frame": 140, "hi_frame": 151 },
+                { "zone": "Z5", "lo_frame": 140, "hi_frame": 151 },
                 { "zone": "",   "lo_frame": 1,   "hi_frame": 2 },
+                // A block names both decks of its band, and decks the hull has.
+                { "zone": "Z6", "lo_frame": 0, "hi_frame": 10, "top_deck": "3rd" },
+                { "zone": "Z7", "lo_frame": 0, "hi_frame": 10, "top_deck": "3rd", "bottom_deck": "orlop" },
+                { "zone": "Z8", "lo_frame": 0, "hi_frame": 10, "top_deck": "4th", "bottom_deck": "3rd" },
             ],
         })),
     )
@@ -148,8 +153,11 @@ async fn a_malformed_chart_is_refused_whole_with_every_reason() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(detail.contains("aft of"), "{detail}");
-    assert!(detail.contains("bounded twice"), "{detail}");
+    assert!(detail.contains("listed twice"), "{detail}");
     assert!(detail.contains("names no zone"), "{detail}");
+    assert!(detail.contains("one deck of its band"), "{detail}");
+    assert!(detail.contains("\"orlop\""), "{detail}");
+    assert!(detail.contains("sits below"), "{detail}");
     // Nothing landed.
     let (_, body) = call(&app, &world, "GET", &zones_path, None).await;
     assert!(body["source"].is_null());

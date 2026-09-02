@@ -328,6 +328,10 @@ struct HazardClearance {
     vessel: VesselId,
     origin: String,
     kind: HazardKind,
+    /// When the clearing authority ended the fact. A read at an instant
+    /// before this still serves the hazard — the clearance is a fact with a
+    /// time of its own, not a retroactive deletion.
+    cleared_at_ms: i64,
 }
 
 /// An ingested schedule of record, in the store's own read models.
@@ -2068,23 +2072,30 @@ impl Repositories for InMemoryStore {
         &self,
         scope: &TenantScope,
         vessel: VesselId,
+        at: Timestamp,
     ) -> Result<Vec<Hazard>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
-        // Same read contract as the PostgreSQL store's `WHERE cleared_at IS
-        // NULL`: an administratively cleared hazard stops being served, and
-        // its record lives on in the clearance list and the ledger.
+        // Same read contract as the PostgreSQL store's `cleared_at IS NULL OR
+        // cleared_at > $at`: a hazard cleared by the read instant stops being
+        // served, and its record lives on in the clearance list and the
+        // ledger. A read at an instant before the clearance still sees it —
+        // the time control must be able to show what was really held then.
         let cleared = self
             .cleared_hazards
             .lock()
             .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
+        let at_ms = at.epoch_millis();
         Ok(self
             .hazards
             .iter()
             .filter(|h| h.vessel == vessel)
             .filter(|h| {
-                !cleared
-                    .iter()
-                    .any(|c| c.vessel == h.vessel && c.origin == h.origin && c.kind == h.kind)
+                !cleared.iter().any(|c| {
+                    c.vessel == h.vessel
+                        && c.origin == h.origin
+                        && c.kind == h.kind
+                        && c.cleared_at_ms <= at_ms
+                })
             })
             .map(|h| Hazard {
                 origin: CompartmentNo::new(h.origin),
@@ -2102,12 +2113,12 @@ impl Repositories for InMemoryStore {
         compartment: &str,
         kind: HazardKind,
         _basis: &str,
-        _cleared_at_ms: i64,
+        cleared_at_ms: i64,
     ) -> Result<Vec<Hazard>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
-        // The basis and instant are recorded by the caller's ledger entry;
-        // this store only needs to stop serving the hazard. The PostgreSQL
-        // store additionally stamps them onto the row (`cleared_basis`).
+        // The basis is recorded by the caller's ledger entry (the PostgreSQL
+        // store additionally stamps it onto the row as `cleared_basis`); the
+        // instant is kept here because every later read is relative to it.
         let mut cleared = self
             .cleared_hazards
             .lock()
@@ -2133,6 +2144,7 @@ impl Repositories for InMemoryStore {
                 vessel,
                 origin: compartment.to_owned(),
                 kind,
+                cleared_at_ms,
             });
         }
         Ok(closing)
@@ -2232,7 +2244,7 @@ mod tests {
             Err(StoreError::NotFound)
         ));
         assert!(matches!(
-            store.live_hazards(&scope, w.ddg).await,
+            store.live_hazards(&scope, w.ddg, store.anchor).await,
             Err(StoreError::NotFound)
         ));
         assert!(matches!(
@@ -2249,7 +2261,10 @@ mod tests {
     async fn the_seeded_hull_has_live_hazards_and_a_graph() {
         let (store, w) = InMemoryStore::demo();
         let scope = w.yard_scope();
-        let hazards = store.live_hazards(&scope, w.cvn73).await.unwrap();
+        let hazards = store
+            .live_hazards(&scope, w.cvn73, store.anchor)
+            .await
+            .unwrap();
         // A curing coat in the passage, and a live bus in the switchgear room.
         assert_eq!(hazards.len(), 2);
         let origins: Vec<&str> = hazards.iter().map(|h| h.origin.as_str()).collect();

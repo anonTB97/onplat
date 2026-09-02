@@ -36,11 +36,19 @@
 use sqlx::Row as _;
 use uuid::Uuid;
 use wadl_domain::ids::{OrgId, VesselId};
+use wadl_domain::time::Timestamp;
 use wadl_store::memory::{GeometryRegister, ManningBook};
 use wadl_store::model::{DeckCoverageSummary, ManningCrewSummary, SpaceGeometrySummary};
 use wadl_store::pg::PgStore;
 use wadl_store::StoreError;
 use wadl_store::TenantScope;
+
+/// A read instant after every clearance these tests record, so "live" means
+/// "not cleared at all" — the pre-time-aware contract these assertions were
+/// written against.
+fn far_future() -> Timestamp {
+    Timestamp::from_epoch_millis(i64::MAX / 4)
+}
 
 const YARD_ORG: u128 = 0x01;
 const NAVY_ORG: u128 = 0x02;
@@ -304,7 +312,10 @@ async fn engine_inputs_come_back_typed_with_rejection_paths_unused() {
     let graph = store.adjacency_graph(&scope, vessel(CVN73)).await.unwrap();
     assert_eq!(graph.edge_count(), 8, "the aft-third neighbourhood");
 
-    let hazards = store.live_hazards(&scope, vessel(CVN73)).await.unwrap();
+    let hazards = store
+        .live_hazards(&scope, vessel(CVN73), far_future())
+        .await
+        .unwrap();
     assert_eq!(hazards.len(), 2);
     let origins: Vec<&str> = hazards.iter().map(|h| h.origin.as_str()).collect();
     assert!(origins.contains(&"3-160-2-Q"));
@@ -603,7 +614,10 @@ async fn a_clearance_closes_the_row_and_respects_both_gates() {
 
     // The owning scope clears it: served live before, closed after, and the
     // row keeps when and why (0012's pairing constraint holds them together).
-    let before = store.live_hazards(&scope, hull).await.unwrap();
+    let before = store
+        .live_hazards(&scope, hull, far_future())
+        .await
+        .unwrap();
     assert!(before.iter().any(|h| h.origin.as_str() == "2-100-0-E"));
     let cleared = store
         .clear_hazard(
@@ -621,7 +635,10 @@ async fn a_clearance_closes_the_row_and_respects_both_gates() {
         cleared.first().map(|h| h.label.as_str()),
         Some("transient test hazard")
     );
-    let after = store.live_hazards(&scope, hull).await.unwrap();
+    let after = store
+        .live_hazards(&scope, hull, far_future())
+        .await
+        .unwrap();
     assert!(!after.iter().any(|h| h.origin.as_str() == "2-100-0-E"));
 
     // A repeat clearance matches nothing — closure is not restampable.

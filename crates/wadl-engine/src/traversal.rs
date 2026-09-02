@@ -100,6 +100,13 @@ pub fn cascade_from(
                     continue;
                 }
             }
+            // The origin is where the hazard IS; it is never something the
+            // hazard reaches. A symmetric coupling is stored as two directed
+            // rows, so without this the walk comes home at depth 2 and the
+            // hazard's own space gains a spurious "reached via" line.
+            if edge.to == *origin {
+                continue;
+            }
             let key = (edge.to.clone(), edge.coupling_type);
             if !visited.insert(key) {
                 continue;
@@ -186,6 +193,20 @@ mod tests {
     }
 
     #[test]
+    fn a_symmetric_edge_never_walks_home_to_the_origin() {
+        // A <-> B stored as two directed rows (the symmetric convention) and
+        // a bound of two hops. Before the origin guard this returned A at
+        // depth 2, and evaluate() then gave the hazard's own space a cascade
+        // line claiming it had been reached via itself.
+        let g = AdjacencyGraph::new(vec![edge("A", "B", 1, 3), edge("B", "A", 1, 3)]);
+        let hits = cascade_from(&g, &CompartmentNo::new("A"), &bound(2));
+        assert_eq!(affected_compartments(&hits), vec![CompartmentNo::new("B")]);
+        assert!(hits
+            .iter()
+            .all(|h| h.compartment != CompartmentNo::new("A")));
+    }
+
+    #[test]
     fn same_space_via_two_types_is_two_hits() {
         let g = AdjacencyGraph::new(vec![edge("A", "B", 1, 2), edge("A", "B", 2, 2)]);
         let hits = cascade_from(&g, &CompartmentNo::new("A"), &bound(2));
@@ -209,6 +230,24 @@ mod tests {
             for hit in &hits {
                 prop_assert!(hit.depth.get() <= max_hops);
                 prop_assert!(hit.path.len() <= usize::from(max_hops));
+            }
+        }
+
+        // The origin is never emitted as a hit, whatever the graph's shape —
+        // the invariant the doc comment states, now enforced.
+        #[test]
+        fn origin_is_never_a_hit(
+            edges in prop::collection::vec((0u8..6, 0u8..6, 1u128..4), 0..40),
+            max_hops in 0u8..6,
+        ) {
+            let g = AdjacencyGraph::new(
+                edges.iter()
+                    .map(|&(f, t, ty)| edge(&format!("C{f}"), &format!("C{t}"), ty, 5))
+                    .collect(),
+            );
+            let origin = CompartmentNo::new("C0");
+            for hit in cascade_from(&g, &origin, &bound(max_hops)) {
+                prop_assert_ne!(hit.compartment, origin.clone());
             }
         }
 

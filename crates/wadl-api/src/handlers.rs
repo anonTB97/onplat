@@ -228,7 +228,7 @@ pub(crate) async fn list_activities(
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let activities = state.store.list_activities(&scope, vessel).await?;
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
     let hull = wadl_issues::Hull {
         graph: &graph,
@@ -296,7 +296,7 @@ pub(crate) async fn schedule_alternatives(
         .map_or_else(|| Timestamp::from_epoch_millis(i64::MAX / 2), |w| w.end);
     let activities = state.store.list_activities(&scope, vessel).await?;
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
     let hull = wadl_issues::Hull {
         graph: &graph,
@@ -627,7 +627,7 @@ pub(crate) async fn deck_states(
     let mut compartments = state.store.list_compartments(&scope, vessel).await?;
     overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
     let orders = state.store.list_work_orders(&scope, vessel).await?;
     let packages = packages_with_footprints(&state, &scope, vessel).await?;
@@ -701,7 +701,7 @@ pub(crate) async fn readiness(
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let compartments = state.store.list_compartments(&scope, vessel).await?;
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
     let orders = state.store.list_work_orders(&scope, vessel).await?;
     // Distributed packages book their hours per *segment*, so a compartment in a
@@ -823,10 +823,11 @@ async fn mitigation_inputs(
     state: &AppState,
     scope: &wadl_store::TenantScope,
     vessel: VesselId,
+    at: Timestamp,
 ) -> Result<MitigationInputs, ApiError> {
     Ok(MitigationInputs {
         graph: state.store.adjacency_graph(scope, vessel).await?,
-        hazards: state.store.live_hazards(scope, vessel).await?,
+        hazards: state.store.live_hazards(scope, vessel, at).await?,
         rules: state.store.rules_in_force(scope, vessel).await?,
         compartments: state.store.list_compartments(scope, vessel).await?,
         orders: state.store.list_work_orders(scope, vessel).await?,
@@ -852,7 +853,7 @@ pub(crate) async fn mitigations(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    let inputs = mitigation_inputs(&state, &scope, vessel, at).await?;
     let subject = CompartmentNo::new(compartment);
     // A placard the register does not contain is not-found, not an ALLOW. Answering
     // "nothing is holding 9-999-9-Z" is a confident statement about a space that
@@ -980,7 +981,7 @@ pub(crate) async fn record_decision(
     // never produced: the hash would verify perfectly and the content would be
     // fiction. So the assessment is re-derived and the action matched into it.
     let subject = CompartmentNo::new(&compartment);
-    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    let inputs = mitigation_inputs(&state, &scope, vessel, at).await?;
     if !inputs.contains(&subject) {
         return Err(ApiError::NotFound);
     }
@@ -1055,7 +1056,7 @@ pub(crate) async fn leverage(
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    let inputs = mitigation_inputs(&state, &scope, vessel, at).await?;
     let loads = |instant: Timestamp| inputs.loads(instant);
     let world = wadl_mitigate::World {
         graph: &inputs.graph,
@@ -1080,7 +1081,7 @@ async fn derived_issues(
     vessel: VesselId,
     at: Timestamp,
 ) -> Result<Vec<wadl_issues::Issue>, ApiError> {
-    let inputs = mitigation_inputs(state, scope, vessel).await?;
+    let inputs = mitigation_inputs(state, scope, vessel, at).await?;
     let activities = state.store.list_activities(scope, vessel).await?;
     let loads = |instant: Timestamp| inputs.loads(instant);
     let world = wadl_mitigate::World {
@@ -1323,7 +1324,12 @@ pub(crate) async fn acknowledge_issue(
             "ISSUE_ACKNOWLEDGED",
             &detail,
             Some(&body.key),
-            at.epoch_millis(),
+            // The ledger's time is when the person answered, on the wall
+            // clock; the instant they were looking at rides in the detail as
+            // `as_of_ms`. Stamping the scrubbed instant here made an
+            // acknowledgement recorded on Friday about Monday's board look
+            // like it had been made on Monday.
+            state.clock.now().epoch_millis(),
         )
         .await?;
     Ok(Json(json!({ "recorded": record })))
@@ -1337,11 +1343,12 @@ pub(crate) async fn list_hazards(
     State(state): State<AppState>,
     Caller(scope): Caller,
     Path(id): Path<Uuid>,
+    Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
-    state.store.get_vessel(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
-    Ok(Json(json!({ "hazards": hazards })))
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
+    Ok(Json(json!({ "hazards": hazards, "as_of": at })))
 }
 
 /// An administrative clearance, as posted: which recorded fact is verified
@@ -1480,8 +1487,12 @@ async fn schedule_delta(
 
     // The constraint half: executability under the SAME hull inputs, before
     // and after — so any shift is the schedule's doing, not the hazards'.
+    // "Same inputs" means the hazards live now, on the wall clock.
     let graph = state.store.adjacency_graph(scope, vessel).await?;
-    let hazards = state.store.live_hazards(scope, vessel).await?;
+    let hazards = state
+        .store
+        .live_hazards(scope, vessel, state.clock.now())
+        .await?;
     let rules = state.store.rules_in_force(scope, vessel).await?;
     let hull = wadl_issues::Hull {
         graph: &graph,
@@ -2424,7 +2435,7 @@ pub(crate) async fn get_package(
 
     // The engine's inputs, loaded once for the whole footprint.
     let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
     let rules = state.store.rules_in_force(&scope, vessel).await?;
     let decide_space = |compartment: &CompartmentNo| {
         evaluate(&EvaluationRequest {
@@ -2499,7 +2510,7 @@ async fn decide(
 ) -> Result<Decision, ApiError> {
     // Scope is enforced by each store call; the first failure short-circuits.
     let graph = state.store.adjacency_graph(scope, vessel).await?;
-    let hazards = state.store.live_hazards(scope, vessel).await?;
+    let hazards = state.store.live_hazards(scope, vessel, at).await?;
     let rules = state.store.rules_in_force(scope, vessel).await?;
     let subject = CompartmentNo::new(compartment);
     Ok(evaluate(&EvaluationRequest {

@@ -103,6 +103,14 @@ async fn build_store(
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // `WADL_PROXY_KEY=""` is the one configuration that must not boot: it
+    // reads as "proxy mode armed" to an operator and admits nothing — or,
+    // before the gate learned to refuse it, everything. Failing here is
+    // louder and safer than either.
+    if wadl_api::auth::proxy_key_is_empty() {
+        eprintln!("WADL_PROXY_KEY is set but empty — set a key, or unset it for the dev shim");
+        return Err(std::io::Error::other("empty proxy key"));
+    }
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let (store, store_banner) = build_store(&clock).await?;
 

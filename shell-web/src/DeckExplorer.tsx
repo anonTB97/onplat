@@ -335,9 +335,10 @@ export default function DeckExplorer({
       .catch(() => {
         if (!stale) setActivities([]);
       });
-    // The live facts are not instant-scoped: a hazard is on the hull or it is
-    // not. (History lives in the ledger, not this list.)
-    listHazards(identity, vesselId)
+    // The live facts at the instant: a hazard is on the hull from when it was
+    // raised until it was cleared, and a board scrubbed back past a clearance
+    // shows the hazard that was really there.
+    listHazards(identity, vesselId, asOf)
       .then((h) => {
         if (!stale) setHazards(h);
       })

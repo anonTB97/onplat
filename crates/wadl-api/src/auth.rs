@@ -36,10 +36,27 @@ use crate::error::ApiError;
 pub(crate) struct Caller(pub(crate) TenantScope);
 
 /// The proxy key, read once. `None` means dev-shim trust.
+///
+/// An empty value is treated as unset here and refused at startup by the
+/// server binary: `WADL_PROXY_KEY=""` used to arm proxy mode with a key every
+/// request could match by presenting nothing, which is the opposite of a
+/// gate. The binary refuses to boot in that state rather than quietly
+/// downgrading to dev trust.
 fn proxy_key() -> Option<&'static str> {
     static KEY: OnceLock<Option<String>> = OnceLock::new();
-    KEY.get_or_init(|| std::env::var("WADL_PROXY_KEY").ok())
-        .as_deref()
+    KEY.get_or_init(|| {
+        std::env::var("WADL_PROXY_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+    })
+    .as_deref()
+}
+
+/// Whether `WADL_PROXY_KEY` is set to the empty string — the misconfiguration
+/// the server refuses to start under. Exposed for the binary's boot check.
+#[must_use]
+pub fn proxy_key_is_empty() -> bool {
+    std::env::var("WADL_PROXY_KEY").is_ok_and(|k| k.is_empty())
 }
 
 /// The human name of the active trust mode, served by `/api/whoami` and
@@ -67,6 +84,11 @@ fn trust_gate(parts: &Parts, key: Option<&str>) -> Result<(), ApiError> {
     let Some(key) = key else {
         return Ok(()); // dev shim: headers trusted as given
     };
+    // An empty key can never admit anyone: a missing header presents as the
+    // empty string, and the two must not match.
+    if key.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
     let presented = header(parts, "x-wadl-proxy-key").unwrap_or("");
     if ct_eq(presented.as_bytes(), key.as_bytes()) {
         Ok(())
@@ -130,6 +152,13 @@ mod tests {
     fn proxy_mode_refuses_a_wrong_key() {
         let p = parts(&[("x-wadl-proxy-key", "wrong")]);
         assert!(trust_gate(&p, Some("sekrit")).is_err());
+    }
+
+    #[test]
+    fn an_empty_key_admits_nobody() {
+        // The empty-key hole: no header presents as "", and "" == "".
+        assert!(trust_gate(&parts(&[]), Some("")).is_err());
+        assert!(trust_gate(&parts(&[("x-wadl-proxy-key", "")]), Some("")).is_err());
     }
 
     #[test]

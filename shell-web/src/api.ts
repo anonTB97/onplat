@@ -436,8 +436,16 @@ export interface LiveHazard {
 
 // The raw live hazards on a hull. Served separately from the traces so the
 // surface can show WHAT is shut (the fact) alongside WHY (its consequences).
-export async function listHazards(id: Identity, vesselId: string): Promise<LiveHazard[]> {
-  const res = await fetch(`/api/vessels/${vesselId}/hazards`, { headers: headers(id) });
+export async function listHazards(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<LiveHazard[]> {
+  // Hazards are read as of the instant like every verdict: a hazard cleared
+  // on Friday is still a live fact on Thursday's board.
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/hazards`, asOf), {
+    headers: headers(id),
+  });
   if (!res.ok) throw new Error(`hazards → ${res.status}`);
   const body = (await res.json()) as { hazards: LiveHazard[] };
   return body.hazards;

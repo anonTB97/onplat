@@ -288,8 +288,15 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<AdjacencyGraph, StoreError>;
 
-    /// The hazards currently live on the hull — open coating tickets, live hot
-    /// work, unisolated buses, stop-works.
+    /// The hazards live on the hull as of `at` — open coating tickets, live
+    /// hot work, unisolated buses, stop-works — meaning every recorded hazard
+    /// not administratively cleared by that instant.
+    ///
+    /// The instant matters for the past, not the future: a hazard cleared on
+    /// Friday is still served for a Thursday read, so scrubbing the clock back
+    /// past a clearance shows the hold that was really there. (When the hazard
+    /// was *raised* is the engine's business — it carries `since` and decides
+    /// from it — so a hazard raised after `at` is still returned here.)
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
@@ -297,6 +304,7 @@ pub trait Repositories: Send + Sync {
         &self,
         scope: &TenantScope,
         vessel: VesselId,
+        at: wadl_domain::time::Timestamp,
     ) -> Result<Vec<Hazard>, StoreError>;
 
     /// Administratively clears the live hazards of `kind` originating in

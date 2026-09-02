@@ -20,7 +20,7 @@
     )
 )]
 
-mod auth;
+pub mod auth;
 mod error;
 mod handlers;
 pub mod hardening;

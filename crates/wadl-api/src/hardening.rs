@@ -300,6 +300,12 @@ async fn serve_file(dist: &Path, method: &Method, uri: &Uri) -> Response {
     if method != Method::GET && method != Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
+    // An API path that no handler claimed is a wrong URL, not a shell route.
+    // Serving index.html for it — 200, text/html — used to turn every typo
+    // in a client into a "success" that then failed to parse as JSON.
+    if uri.path().starts_with("/api/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let Some(mut path) = resolve(dist, uri.path()) else {
         return StatusCode::NOT_FOUND.into_response();
     };

@@ -1148,16 +1148,24 @@ impl Repositories for PgStore {
         &self,
         scope: &TenantScope,
         vessel: VesselId,
+        at: Timestamp,
     ) -> Result<Vec<Hazard>, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         let mut tx = self.with_tenant(scope.org).await?;
+        // Not cleared *as of the read instant*: a clearance stamped later than
+        // `at` has not happened yet from that instant's point of view, so the
+        // hazard is served and the scrubbed board shows the hold that was
+        // really there. `cleared_at > $2` is that rule in SQL.
+        let at = chrono::DateTime::from_timestamp_millis(at.epoch_millis())
+            .ok_or_else(|| StoreError::Backend("read instant out of range".to_owned()))?;
         let rows = sqlx::query(
             "SELECT compartment_no, kind, raised_at, label
                FROM hazard
-              WHERE vessel_id = $1 AND cleared_at IS NULL
+              WHERE vessel_id = $1 AND (cleared_at IS NULL OR cleared_at > $2)
               ORDER BY raised_at",
         )
         .bind(vessel.as_uuid())
+        .bind(at)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;

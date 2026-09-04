@@ -33,6 +33,7 @@
 )]
 
 pub mod capability;
+pub mod civil;
 pub mod compartment;
 pub mod ids;
 pub mod permit;

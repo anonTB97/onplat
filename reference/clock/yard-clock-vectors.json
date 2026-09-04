@@ -1,0 +1,668 @@
+{
+  "_note": "Shared clock vectors for wadl_domain::civil and shell-web/src/yardClock.ts. Every expected instant was computed from the IANA tz database (Python zoneinfo), not by either implementation. Semantics: an overlap reads as the first occurrence, a gap as the pre-transition (standard) offset; watches are bounded by wall-clock multiples of watch_minutes on the local date; a shift belongs to the local date its start falls on.",
+  "clocks": {
+    "norfolk": {
+      "zone": "America/New_York",
+      "standard_offset_minutes": -300,
+      "daylight": {
+        "offset_minutes": -240,
+        "start": {
+          "month": 3,
+          "week": 2,
+          "weekday": 0,
+          "minute_of_day": 120
+        },
+        "end": {
+          "month": 11,
+          "week": 1,
+          "weekday": 0,
+          "minute_of_day": 120
+        }
+      },
+      "watch_minutes": 240,
+      "shifts": [
+        {
+          "name": "Days",
+          "start_minute": 420,
+          "length_minutes": 510
+        },
+        {
+          "name": "Swing",
+          "start_minute": 930,
+          "length_minutes": 510
+        },
+        {
+          "name": "Mids",
+          "start_minute": 0,
+          "length_minutes": 420
+        }
+      ]
+    },
+    "utc": {
+      "zone": "UTC",
+      "standard_offset_minutes": 0,
+      "daylight": null,
+      "watch_minutes": 240,
+      "shifts": [
+        {
+          "name": "Days",
+          "start_minute": 420,
+          "length_minutes": 510
+        },
+        {
+          "name": "Swing",
+          "start_minute": 930,
+          "length_minutes": 510
+        },
+        {
+          "name": "Mids",
+          "start_minute": 0,
+          "length_minutes": 420
+        }
+      ]
+    },
+    "guam": {
+      "zone": "Pacific/Guam",
+      "standard_offset_minutes": 600,
+      "daylight": null,
+      "watch_minutes": 360,
+      "shifts": [
+        {
+          "name": "Days",
+          "start_minute": 360,
+          "length_minutes": 720
+        },
+        {
+          "name": "Nights",
+          "start_minute": 1080,
+          "length_minutes": 720
+        }
+      ]
+    },
+    "sydney": {
+      "zone": "Australia/Sydney",
+      "standard_offset_minutes": 600,
+      "daylight": {
+        "offset_minutes": 660,
+        "start": {
+          "month": 10,
+          "week": 1,
+          "weekday": 0,
+          "minute_of_day": 120
+        },
+        "end": {
+          "month": 4,
+          "week": 1,
+          "weekday": 0,
+          "minute_of_day": 180
+        }
+      },
+      "watch_minutes": 240,
+      "shifts": [
+        {
+          "name": "Days",
+          "start_minute": 420,
+          "length_minutes": 510
+        },
+        {
+          "name": "Swing",
+          "start_minute": 930,
+          "length_minutes": 510
+        },
+        {
+          "name": "Mids",
+          "start_minute": 0,
+          "length_minutes": 420
+        }
+      ]
+    }
+  },
+  "offset_at": [
+    {
+      "clock": "norfolk",
+      "at": "2026-03-08T06:59:59Z",
+      "utc_ms": 1772953199000,
+      "minutes": -300
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-03-08T07:00:00Z",
+      "utc_ms": 1772953200000,
+      "minutes": -240
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-11-01T05:59:59Z",
+      "utc_ms": 1793512799000,
+      "minutes": -240
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-11-01T06:00:00Z",
+      "utc_ms": 1793512800000,
+      "minutes": -300
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "minutes": -240
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-01-15T12:00:00Z",
+      "utc_ms": 1768478400000,
+      "minutes": -300
+    },
+    {
+      "clock": "utc",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "minutes": 0
+    },
+    {
+      "clock": "guam",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "minutes": 600
+    },
+    {
+      "clock": "guam",
+      "at": "2026-01-15T12:00:00Z",
+      "utc_ms": 1768478400000,
+      "minutes": 600
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-01-15T00:00:00Z",
+      "utc_ms": 1768435200000,
+      "minutes": 660
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-04-04T15:59:59Z",
+      "utc_ms": 1775318399000,
+      "minutes": 660
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-04-04T16:00:00Z",
+      "utc_ms": 1775318400000,
+      "minutes": 600
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-07-01T00:00:00Z",
+      "utc_ms": 1782864000000,
+      "minutes": 600
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-10-03T15:59:59Z",
+      "utc_ms": 1791043199000,
+      "minutes": 600
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-10-03T16:00:00Z",
+      "utc_ms": 1791043200000,
+      "minutes": 660
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-12-31T23:30:00Z",
+      "utc_ms": 1798759800000,
+      "minutes": 660
+    },
+    {
+      "clock": "sydney",
+      "at": "2027-01-01T00:30:00Z",
+      "utc_ms": 1798763400000,
+      "minutes": 660
+    }
+  ],
+  "to_utc": [
+    {
+      "clock": "norfolk",
+      "date": "2026-03-08",
+      "minute_of_day": 150,
+      "utc_ms": 1772955000000,
+      "note": "gap"
+    },
+    {
+      "clock": "norfolk",
+      "date": "2026-03-08",
+      "minute_of_day": 180,
+      "utc_ms": 1772953200000,
+      "note": null
+    },
+    {
+      "clock": "norfolk",
+      "date": "2026-11-01",
+      "minute_of_day": 60,
+      "utc_ms": 1793509200000,
+      "note": "overlap"
+    },
+    {
+      "clock": "norfolk",
+      "date": "2026-11-01",
+      "minute_of_day": 90,
+      "utc_ms": 1793511000000,
+      "note": "overlap"
+    },
+    {
+      "clock": "norfolk",
+      "date": "2026-11-01",
+      "minute_of_day": 120,
+      "utc_ms": 1793516400000,
+      "note": null
+    },
+    {
+      "clock": "norfolk",
+      "date": "2026-09-04",
+      "minute_of_day": 555,
+      "utc_ms": 1788527700000,
+      "note": null
+    },
+    {
+      "clock": "utc",
+      "date": "2026-09-04",
+      "minute_of_day": 555,
+      "utc_ms": 1788513300000,
+      "note": null
+    },
+    {
+      "clock": "guam",
+      "date": "2026-09-04",
+      "minute_of_day": 360,
+      "utc_ms": 1788465600000,
+      "note": null
+    },
+    {
+      "clock": "sydney",
+      "date": "2026-04-05",
+      "minute_of_day": 150,
+      "utc_ms": 1775316600000,
+      "note": "overlap"
+    },
+    {
+      "clock": "sydney",
+      "date": "2026-10-04",
+      "minute_of_day": 150,
+      "utc_ms": 1791045000000,
+      "note": "gap"
+    },
+    {
+      "clock": "sydney",
+      "date": "2026-01-15",
+      "minute_of_day": 0,
+      "utc_ms": 1768395600000,
+      "note": null
+    }
+  ],
+  "day_start": [
+    {
+      "clock": "norfolk",
+      "at": "2026-11-01T12:00:00Z",
+      "utc_ms": 1793534400000,
+      "start_ms": 1793505600000,
+      "next_ms": 1793595600000
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-03-08T12:00:00Z",
+      "utc_ms": 1772971200000,
+      "start_ms": 1772946000000,
+      "next_ms": 1773028800000
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "start_ms": 1788494400000,
+      "next_ms": 1788580800000
+    },
+    {
+      "clock": "utc",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "start_ms": 1788480000000,
+      "next_ms": 1788566400000
+    },
+    {
+      "clock": "guam",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "start_ms": 1788444000000,
+      "next_ms": 1788530400000
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-01-15T00:00:00Z",
+      "utc_ms": 1768435200000,
+      "start_ms": 1768395600000,
+      "next_ms": 1768482000000
+    }
+  ],
+  "watch_start": [
+    {
+      "clock": "norfolk",
+      "at": "2026-11-01T08:30:00Z",
+      "utc_ms": 1793521800000,
+      "start_ms": 1793505600000,
+      "end_ms": 1793523600000
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-11-01T04:00:00Z",
+      "utc_ms": 1793505600000,
+      "start_ms": 1793505600000,
+      "end_ms": 1793523600000
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-03-08T07:30:00Z",
+      "utc_ms": 1772955000000,
+      "start_ms": 1772946000000,
+      "end_ms": 1772956800000
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-03-08T06:30:00Z",
+      "utc_ms": 1772951400000,
+      "start_ms": 1772946000000,
+      "end_ms": 1772956800000
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "start_ms": 1788523200000,
+      "end_ms": 1788537600000
+    },
+    {
+      "clock": "utc",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "start_ms": 1788523200000,
+      "end_ms": 1788537600000
+    },
+    {
+      "clock": "guam",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "start_ms": 1788508800000,
+      "end_ms": 1788530400000
+    }
+  ],
+  "watches_of": [
+    {
+      "clock": "norfolk",
+      "at": "2026-11-01T12:00:00Z",
+      "utc_ms": 1793534400000,
+      "starts": [
+        1793505600000,
+        1793523600000,
+        1793538000000,
+        1793552400000,
+        1793566800000,
+        1793581200000
+      ],
+      "ends": [
+        1793523600000,
+        1793538000000,
+        1793552400000,
+        1793566800000,
+        1793581200000,
+        1793595600000
+      ],
+      "labels": [
+        "00–04",
+        "04–08",
+        "08–12",
+        "12–16",
+        "16–20",
+        "20–24"
+      ]
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-03-08T12:00:00Z",
+      "utc_ms": 1772971200000,
+      "starts": [
+        1772946000000,
+        1772956800000,
+        1772971200000,
+        1772985600000,
+        1773000000000,
+        1773014400000
+      ],
+      "ends": [
+        1772956800000,
+        1772971200000,
+        1772985600000,
+        1773000000000,
+        1773014400000,
+        1773028800000
+      ],
+      "labels": [
+        "00–04",
+        "04–08",
+        "08–12",
+        "12–16",
+        "16–20",
+        "20–24"
+      ]
+    },
+    {
+      "clock": "utc",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "starts": [
+        1788480000000,
+        1788494400000,
+        1788508800000,
+        1788523200000,
+        1788537600000,
+        1788552000000
+      ],
+      "ends": [
+        1788494400000,
+        1788508800000,
+        1788523200000,
+        1788537600000,
+        1788552000000,
+        1788566400000
+      ],
+      "labels": [
+        "00–04",
+        "04–08",
+        "08–12",
+        "12–16",
+        "16–20",
+        "20–24"
+      ]
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-01-15T00:00:00Z",
+      "utc_ms": 1768435200000,
+      "starts": [
+        1768395600000,
+        1768410000000,
+        1768424400000,
+        1768438800000,
+        1768453200000,
+        1768467600000
+      ],
+      "ends": [
+        1768410000000,
+        1768424400000,
+        1768438800000,
+        1768453200000,
+        1768467600000,
+        1768482000000
+      ],
+      "labels": [
+        "00–04",
+        "04–08",
+        "08–12",
+        "12–16",
+        "16–20",
+        "20–24"
+      ]
+    },
+    {
+      "clock": "guam",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "starts": [
+        1788444000000,
+        1788465600000,
+        1788487200000,
+        1788508800000
+      ],
+      "ends": [
+        1788465600000,
+        1788487200000,
+        1788508800000,
+        1788530400000
+      ],
+      "labels": [
+        "00–06",
+        "06–12",
+        "12–18",
+        "18–24"
+      ]
+    }
+  ],
+  "shift_windows": [
+    {
+      "clock": "norfolk",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "windows": [
+        {
+          "name": "Days",
+          "start_ms": 1788519600000,
+          "end_ms": 1788550200000
+        },
+        {
+          "name": "Swing",
+          "start_ms": 1788550200000,
+          "end_ms": 1788580800000
+        },
+        {
+          "name": "Mids",
+          "start_ms": 1788494400000,
+          "end_ms": 1788519600000
+        }
+      ]
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-11-01T12:00:00Z",
+      "utc_ms": 1793534400000,
+      "windows": [
+        {
+          "name": "Days",
+          "start_ms": 1793534400000,
+          "end_ms": 1793565000000
+        },
+        {
+          "name": "Swing",
+          "start_ms": 1793565000000,
+          "end_ms": 1793595600000
+        },
+        {
+          "name": "Mids",
+          "start_ms": 1793505600000,
+          "end_ms": 1793534400000
+        }
+      ]
+    },
+    {
+      "clock": "norfolk",
+      "at": "2026-03-08T12:00:00Z",
+      "utc_ms": 1772971200000,
+      "windows": [
+        {
+          "name": "Days",
+          "start_ms": 1772967600000,
+          "end_ms": 1772998200000
+        },
+        {
+          "name": "Swing",
+          "start_ms": 1772998200000,
+          "end_ms": 1773028800000
+        },
+        {
+          "name": "Mids",
+          "start_ms": 1772946000000,
+          "end_ms": 1772967600000
+        }
+      ]
+    },
+    {
+      "clock": "utc",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "windows": [
+        {
+          "name": "Days",
+          "start_ms": 1788505200000,
+          "end_ms": 1788535800000
+        },
+        {
+          "name": "Swing",
+          "start_ms": 1788535800000,
+          "end_ms": 1788566400000
+        },
+        {
+          "name": "Mids",
+          "start_ms": 1788480000000,
+          "end_ms": 1788505200000
+        }
+      ]
+    },
+    {
+      "clock": "guam",
+      "at": "2026-09-04T13:15:00Z",
+      "utc_ms": 1788527700000,
+      "windows": [
+        {
+          "name": "Days",
+          "start_ms": 1788465600000,
+          "end_ms": 1788508800000
+        },
+        {
+          "name": "Nights",
+          "start_ms": 1788508800000,
+          "end_ms": 1788552000000
+        }
+      ]
+    },
+    {
+      "clock": "sydney",
+      "at": "2026-01-15T00:00:00Z",
+      "utc_ms": 1768435200000,
+      "windows": [
+        {
+          "name": "Days",
+          "start_ms": 1768420800000,
+          "end_ms": 1768451400000
+        },
+        {
+          "name": "Swing",
+          "start_ms": 1768451400000,
+          "end_ms": 1768482000000
+        },
+        {
+          "name": "Mids",
+          "start_ms": 1768395600000,
+          "end_ms": 1768420800000
+        }
+      ]
+    }
+  ]
+}

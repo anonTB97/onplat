@@ -124,6 +124,54 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<(), StoreError>;
 
+    /// Which clock the served schedule of record's wall times were read in
+    /// (`America/New_York · CVN73-clock.csv`), or `None` when no schedule
+    /// is ingested or the record predates the yard clock. The clock door
+    /// compares this with the clock being loaded and says when the schedule
+    /// needs re-importing.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn schedule_parsed_in(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<String>, StoreError>;
+
+    /// The hull's yard clock document — zone, offsets, watch and shifts —
+    /// or `None` when every clock is served in UTC and says so.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::YardClockDoc>, StoreError>;
+
+    /// Replaces a hull's yard clock. All-or-nothing at the caller: the API
+    /// layer refuses a malformed clock whole.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: crate::memory::YardClockDoc,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's yard clock; every clock is UTC again. A no-op when
+    /// none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
     /// The hull's ingested zone chart — authored frame bounds per zone —
     /// or `None` when no chart has been ingested and every band a view draws
     /// is inferred from the register.

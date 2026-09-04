@@ -313,6 +313,10 @@ pub struct InMemoryStore {
     budget_book: std::sync::RwLock<BTreeMap<VesselId, BudgetBook>>,
     /// An ingested manning book per hull — the supply side of crew planning.
     manning_book: std::sync::RwLock<BTreeMap<VesselId, ManningBook>>,
+    /// The yard clock per hull. Seeded for the three carriers (Norfolk) so
+    /// the seed world reads yard-local; absent, every clock is UTC and the
+    /// API says so.
+    yard_clock: std::sync::RwLock<BTreeMap<VesselId, YardClockDoc>>,
     /// An ingested geometry register per hull — surveyed extents + deck bands.
     geometry: std::sync::RwLock<BTreeMap<VesselId, GeometryRegister>>,
     /// Administrative clearances recorded against the seeded hazards, keyed by
@@ -366,6 +370,76 @@ pub struct ScheduleOfRecord {
     pub activities: Vec<ActivitySummary>,
     /// The dependency edges.
     pub edges: Vec<ScheduleEdgeSummary>,
+    /// Which clock the export's wall times were read in when this record
+    /// was made (`America/New_York · CVN73-clock.csv`). `None` for a record
+    /// stored before the yard clock existed — read as "unknown", never as UTC.
+    pub parsed_in: Option<String>,
+}
+
+/// The yard clock as a stored document: the clock plus where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YardClockDoc {
+    /// `CVN73-clock.csv`, or `seed · Norfolk` for the seeded world.
+    pub label: String,
+    /// The clock itself.
+    pub clock: wadl_domain::civil::YardClock,
+}
+
+impl YardClockDoc {
+    /// The seed world's clock: Norfolk, US daylight rule, four-hour
+    /// watches, Days/Swing/Mids. What `reference/cvn73/CVN73-clock.csv` says,
+    /// in memory, so the 24-space hull reads yard-local too.
+    #[must_use]
+    pub fn norfolk_seed() -> Self {
+        use wadl_domain::civil::{DaylightRule, ShiftDef, Transition, YardClock};
+        Self {
+            label: "seed · Norfolk".to_owned(),
+            clock: YardClock {
+                zone: "America/New_York".to_owned(),
+                standard_offset_minutes: -300,
+                daylight: Some(DaylightRule {
+                    offset_minutes: -240,
+                    start: Transition {
+                        month: 3,
+                        week: 2,
+                        weekday: 0,
+                        minute_of_day: 120,
+                    },
+                    end: Transition {
+                        month: 11,
+                        week: 1,
+                        weekday: 0,
+                        minute_of_day: 120,
+                    },
+                }),
+                watch_minutes: 240,
+                shifts: vec![
+                    ShiftDef {
+                        name: "Days".to_owned(),
+                        start_minute: 420,
+                        length_minutes: 510,
+                    },
+                    ShiftDef {
+                        name: "Swing".to_owned(),
+                        start_minute: 930,
+                        length_minutes: 510,
+                    },
+                    ShiftDef {
+                        name: "Mids".to_owned(),
+                        start_minute: 0,
+                        length_minutes: 420,
+                    },
+                ],
+            },
+        }
+    }
+
+    /// `America/New_York · CVN73-clock.csv` — how a schedule of record
+    /// names the clock it was parsed in.
+    #[must_use]
+    pub fn parsed_in_label(&self) -> String {
+        format!("{} · {}", self.clock.zone, self.label)
+    }
 }
 
 /// An ingested zone chart: authored frame bounds per zone.
@@ -722,6 +796,12 @@ impl InMemoryStore {
             zone_register: std::sync::RwLock::new(BTreeMap::new()),
             budget_book: std::sync::RwLock::new(BTreeMap::new()),
             manning_book: std::sync::RwLock::new(BTreeMap::new()),
+            yard_clock: std::sync::RwLock::new(
+                [world.cvn73, world.cvn71, world.cvn75]
+                    .into_iter()
+                    .map(|v| (v, YardClockDoc::norfolk_seed()))
+                    .collect(),
+            ),
             geometry: std::sync::RwLock::new(BTreeMap::new()),
             cleared_hazards: std::sync::Mutex::new(Vec::new()),
             compartment_register: std::sync::RwLock::new(BTreeMap::new()),
@@ -1726,6 +1806,24 @@ impl InMemoryStore {
             .cloned()
     }
 
+    /// The hull's yard clock document, unscoped — for boot wiring, where the
+    /// XER loader needs the clock before any tenant exists.
+    #[must_use]
+    pub fn yard_clock_doc_of(&self, vessel: VesselId) -> Option<YardClockDoc> {
+        self.yard_clock
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
+
+    /// The clock in effect for a hull: its document's, or UTC.
+    #[must_use]
+    pub fn yard_clock_of(&self, vessel: VesselId) -> wadl_domain::civil::YardClock {
+        self.yard_clock_doc_of(vessel)
+            .map_or_else(wadl_domain::civil::YardClock::utc, |d| d.clock)
+    }
+
     fn ingested_zones(&self, vessel: VesselId) -> Option<ZoneRegister> {
         self.zone_register
             .read()
@@ -1979,6 +2077,51 @@ impl Repositories for InMemoryStore {
     ) -> Result<Option<String>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
         Ok(self.ingested(vessel).map(|sor| sor.label))
+    }
+
+    async fn schedule_parsed_in(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<String>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.ingested(vessel).and_then(|sor| sor.parsed_in))
+    }
+
+    async fn yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<YardClockDoc>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.yard_clock_doc_of(vessel))
+    }
+
+    async fn set_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: YardClockDoc,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.yard_clock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc);
+        Ok(())
+    }
+
+    async fn clear_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.yard_clock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
     }
 
     async fn zone_register(

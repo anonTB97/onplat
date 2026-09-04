@@ -37,7 +37,7 @@ use sqlx::Row as _;
 use uuid::Uuid;
 use wadl_domain::ids::{OrgId, VesselId};
 use wadl_domain::time::Timestamp;
-use wadl_store::memory::{GeometryRegister, ManningBook};
+use wadl_store::memory::{GeometryRegister, ManningBook, YardClockDoc};
 use wadl_store::model::{DeckCoverageSummary, ManningCrewSummary, SpaceGeometrySummary};
 use wadl_store::pg::PgStore;
 use wadl_store::StoreError;
@@ -414,6 +414,7 @@ async fn ingested_documents_are_all_or_nothing_and_tenant_scoped() {
                 label: "test.xer".to_owned(),
                 activities,
                 edges: vec![],
+                parsed_in: Some("America/New_York · test-clock.csv".to_owned()),
             },
         )
         .await
@@ -426,7 +427,69 @@ async fn ingested_documents_are_all_or_nothing_and_tenant_scoped() {
             .as_deref(),
         Some("test.xer")
     );
+    // The clock it was parsed in survives the round trip with it.
+    assert_eq!(
+        store
+            .schedule_parsed_in(&scope, hull)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("America/New_York · test-clock.csv")
+    );
     store.clear_schedule_of_record(&scope, hull).await.unwrap();
+    assert!(store
+        .schedule_parsed_in(&scope, hull)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn the_yard_clock_round_trips_and_stays_in_tenant() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN73);
+
+    // The database-backed store defaults to no clock — UTC, honestly — until
+    // one arrives through the door; nothing is seeded.
+    store.clear_yard_clock(&scope, hull).await.unwrap();
+    assert!(store.yard_clock(&scope, hull).await.unwrap().is_none());
+
+    let mut doc = YardClockDoc::norfolk_seed();
+    doc.label = "CVN73-clock.csv".to_owned();
+    store
+        .set_yard_clock(&scope, hull, doc.clone())
+        .await
+        .unwrap();
+    let served = store.yard_clock(&scope, hull).await.unwrap().unwrap();
+    assert_eq!(served, doc, "zone, offsets, rule, watch and shifts intact");
+    assert_eq!(served.clock.zone, "America/New_York");
+    assert_eq!(served.clock.shifts.len(), 3);
+
+    // Another tenant cannot see the clock — the hull itself is not-found.
+    let foreign = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.yard_clock(&foreign, hull).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.clear_yard_clock(&foreign, hull).await,
+        Err(StoreError::NotFound)
+    ));
+
+    // Replaced whole, then reverted whole.
+    let mut guam = doc.clone();
+    guam.label = "CVN73-guam.csv".to_owned();
+    guam.clock.zone = "Pacific/Guam".to_owned();
+    guam.clock.standard_offset_minutes = 600;
+    guam.clock.daylight = None;
+    store.set_yard_clock(&scope, hull, guam).await.unwrap();
+    let served = store.yard_clock(&scope, hull).await.unwrap().unwrap();
+    assert_eq!(served.label, "CVN73-guam.csv");
+    assert!(served.clock.daylight.is_none());
+
+    store.clear_yard_clock(&scope, hull).await.unwrap();
+    assert!(store.yard_clock(&scope, hull).await.unwrap().is_none());
 }
 
 #[tokio::test]

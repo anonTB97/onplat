@@ -63,6 +63,7 @@ pub fn schedule_of_record(label: &str, report: &XerIngestReport) -> ScheduleOfRe
         label: label.to_owned(),
         activities,
         edges,
+        parsed_in: None,
     }
 }
 

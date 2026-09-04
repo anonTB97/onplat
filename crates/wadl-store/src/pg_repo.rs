@@ -430,7 +430,7 @@ use wadl_plan::{Package, Segment, SpaceWork};
 
 use crate::memory::{
     BudgetBook, CompartmentRegister, CouplingRegister, GeometryRegister, ManningBook,
-    ScheduleOfRecord, ZoneRegister,
+    ScheduleOfRecord, YardClockDoc, ZoneRegister,
 };
 
 /// The jsonb payload of a `geometry_register` document row: the register minus
@@ -877,9 +877,67 @@ impl Repositories for PgStore {
         let doc = serde_json::json!({
             "activities": sor.activities,
             "edges": sor.edges,
+            "parsed_in": sor.parsed_in,
         });
         self.put_document(scope.org, vessel, "schedule_of_record", &sor.label, doc)
             .await
+    }
+
+    async fn schedule_parsed_in(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<String>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        // A record written before the field existed reads as "unknown".
+        Ok(self
+            .document(scope.org, vessel, "schedule_of_record")
+            .await?
+            .and_then(|(_, doc)| {
+                doc.get("parsed_in")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            }))
+    }
+
+    async fn yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<YardClockDoc>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "yard_clock")
+            .await?
+            .map(|(label, doc)| {
+                Ok(YardClockDoc {
+                    label,
+                    clock: serde_json::from_value(doc)
+                        .map_err(|e| StoreError::Backend(format!("yard_clock doc: {e}")))?,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: YardClockDoc,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let payload = serde_json::to_value(&doc.clock)
+            .map_err(|e| StoreError::Backend(format!("yard_clock doc: {e}")))?;
+        self.put_document(scope.org, vessel, "yard_clock", &doc.label, payload)
+            .await
+    }
+
+    async fn clear_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "yard_clock").await
     }
 
     async fn clear_schedule_of_record(

@@ -75,11 +75,10 @@ proposals shown against it. Each has a print sheet through the existing
 - `TT_FinMile` finish milestones in the XER parser (one line + test): belongs
   to the XER-survival slice, since it changes the ingest contract.
 - Owner and due-by on holds (H5), crowding and hot-vs-flammable on the
-  Tomorrow board (H1), a per-trade filter for the Foreman role (Chrome.tsx is
-  reserved for S10/S12/S18), P6 write-back, float from P6 (`total_float_hr_cnt`
-  is not ingested; margin here is planned finish versus event date).
-- Hazards raised with a future `since` (the raise route refuses them) — so
-  tomorrow's projection is under the conditions known now, and says so.
+  Tomorrow board (H1), a per-trade Foreman filter (Chrome.tsx is reserved for
+  S10/S12/S18), P6 write-back, P6 float (`total_float_hr_cnt` is not ingested).
+- Hazards with a future `since` (the raise route refuses them): tomorrow's
+  projection is under the conditions known now, and says so.
 
 ## Contracts
 
@@ -263,8 +262,7 @@ Plus `shell-web/src/yardClock.ts` only if S10 has not landed (shim, see above).
 - `days strip counts starts and refusals per yard day over the gating set`.
 - `keyEventSheet names the layer of every figure`.
 
-Existing suites unchanged: `reports.test.ts`, `windowLoad.test.ts`, `TimeControl.test.ts`.
-Rust suite untouched (`cargo test --workspace --all-features` still runs as the gate).
+Existing suites and the Rust suite are unchanged; the full gate still runs.
 
 ## Acceptance
 
@@ -330,10 +328,9 @@ date." Open one, propose the engine's window, watch the row change.
 - `frees` covers the coupling reach, so a discharge may list spaces with no
   work tomorrow; the group counts only shift spaces and says *frees 4 spaces
   (2 with work tomorrow)*.
-- The demo's milestones are dated; after 2027-01-23 nothing is upcoming and
-  Week Ahead says so — the same clock sensitivity the whole demo has.
-- A yard XER with `TT_FinMile` finish milestones shows fewer key events until
-  the XER slice lands; the picker's count makes the gap visible.
+- After 2027-01-23 no demo milestone is upcoming and Week Ahead says so; a
+  yard XER with `TT_FinMile` finish milestones shows fewer key events until
+  the XER slice lands.
 - Transitive closure in the browser is memoised per register epoch;
   milliseconds at 5,706 activities, to be measured at a 40k register.
 
@@ -344,8 +341,7 @@ date." Open one, propose the engine's window, watch the row change.
   and whether close-out reviews count; the picker shows every milestone until
   a filter is a document.
 - Who receives the *Clearable tonight* sheet (isolation authority, fire
-  marshal, marine chemist, weapons department) — the authority display names
-  land in S18; the sheet groups by them now.
+  marshal, marine chemist, weapons department); display names land in S18.
 
 ## Estimate
 

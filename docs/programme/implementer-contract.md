@@ -33,7 +33,13 @@ decision writes the ledger. Every read takes `as_of`. A failed read renders
 provenance. Labels use yard words. A new shell module is registered in
 `App.tsx`'s `MODULES` list and gets a Field Guide paragraph.
 
-**Commit.** One commit per slice (more if it is genuinely two changes):
+**Commit.** Commit and push at EVERY green checkpoint, not only at the end:
+the sitting can be cut off at any moment by the session's usage limit and
+the container is reclaimed with everything uncommitted. A checkpoint is a
+state where `cargo build --workspace --all-targets --all-features` and the
+shell typecheck pass; tests may still be red at a checkpoint if the message
+says so ("checkpoint: door module compiles; tests next"). The final commit of
+a slice has every gate green. Author every commit as
 
 ```
 git -c user.name="Claude" -c user.email="noreply@anthropic.com" commit -F <msgfile>

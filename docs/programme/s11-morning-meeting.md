@@ -40,9 +40,8 @@ proposals shown against it. Each has a print sheet through the existing
   end of availability, six zone close-out reviews). Light-off and the six
   close-outs each have six predecessors; the reviews have none. The seed world
   has three (`M0100`–`M0300`) with no logic.
-- `ActivityInspector.tsx` opens standalone with `a`, `alt`, `identity`,
-  `vesselId`, `asOf`, `onOpenSpace`, `onOpenJob`, `onProposed` and carries the
-  "Propose to P6" block; `Proposals.tsx` renders a `ProposalList`.
+- `ActivityInspector.tsx` opens standalone (`a`, `alt`, `identity`, `vesselId`,
+  `asOf`, `onOpenSpace`, `onOpenJob`, `onProposed`) with the "Propose to P6" block.
 - `reports.ts`: `Report` model, `toPrintHtml`, `toCsv`, `reportFilename`,
   `CATALOGUE`; `Reports.tsx` renders whatever builder returns a `Report`.
 - `App.tsx`: `MODULES` rail, one `asOf` for the app, `rows` (deck-states at

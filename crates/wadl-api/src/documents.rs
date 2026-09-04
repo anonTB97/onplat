@@ -98,7 +98,7 @@ pub fn derive_vertical_edges(
 
 /// The data rows of a document: line number and trimmed columns, comments
 /// and blanks skipped.
-fn rows(text: &str) -> impl Iterator<Item = (usize, Vec<&str>)> {
+pub(crate) fn rows(text: &str) -> impl Iterator<Item = (usize, Vec<&str>)> {
     text.lines().enumerate().filter_map(|(i, line)| {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {

@@ -23,7 +23,7 @@ use crate::AppState;
 /// single body byte is buffered. Read by hand against [`crate::MAX_IMPORT_BYTES`]
 /// so the generous import ceiling applies to exactly these doors; every other
 /// route keeps axum's small default limit.
-async fn read_import_body<T: serde::de::DeserializeOwned>(
+pub(crate) async fn read_import_body<T: serde::de::DeserializeOwned>(
     req: axum::extract::Request,
 ) -> Result<T, ApiError> {
     let bytes = axum::body::to_bytes(req.into_body(), crate::MAX_IMPORT_BYTES)
@@ -1983,7 +1983,7 @@ pub(crate) struct DryRun {
 /// detail. A tamper-evident record that let a whole zone chart or manning
 /// book be swapped silently was a record with a hole in it exactly where an
 /// auditor would look first.
-async fn ledger_document(
+pub(crate) async fn ledger_document(
     state: &AppState,
     scope: &wadl_store::TenantScope,
     vessel: VesselId,

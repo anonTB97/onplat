@@ -156,6 +156,16 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         true,
         None,
     ),
+    ("GET", "/api/vessels/:id/yard-clock", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/yard-clock",
+        true,
+        Some(
+            r#"{"label":"leak test","clock":{"zone":"UTC","standard_offset_minutes":0,"daylight":null,"watch_minutes":240,"shifts":[{"name":"Days","start_minute":420,"length_minutes":510}]}}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/yard-clock/revert", true, None),
     ("GET", "/api/vessels/:id/schedule-proposals", true, None),
     (
         "POST",

@@ -779,6 +779,57 @@ async fn leak_post_api_vessels_id_schedule_of_record_revert() {
 }
 
 #[tokio::test]
+async fn leak_get_api_vessels_id_yard_clock() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/yard-clock"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("GET", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant GET /api/vessels/:id/yard-clock must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_yard_clock() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/yard-clock"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","clock":{"zone":"UTC","standard_offset_minutes":0,"daylight":null,"watch_minutes":240,"shifts":[{"name":"Days","start_minute":420,"length_minutes":510}]}}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/yard-clock must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_yard_clock_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/yard-clock/revert"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/yard-clock/revert must be 404"
+    );
+}
+
+#[tokio::test]
 async fn leak_get_api_vessels_id_schedule_proposals() {
     let (_, w) = wadl_api::demo_app();
     let org = w.yard_org.as_uuid().to_string();
@@ -915,5 +966,5 @@ async fn control_in_tenant_get_vessel_is_ok() {
 
 #[test]
 fn every_scoped_id_route_has_a_leak_test() {
-    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 47);
+    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 50);
 }

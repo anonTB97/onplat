@@ -27,6 +27,7 @@ mod handlers;
 pub mod hardening;
 pub mod routes;
 pub mod schedule;
+pub mod yard_clock;
 
 use std::sync::Arc;
 
@@ -180,6 +181,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/vessels/:id/schedule-of-record/revert",
             post(handlers::revert_schedule),
+        )
+        .route(
+            "/api/vessels/:id/yard-clock",
+            get(yard_clock::get_yard_clock).post(yard_clock::import_yard_clock),
+        )
+        .route(
+            "/api/vessels/:id/yard-clock/revert",
+            post(yard_clock::revert_yard_clock),
         )
         .route(
             "/api/vessels/:id/schedule-proposals",

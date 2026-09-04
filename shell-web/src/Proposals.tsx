@@ -19,7 +19,7 @@ import {
   type ProposalStatus,
   type ScheduleProposal,
 } from "./api";
-import { fmtDay, fmtDayTime } from "./clock";
+import { currentClock, fmtDate, fmtDay, fmtDayTime, fmtWall } from "./clock";
 import { Loading } from "./Loading";
 import { C, chipStyle, tdStyle, thStyle } from "./theme";
 
@@ -37,12 +37,14 @@ const KIND: Record<ScheduleProposal["kind"], string> = {
   hold_pending_verification: "hold pending verification",
 };
 
-/** P6's date spelling, UTC: `YYYY-MM-DD HH:MM`. */
-const p6Date = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+/** P6's date spelling, in the YARD'S wall clock: `YYYY-MM-DD HH:MM`. P6 reads
+ *  wall clock — a UTC instant written here would land four hours early on
+ *  the scheduler's screen, the exact misread the yard clock exists to stop. */
+const p6Date = (ms: number): string => `${fmtDate(ms)} ${fmtWall(ms)}`;
 
-/** The as-of stamp a file carries in its name. */
+/** The as-of stamp a file carries in its name, in the yard's clock. */
 const stamp = (ms: number | null): string =>
-  ms === null ? "" : `-asof-${new Date(ms).toISOString().slice(0, 16).replace(/[:T]/g, "")}`;
+  ms === null ? "" : `-asof-${fmtDate(ms)}${fmtWall(ms).replace(":", "")}`;
 
 function downloadText(lines: string[], filename: string, type: string): void {
   const blob = new Blob([lines.join("\n")], { type });
@@ -71,7 +73,7 @@ export function changeRequestCsv(
   const head = [
     `# Schedule change request — ${hullLabel} — schedule of record: ${source ?? "the generated demo register"}`,
     `# produced by Shipyard AI Onboard${asOf !== null ? ` as of ${fmtDayTime(asOf)}` : ""} · ${rows.length} open proposal${rows.length === 1 ? "" : "s"}`,
-    "# Columns 1–6 are P6's activity-import layout (Start/Finish UTC, constraint Start On or After). Nothing here has been applied; P6 decides.",
+    `# Columns 1–6 are P6's activity-import layout (Start/Finish in the yard's clock (${currentClock().zone}), constraint Start On or After). Nothing here has been applied; P6 decides.`,
     "Activity ID,Activity Name,Start,Finish,Primary Constraint,Primary Constraint Date,Delay Days,Kind,Reason,Engine Verdict,Knock-on,Proposed At,Ledger Seq,Ledger Hash",
   ];
   const body = rows.map((p) => {

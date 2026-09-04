@@ -13,9 +13,10 @@
 // Nothing here fetches. Builders take exactly the rows the app already holds.
 
 import type { Activity, DeckStateRow, Decision, Issue, LiveHazard } from "./api";
-import { fmtDay, fmtDayTime } from "./clock";
+import { clockIsDefault, currentClock, fmtDate, fmtDay, fmtDayTime, fmtStamp, fmtWall } from "./clock";
 import { STATE_STYLE } from "./theme";
 import { activityWindowHours, refusalOverlaps } from "./windowLoad";
+import { offsetAt, offsetLabel, shiftChip, shiftWindows, type YardClock } from "./yardClock";
 
 export type ReportId = "shift" | "zone" | "compartment" | "conflicts" | "conditions";
 
@@ -51,7 +52,7 @@ export interface Report {
   id: ReportId;
   name: string;
   question: string;
-  /** The scope the report was cut to — "Zone Z6", "Days 0700–1530 (Z)". */
+  /** The scope the report was cut to — "Zone Z6", "Days 0700–1530". */
   scope: string;
   cut: ReportCut;
   sections: ReportSection[];
@@ -61,10 +62,19 @@ export interface Report {
 
 /* ------------------------------------------------------------- vocabulary */
 
-const LAYER_NOTES = [
+/** The clock the sheet's times are in, named once in the footer: the yard's
+ *  zone and the offset in force at the cut, or the honest UTC default. */
+export function clockNote(cutMs: number): string {
+  if (clockIsDefault()) return "Clocks: UTC — no yard clock loaded; every time on this sheet is Z.";
+  const clock = currentClock();
+  return `Clocks: the yard's, ${clock.zone} (${offsetLabel(offsetAt(clock, cutMs))} at the cut).`;
+}
+
+const layerNotes = (cut: ReportCut): string[] => [
   "MH: man-hours from the schedule of record, pro-rated by window where a shift is named.",
   "Held, refused, not executable: the engine's verdicts at the cut instant.",
   "Field conditions: recorded facts on the hull as of the cut; a clearance keeps its own time.",
+  clockNote(cut.asOfMs),
 ];
 
 const mh = (n: number): string => `${Math.round(n).toLocaleString()} MH`;
@@ -119,27 +129,45 @@ const ISSUE_WORD: Record<Issue["kind"], string> = {
 
 /* ---------------------------------------------------------------- shifts */
 
-export type Shift = "instant" | "days" | "swing" | "night";
+/** A slice: the instant on the time control, or one of the yard's shifts by
+ *  the name the yard's clock gives it (`Days`, `Swing`, `Mids` — whatever the
+ *  clock document says). */
+export type Shift = "instant" | string;
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
+/** The shift chips a board offers under a clock: the instant, then each of
+ *  the yard's shifts named its way — `Days 0700–1530`. */
+export function shiftChoices(clock: YardClock = currentClock()): { id: Shift; label: string; gloss: string }[] {
+  const ordinal = ["first", "second", "third", "fourth", "fifth", "sixth"];
+  return [
+    { id: "instant", label: "This instant", gloss: "planned at the moment on the time control" },
+    ...clock.shifts.map((s, i) => ({
+      id: s.name,
+      label: shiftChip(s),
+      gloss: `${ordinal[i] ?? `${i + 1}th`} shift of the as-of day, in the yard's clock (${clock.zone})`,
+    })),
+  ];
+}
+
 /**
- * The shift's window on the as-of day. Anchored to UTC midnight and labelled
- * (Z) until the yard's clock and shift calendar land as a document — the
- * label is the honest part until then.
+ * The shift's window on the as-of day, from the yard's clock: the shift
+ * belongs to the local calendar date its start falls on and runs its full
+ * length, across midnight and across the night the clock moves. The label
+ * is the chip's — `Days 0700–1530` — with no zone marker, because the zone
+ * is said once on the strip and again in the sheet's footer.
  */
-export function shiftWindow(asOfMs: number, shift: Shift): { start: number; end: number; label: string } | null {
+export function shiftWindow(
+  asOfMs: number,
+  shift: Shift,
+  clock: YardClock = currentClock(),
+): { start: number; end: number; label: string } | null {
   if (shift === "instant") return null;
-  const midnight = Math.floor(asOfMs / DAY) * DAY;
-  switch (shift) {
-    case "days":
-      return { start: midnight + 7 * HOUR, end: midnight + 15.5 * HOUR, label: "Days 0700–1530 (Z)" };
-    case "swing":
-      return { start: midnight + 15.5 * HOUR, end: midnight + 24 * HOUR, label: "Swing 1530–2400 (Z)" };
-    case "night":
-      return { start: midnight, end: midnight + 7 * HOUR, label: "Night 0000–0700 (Z)" };
-  }
+  const def = clock.shifts.find((s) => s.name === shift);
+  const win = shiftWindows(clock, asOfMs).find((w) => w.name === shift);
+  if (!def || !win) return null;
+  return { start: win.start, end: win.end, label: shiftChip(def) };
 }
 
 /* --------------------------------------------------------------- builders */
@@ -206,7 +234,7 @@ export function shiftSheet(input: ShiftInput): Report {
     scope: `${win ? win.label : `at ${fmtDayTime(cut.asOfMs)}`}${zone ? ` · Zone ${zone}` : " · all zones"}`,
     cut,
     sections: sections.length > 0 ? sections : [{ heading: "Nothing planned", columns: ["—"], rows: [["No activities fall in this slice."]] }],
-    notes: LAYER_NOTES,
+    notes: layerNotes(cut),
   };
 }
 
@@ -288,7 +316,7 @@ export function zoneSheet(input: ZoneInput): Report {
     scope: `Zone ${zone} · ${fmtDay(t0)} → ${fmtDay(t1)}`,
     cut,
     sections: [spacesSection, emptyOr(conditions, "No open field conditions in this zone."), emptyOr(broken, "Every activity in this zone can execute as planned.")],
-    notes: [...LAYER_NOTES, `Zone membership from the register (${spaces.length} spaces served); a space with no register row is not on this sheet.`],
+    notes: [...layerNotes(cut), `Zone membership from the register (${spaces.length} spaces served); a space with no register row is not on this sheet.`],
   };
 }
 
@@ -362,7 +390,7 @@ export function compartmentCard(input: CompartmentInput): Report {
     scope: space,
     cut,
     sections: [facts, emptyOr(why, "Nothing holds this space at the cut instant."), emptyOr(conditions, "No open field conditions originate here."), emptyOr(work, "No scheduled work is located to this space.")],
-    notes: LAYER_NOTES,
+    notes: layerNotes(cut),
   };
 }
 
@@ -407,7 +435,7 @@ export function conflictLog(input: ConflictInput): Report {
     scope: zone ? `Zone ${zone}` : "all zones",
     cut,
     sections: [emptyOr(section, "No issues on the board at the cut instant.")],
-    notes: [...LAYER_NOTES, "Answers are ledger entries: acknowledgements and mitigation decisions recorded against the issue or its space."],
+    notes: [...layerNotes(cut), "Answers are ledger entries: acknowledgements and mitigation decisions recorded against the issue or its space."],
   };
 }
 
@@ -452,7 +480,7 @@ export function fieldConditions(input: ConditionsInput): Report {
     scope: "whole hull",
     cut,
     sections: [emptyOr(section, "No open field conditions at the cut instant.")],
-    notes: [...LAYER_NOTES, "What each condition holds beyond its own space is on the compartment card and the deck plan's trace."],
+    notes: [...layerNotes(cut), "What each condition holds beyond its own space is on the compartment card and the deck plan's trace."],
   };
 }
 
@@ -467,13 +495,15 @@ export function csvCell(s: string): string {
   return /[",\n\r]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 }
 
-/** The whole report as CSV lines: a cut header, then each section with its heading as a row. */
+/** The whole report as CSV lines: a cut header, then each section with its
+ *  heading as a row. `cut_at` is the record-grade stamp — the yard's wall
+ *  clock with its offset in full, once — so the file says what clock it spoke in. */
 export function toCsv(r: Report): string[] {
   const lines: string[] = [
     ["report", r.name].map(csvCell).join(","),
     ["scope", r.scope].map(csvCell).join(","),
     ["hull", r.cut.hull].map(csvCell).join(","),
-    ["cut_at", new Date(r.cut.asOfMs).toISOString()].map(csvCell).join(","),
+    ["cut_at", fmtStamp(r.cut.asOfMs)].map(csvCell).join(","),
     ["schedule", r.cut.scheduleSource ?? "generated demo register"].map(csvCell).join(","),
     ["produced_by", r.cut.producedBy].map(csvCell).join(","),
   ];
@@ -489,7 +519,8 @@ export function toCsv(r: Report): string[] {
 /** The report's filename: what it is, for what, as of when. */
 export function reportFilename(r: Report, ext: "csv" | "html"): string {
   const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-  return `${slug(r.name)}-${slug(r.cut.hull)}-${slug(r.scope)}-asof-${new Date(r.cut.asOfMs).toISOString().slice(0, 16).replace(/[-:T]/g, "")}.${ext}`;
+  const asOf = `${fmtDate(r.cut.asOfMs)}${fmtWall(r.cut.asOfMs)}`.replace(/[-:]/g, "");
+  return `${slug(r.name)}-${slug(r.cut.hull)}-${slug(r.scope)}-asof-${asOf}.${ext}`;
 }
 
 const esc = (s: string): string =>
@@ -531,7 +562,7 @@ export function toPrintHtml(r: Report): string {
 </style></head><body>
 <header>
   <div><h1>${esc(r.name)} — ${esc(r.scope)}</h1><p class="q">${esc(r.question)}</p></div>
-  <div class="cut">${esc(r.cut.hull)}<br>cut ${esc(fmtDayTime(r.cut.asOfMs))}<br>schedule: ${esc(r.cut.scheduleSource ?? "generated demo register")}<br>by ${esc(r.cut.producedBy)}</div>
+  <div class="cut">${esc(r.cut.hull)}<br>cut ${esc(fmtStamp(r.cut.asOfMs))}<br>schedule: ${esc(r.cut.scheduleSource ?? "generated demo register")}<br>by ${esc(r.cut.producedBy)}</div>
 </header>
 ${sections}
 <footer>${r.notes.map(esc).join("<br>")}<br>Decision support — flags risk; the planner decides. Nothing on this sheet is an authorization.</footer>

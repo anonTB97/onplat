@@ -28,7 +28,8 @@ import { ModuleHeader } from "./ModuleHeader";
 import { chipStyle, C, mh } from "./theme";
 import { activityWindowHours, refusalOverlaps } from "./windowLoad";
 
-import { fmtDay, fmtStamp, fmtTime } from "./clock";
+import { currentClock, fmtDay, fmtStamp, fmtTime, zoneLabel } from "./clock";
+import { shiftChoices, shiftWindow, type Shift } from "./reports";
 
 /** The activity's slot as a foreman reads it: times inside a day, else days. */
 const fmtSlot = (w: { start: number; end: number } | null): string => {
@@ -38,40 +39,15 @@ const fmtSlot = (w: { start: number; end: number } | null): string => {
     : `${fmtDay(w.start)} → ${fmtDay(w.end)}`;
 };
 
-const DAY = 86_400_000;
-const HOUR = 3_600_000;
-
 /** "1 activity", "4 activities" — a count that reads as written by a person. */
 const nActs = (n: number): string => `${n} ${n === 1 ? "activity" : "activities"}`;
 
-/**
- * The board's slice. "instant" is the register's own in-window mark — what is
- * planned at the moment on the time control. The three shifts are the yard's
- * working day around that same instant, so a superintendent can read tonight's
- * board this afternoon. All times are Z, like every clock in this shell.
- */
-type Shift = "instant" | "days" | "swing" | "night";
-
-const SHIFTS: { id: Shift; label: string; gloss: string }[] = [
-  { id: "instant", label: "This instant", gloss: "planned at the moment on the time control" },
-  { id: "days", label: "Days 0700–1530", gloss: "first shift of the as-of day" },
-  { id: "swing", label: "Swing 1530–2400", gloss: "second shift of the as-of day" },
-  { id: "night", label: "Night 0000–0700", gloss: "third shift of the as-of day" },
-];
-
-/** The shift's window on the as-of day, or null for the instant mode. */
-function shiftWindow(asOfMs: number, shift: Shift): { start: number; end: number } | null {
-  if (shift === "instant") return null;
-  const midnight = Math.floor(asOfMs / DAY) * DAY;
-  switch (shift) {
-    case "days":
-      return { start: midnight + 7 * HOUR, end: midnight + 15.5 * HOUR };
-    case "swing":
-      return { start: midnight + 15.5 * HOUR, end: midnight + 24 * HOUR };
-    case "night":
-      return { start: midnight, end: midnight + 7 * HOUR };
-  }
-}
+// The board's slice. "instant" is the register's own in-window mark — what is
+// planned at the moment on the time control. The shifts are the yard's own,
+// from its clock document (`reports.ts::shiftChoices`), on the as-of LOCAL
+// day around that same instant, so a superintendent can read tonight's board
+// this afternoon. Every time on the board is the yard's wall clock; the zone
+// is said once, on the strip and in the printed footer.
 
 /** Rows a trade's column shows before it folds — the morning's read, with
  *  the rest counted in the header and one click away. */
@@ -82,6 +58,7 @@ export default function DailyOps({
   vesselId,
   hullLabel,
   asOf,
+  clockEpoch,
   spaces,
   verdictsOk,
   onOpenSpace,
@@ -91,6 +68,9 @@ export default function DailyOps({
   vesselId: string;
   hullLabel: string;
   asOf: AsOf;
+  /** Bumped by the app when the hull's yard clock changes, so the shift
+   *  windows below are recomputed in the new clock. */
+  clockEpoch: number;
   /** The hull's per-space verdicts at the same instant, from the app shell. */
   spaces: DeckStateRow[];
   /**
@@ -130,8 +110,16 @@ export default function DailyOps({
 
   // The slice: the in-window mark at the instant, or the chosen shift's window
   // on the as-of day. Undated work is in every slice — counted into each shift
-  // rather than hidden from all of them.
-  const win = asOfMs !== null ? shiftWindow(asOfMs, shift) : null;
+  // rather than hidden from all of them. The choices and the window come from
+  // the clock in effect; a shift name the new clock does not know falls back
+  // to the instant rather than to a window nobody named.
+  const choices = useMemo(() => shiftChoices(currentClock()), [clockEpoch]);
+  const chosen = choices.some((c) => c.id === shift) ? shift : "instant";
+  // `clockEpoch` stands for the module clock `shiftWindow` reads.
+  const win = useMemo(
+    () => (asOfMs !== null ? shiftWindow(asOfMs, chosen) : null),
+    [asOfMs, chosen, clockEpoch],
+  );
   const inSlice = useMemo(() => {
     return (a: Activity): boolean => {
       if (win === null) return a.in_window;
@@ -202,7 +190,7 @@ export default function DailyOps({
   const sliceLabel =
     win === null
       ? `at ${asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}` : "now"}`
-      : `${SHIFTS.find((s) => s.id === shift)?.label ?? ""} · ${fmtDay(win.start)} (Z)`;
+      : `${win.label} · ${fmtDay(win.start)}`;
 
   // The one-pager. Generated as its own monochrome document rather than
   // printing the app: a shift board goes up on a clipboard wall, where dark
@@ -262,7 +250,7 @@ export default function DailyOps({
       ${heldCount > 0 ? ` · ${heldCount} in a space the engine refuses now` : ""}
       ${doomedCount > 0 ? ` · ${doomedCount} not executable as planned` : ""}</p>
       ${eventRows}${rows}
-      <footer>Generated ${fmtStamp(Date.now())} · decision support only — flags risk; the planner decides. Does not modify the schedule.</footer>
+      <footer>Generated ${fmtStamp(Date.now())} · clocks: ${esc(zoneLabel(asOfMs ?? Date.now()))} · decision support only — flags risk; the planner decides. Does not modify the schedule.</footer>
       </body></html>`;
     const w = window.open("", "_blank", "width=900,height=700");
     if (!w) return;
@@ -321,11 +309,11 @@ export default function DailyOps({
         </div>
       )}
 
-      {/* The slice: this instant, or one of the yard's three shifts on the
-          as-of day — so tonight's board is readable this afternoon. */}
+      {/* The slice: this instant, or one of the yard's shifts on the as-of
+          day — so tonight's board is readable this afternoon. */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        {SHIFTS.map((s) => (
-          <button key={s.id} style={chip(shift === s.id)} onClick={() => setShift(s.id)} title={s.gloss}>
+        {choices.map((s) => (
+          <button key={s.id} style={chip(chosen === s.id)} onClick={() => setShift(s.id)} title={s.gloss}>
             {s.label}
           </button>
         ))}

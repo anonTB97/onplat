@@ -57,7 +57,7 @@ import { windowLoadBySpace, windowLoadTotal, type SpaceLoad } from "./windowLoad
 import { DiscardButton } from "./DiscardButton";
 import { bandCoversDeck, zoneBands, type ZoneGeometry } from "./zones";
 import { fmtDate, fmtDay, fmtMonth } from "./clock";
-import { blockLabel, blockStart, utcDayStart } from "./watch";
+import { blockEnd, blockLabel, blockStart, dayStart, nextDayStart } from "./watch";
 import { demandByTrade, demandByZone, zoneInteractions } from "./manning";
 
 const DIM = C.dim;
@@ -460,17 +460,19 @@ export default function DeckExplorer({
     };
   }, [identity, vesselId, asOf, epoch]);
 
-  // At the Day horizon the reading window is the CALENDAR day under the
-  // clicker, not [instant, +24h): picking the 08–12Z block must not slide the
-  // "this day" numbers into tomorrow morning. Same day-identity the ops board
-  // and the work-conflicts endpoint already use.
+  // At the Day horizon the reading window is the yard's CALENDAR day under
+  // the clicker, not [instant, +24h): picking the 08–12 block must not slide
+  // the "this day" numbers into tomorrow morning. Same day-identity the ops
+  // board uses — the local date, which is 23 or 25 hours long twice a year.
   const winStart =
-    horizon === "day" ? utcDayStart(asOf ?? now ?? 0) : (asOf ?? now ?? 0);
+    horizon === "day" ? dayStart(asOf ?? now ?? 0) : (asOf ?? now ?? 0);
   const horizonSpan = HORIZONS[horizon].span;
   const winEnd =
-    horizonSpan !== null
-      ? winStart + horizonSpan
-      : Math.max(winStart + 1, ...activities.map((a) => a.planned?.end ?? 0));
+    horizon === "day"
+      ? nextDayStart(winStart)
+      : horizonSpan !== null
+        ? winStart + horizonSpan
+        : Math.max(winStart + 1, ...activities.map((a) => a.planned?.end ?? 0));
   const spaceLoad = useMemo(
     () => (winStart > 0 ? windowLoadBySpace(activities, winStart, winEnd) : new Map()),
     [activities, winStart, winEnd],
@@ -1438,7 +1440,7 @@ function manningStep(horizon: Horizon, at: number): { start: number; end: number
   const step = HORIZONS[horizon].step;
   if (horizon === "day") {
     const start = blockStart(at);
-    return { start, end: start + step, noun: "half-shift", label: `${fmtDay(start)} · ${blockLabel(start)}` };
+    return { start, end: blockEnd(at), noun: "watch", label: `${fmtDay(start)} · ${blockLabel(start)}` };
   }
   if (horizon === "week") return { start: at, end: at + step, noun: "day", label: fmtDay(at) };
   if (horizon === "month") return { start: at, end: at + step, noun: "week", label: `wk of ${fmtDay(at)}` };
@@ -1446,7 +1448,7 @@ function manningStep(horizon: Horizon, at: number): { start: number; end: number
 }
 
 /**
- * Crews, superimposed on the reading. One step of the clicker — a half-shift,
+ * Crews, superimposed on the reading. One step of the clicker — a watch,
  * a day, a week — priced in PEOPLE: demand from the register by the shared
  * pro-rating rule, supply from the imported manning book (or "demand only",
  * said out loud), zones rolled up with their trade mix, and the zones that

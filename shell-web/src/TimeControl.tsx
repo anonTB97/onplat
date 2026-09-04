@@ -6,10 +6,14 @@
 //
 // Two decisions shape this control:
 //
-// **The floor of resolution is the 4-hour watch block** (`watch.ts`). The finest
-// instant a reader can pick is the start of a UTC-aligned block — 00–04Z,
-// 04–08Z, … — because that is the lowest level anything on this hull is planned
-// at. An hour-grain scrubber claimed a precision no schedule carries.
+// **The floor of resolution is the watch block** (`watch.ts`). The finest
+// instant a reader can pick is the start of a block on the yard's own clock —
+// 00–04, 04–08, … on the hull's local date — because that is the lowest level
+// anything on this hull is planned at. An hour-grain scrubber claimed a
+// precision no schedule carries. The day grid is therefore NOT uniform
+// arithmetic: on the night the clock moves a watch is five hours or three,
+// so every day-horizon gesture goes through `blockStart`/`blockEnd` rather
+// than `± WATCH_MS`. The wider horizons keep uniform steps.
 //
 // **Dates are clicked, not scrubbed.** The control is a transport bar —
 // « ‹ [calendar date] ▶ ■ t › » — because "show me Thursday" is a discrete
@@ -32,15 +36,19 @@
 
 import { useEffect } from "react";
 import type { AsOf, Window as TimeWindow } from "./api";
+import { clockIsDefault, currentClock, fmtDate, zoneLabel } from "./clock";
 import { C } from "./theme";
 import {
+  blockEnd,
+  blockIndex,
   blockLabel,
   blockStart,
   DAY_MS as DAY,
-  utcDayStart,
+  dayStart,
   WATCH_MS,
   watchBlocksOf,
 } from "./watch";
+import { civilFromDays, daysFromCivil, local, toUtc, weekday } from "./yardClock";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -124,6 +132,13 @@ function alignStart(start: number, anchor: number, step: number): number {
 }
 
 /**
+ * Whether a step is "one watch" — the day horizon's step, which the yard's
+ * clock resolves rather than arithmetic. Every helper below branches on it:
+ * a watch is `blockStart`/`blockEnd`, not `± WATCH_MS`.
+ */
+const isWatch = (step: number): boolean => step === HORIZONS.day.step;
+
+/**
  * The last grid notch strictly inside `w`.
  *
  * The window's exclusive end is almost never on the grid, so clamping to
@@ -131,6 +146,7 @@ function alignStart(start: number, anchor: number, step: number): number {
  * instant this control emits is on the grid, top of the window included.
  */
 function lastNotch(w: TimeWindow, step: number): number {
+  if (isWatch(step)) return Math.max(w.start, blockStart(w.end - 1));
   return w.start + Math.floor((w.end - 1 - w.start) / step) * step;
 }
 
@@ -139,17 +155,30 @@ export function clampInto(at: number, w: TimeWindow, step: number): number {
   return Math.min(lastNotch(w, step), Math.max(w.start, at));
 }
 
+/** The notch after `at` on `w`'s grid — the playback beat. Past the last
+ *  notch it returns an instant beyond it, which the caller reads as "stop". */
+export function nextNotch(at: number, w: TimeWindow, step: number): number {
+  const here = clampInto(at, w, step);
+  return isWatch(step) ? blockEnd(here) : here + step;
+}
+
+/** The first watch that starts at or after `ms`. */
+function firstWatchAtOrAfter(ms: number): number {
+  const start = blockStart(ms);
+  return start >= ms ? start : blockEnd(ms);
+}
+
 /**
  * The one grid every gesture moves on: the WHOLE availability, notched at the
  * horizon's step.
  *
- * The day grid is anchored to UTC midnight, so its notches ARE the watch
- * blocks — calendar names two readers share. The wider grids run through
- * `now`, so the present is itself a notch and the live band means what it
- * says. There is deliberately no windowing: « must reach the availability's
- * first notch and ▶ its last, whatever the horizon — anchoring a window on
- * `now` is exactly how « once landed on "roughly yesterday" and playback froze
- * against an edge the readout never named.
+ * The day grid's notches ARE the yard's watch blocks — calendar names two
+ * readers share, on the yard's own clock. The wider grids run through `now`,
+ * so the present is itself a notch and the live band means what it says.
+ * There is deliberately no windowing: « must reach the availability's first
+ * notch and ▶ its last, whatever the horizon — anchoring a window on `now` is
+ * exactly how « once landed on "roughly yesterday" and playback froze against
+ * an edge the readout never named.
  */
 export function availabilityGrid(
   horizon: Horizon,
@@ -157,13 +186,38 @@ export function availabilityGrid(
   availability: TimeWindow,
 ): TimeWindow {
   const { step } = HORIZONS[horizon];
-  const anchor = horizon === "day" ? utcDayStart(availability.start) : now;
-  return { start: alignStart(availability.start, anchor, step), end: availability.end };
+  if (horizon === "day") return { start: firstWatchAtOrAfter(availability.start), end: availability.end };
+  return { start: alignStart(availability.start, now, step), end: availability.end };
 }
 
 /** Snaps an instant to the horizon's step grid inside `w`. */
 function snap(ms: number, w: TimeWindow, step: number): number {
+  if (isWatch(step)) {
+    const lo = blockStart(ms);
+    const hi = blockEnd(ms);
+    return clampInto(ms - lo < hi - ms ? lo : hi, w, step);
+  }
   return clampInto(w.start + Math.round((ms - w.start) / step) * step, w, step);
+}
+
+/**
+ * The same watch index on another local day — how ‹ › move at Day. Index,
+ * not `± 24 h`: across the night the clock moves, "the 08–12 watch tomorrow"
+ * is 23 or 25 hours away, and the reader asked for the watch, not the hours.
+ */
+export function sameWatchOn(at: number, dayDelta: number): number {
+  const clock = currentClock();
+  const { days } = local(clock, at);
+  return toUtc(clock, days + dayDelta, blockIndex(at) * clock.watch_minutes)[0];
+}
+
+/** The instant on a picked local date that keeps `at`'s place in the day:
+ *  the watch index at Day, the time within the day elsewhere. */
+export function onLocalDate(at: number, y: number, m: number, d: number, horizon: Horizon): number {
+  const clock = currentClock();
+  const days = daysFromCivil(y, m, d);
+  if (horizon === "day") return toUtc(clock, days, blockIndex(at) * clock.watch_minutes)[0];
+  return toUtc(clock, days, 0)[0] + (at - dayStart(at));
 }
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -174,14 +228,15 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
  *
  * A month-resolution readout that printed minutes would be claiming a precision
  * the step cannot deliver; the day horizon names the watch block, because the
- * block is the resolution. Everything is UTC and says so — a yard runs on Zulu
- * and a local rendering would be a different instant to different readers.
+ * block is the resolution. Everything is the yard's clock, and the strip says
+ * which once — under the default it is UTC, and says so in amber.
  */
 export function fmtInstant(ms: number, horizon: Horizon): string {
-  const d = new Date(ms);
-  const day = `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+  const { days } = local(currentClock(), ms);
+  const [y, m, d] = civilFromDays(days);
+  const day = `${WEEKDAYS[weekday(days)]} ${d} ${MONTHS[m - 1]}`;
   if (horizon === "day") return `${day} · ${blockLabel(ms)}`;
-  if (horizon === "availability") return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  if (horizon === "availability") return `${MONTHS[m - 1]} ${y}`;
   return day;
 }
 
@@ -256,8 +311,9 @@ export function TimeControl({
     const end = lastNotch(w, def.step);
     const id = window.setInterval(() => {
       // From the grid, never from a raw `at`: starting off-grid would walk
-      // the whole run of requests off the notches the readout names.
-      const next = clampInto(at, w, def.step) + def.step;
+      // the whole run of requests off the notches the readout names. At Day
+      // the beat is the next WATCH, which the clock resolves — not + 4 h.
+      const next = nextNotch(at, w, def.step);
       if (next > end) {
         onPlaying(false);
       } else {
@@ -287,12 +343,16 @@ export function TimeControl({
   };
 
   /** Step one clicking unit — a day at Day and Week, a week at Month, a month
-   *  at Availability — staying on the grid. */
+   *  at Availability — staying on the grid. At Day, the same watch on the
+   *  adjacent local day. */
   const click = (dir: 1 | -1) => {
     if (!w) return;
     onPlaying(false);
-    const base = horizon === "day" ? blockStart(at) : clampInto(at, w, def.step);
-    onAsOf(clampInto(base + dir * def.click.step, w, def.step));
+    if (horizon === "day") {
+      onAsOf(clampInto(sameWatchOn(blockStart(at), dir), w, def.step));
+      return;
+    }
+    onAsOf(clampInto(clampInto(at, w, def.step) + dir * def.click.step, w, def.step));
   };
 
   const chip = (active: boolean): React.CSSProperties => ({
@@ -376,17 +436,17 @@ export function TimeControl({
             </button>
             <input
               type="date"
-              value={new Date(at).toISOString().slice(0, 10)}
+              value={fmtDate(at)}
               onChange={(e) => {
                 const [yy, mm, dd] = e.target.value.split("-").map(Number);
                 if (!yy || !mm || !dd) return;
                 onPlaying(false);
-                // Jump to the picked UTC day, preserving the time within the
-                // day — the chosen watch block at Day, the grid slot elsewhere.
-                jump(Date.UTC(yy, mm - 1, dd) + (at - utcDayStart(at)));
+                // Jump to the picked LOCAL day, preserving the place within
+                // it — the chosen watch at Day, the time of day elsewhere.
+                jump(onLocalDate(at, yy, mm, dd, horizon));
               }}
               aria-label="Evaluation date"
-              title="Pick the date to read the hull at (UTC)"
+              title={`Pick the date to read the hull at (${currentClock().zone})`}
               style={{
                 font: "inherit",
                 fontFamily: "monospace",
@@ -468,9 +528,16 @@ export function TimeControl({
           {blocks && availability && (
             <div style={{ display: "flex", gap: 3 }}>
               {blocks.map((b) => {
-                const holdsNow = now >= b.start && now < b.start + WATCH_MS;
-                const active = at >= b.start && at < b.start + WATCH_MS;
-                const outside = b.start >= availability.end || b.start + WATCH_MS <= availability.start;
+                const holdsNow = now >= b.start && now < b.end;
+                const active = at >= b.start && at < b.end;
+                const outside = b.start >= availability.end || b.end <= availability.start;
+                // A watch that is not the watch's length is the night the
+                // clock moved; the chip says so rather than pretending the
+                // night was ordinary.
+                const hours = (b.end - b.start) / HOUR;
+                const odd = b.end - b.start !== currentClock().watch_minutes * MIN
+                  ? ` — ${hours} hours this night: the clock ${hours > currentClock().watch_minutes / 60 ? "fell back" : "sprang forward"} inside it`
+                  : "";
                 return (
                   <button
                     key={b.start}
@@ -483,8 +550,8 @@ export function TimeControl({
                       outside
                         ? `${b.label} — outside this availability`
                         : holdsNow
-                          ? `${b.label} — the current watch (reads live)`
-                          : `Read the hull at ${b.label}`
+                          ? `${b.label} — the current watch (reads live)${odd}`
+                          : `Read the hull at ${b.label}${odd}`
                     }
                     style={{
                       ...chip(active),
@@ -496,11 +563,31 @@ export function TimeControl({
                       borderStyle: holdsNow ? "double" : "solid",
                     }}
                   >
-                    {b.label.replace("Z", "")}
+                    {b.label}
                   </button>
                 );
               })}
             </div>
+          )}
+
+          {/* The zone, said once. Every clock time on every board is in this
+              clock; under the default that is UTC with a Z on every number,
+              in amber, because the product would rather say "no yard clock"
+              than guess one. */}
+          {clockIsDefault() ? (
+            <span
+              title="No yard clock is loaded for this hull, so every time on screen is a UTC instant marked Z. Load the yard's clock in Data Sources and every board reads in the yard's wall clock."
+              style={{ fontFamily: "monospace", color: C.warn, fontSize: 10.5 }}
+            >
+              UTC · no yard clock — load one in Data Sources
+            </span>
+          ) : (
+            <span
+              title="The yard's clock: every time on every board is this wall clock, at the offset in force at the instant on screen."
+              style={{ fontFamily: "monospace", color: C.dim, fontSize: 10.5 }}
+            >
+              {zoneLabel(at)}
+            </span>
           )}
 
           <span style={{ marginLeft: "auto", fontFamily: "monospace", color: C.dim, minWidth: 42 }}>

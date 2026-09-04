@@ -20,7 +20,7 @@ import {
   type Issue,
   type LiveHazard,
 } from "./api";
-import { fmtDayTime } from "./clock";
+import { currentClock, fmtStamp } from "./clock";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import {
@@ -29,6 +29,7 @@ import {
   conflictLog,
   fieldConditions,
   reportFilename,
+  shiftChoices,
   shiftSheet,
   toCsv,
   toPrintHtml,
@@ -40,13 +41,6 @@ import {
 import { chipStyle, C, commitBtnStyle, tdStyle, thStyle } from "./theme";
 
 const DAY = 86_400_000;
-
-const SHIFTS: { id: Shift; label: string }[] = [
-  { id: "instant", label: "This instant" },
-  { id: "days", label: "Days 0700–1530" },
-  { id: "swing", label: "Swing 1530–2400" },
-  { id: "night", label: "Night 0000–0700" },
-];
 
 function download(lines: string[], filename: string): void {
   const blob = new Blob([lines.join("\n")], { type: "text/csv" });
@@ -72,6 +66,7 @@ export default function Reports({
   vesselId,
   hullLabel,
   asOf,
+  clockEpoch,
   spaces,
   issues,
   verdictsOk,
@@ -82,6 +77,9 @@ export default function Reports({
   vesselId: string;
   hullLabel: string;
   asOf: AsOf;
+  /** Bumped when the hull's yard clock changes: the shift chips and every
+   *  cut are re-derived in the new clock. */
+  clockEpoch: number;
   spaces: DeckStateRow[];
   issues: Issue[];
   verdictsOk: boolean | null;
@@ -90,7 +88,12 @@ export default function Reports({
   onOpenSpace: (compartment: string) => void;
 }) {
   const [which, setWhich] = useState<ReportId>("shift");
-  const [shift, setShift] = useState<Shift>("days");
+  // The yard's shifts by the yard's names; the first named shift is the
+  // default sheet. A name the clock in effect does not carry reads as the
+  // instant rather than as a window nobody named.
+  const choices = useMemo(() => shiftChoices(currentClock()), [clockEpoch]);
+  const [shift, setShift] = useState<Shift>(() => choices[1]?.id ?? "instant");
+  const chosen = choices.some((c) => c.id === shift) ? shift : "instant";
   const [zone, setZone] = useState<string | null>(null);
   const [space, setSpace] = useState<string | null>(null);
   const [register, setRegister] = useState<{ activities: Activity[]; asOf: number; source: string | null } | null>(null);
@@ -158,7 +161,7 @@ export default function Reports({
     const cut = { hull: hullLabel, asOfMs: register.asOf, scheduleSource: register.source, producedBy: role };
     switch (which) {
       case "shift":
-        return shiftSheet({ cut, activities: register.activities, spaces, shift, zone });
+        return shiftSheet({ cut, activities: register.activities, spaces, shift: chosen, zone });
       case "zone": {
         const z = zone ?? worstZone;
         return z ? zoneSheet({ cut, zone: z, activities: register.activities, spaces, hazards, windowMs: DAY }) : null;
@@ -174,7 +177,8 @@ export default function Reports({
       case "conditions":
         return fieldConditions({ cut, hazards, spaces });
     }
-  }, [register, hazards, hullLabel, role, which, spaces, shift, zone, worstZone, space, worstSpace, decision, issues]);
+    // `clockEpoch` stands for the module clock every cut reads.
+  }, [register, hazards, hullLabel, role, which, spaces, chosen, zone, worstZone, space, worstSpace, decision, issues, clockEpoch]);
 
   const entry = CATALOGUE.find((c) => c.id === which);
 
@@ -223,8 +227,8 @@ export default function Reports({
         {which === "shift" && (
           <>
             <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: C.dim }}>Shift</span>
-            {SHIFTS.map((s) => (
-              <button key={s.id} style={chipStyle(shift === s.id)} onClick={() => setShift(s.id)}>{s.label}</button>
+            {choices.map((s) => (
+              <button key={s.id} style={chipStyle(chosen === s.id)} onClick={() => setShift(s.id)} title={s.gloss}>{s.label}</button>
             ))}
           </>
         )}
@@ -297,7 +301,7 @@ export default function Reports({
             </div>
             <div style={{ fontFamily: "monospace", fontSize: 10.5, color: C.dim, textAlign: "right", lineHeight: 1.5, whiteSpace: "nowrap" }}>
               {report.cut.hull}<br />
-              cut {fmtDayTime(report.cut.asOfMs)}<br />
+              cut {fmtStamp(report.cut.asOfMs)}<br />
               schedule: {report.cut.scheduleSource ?? "generated demo register"}<br />
               by {report.cut.producedBy}
             </div>

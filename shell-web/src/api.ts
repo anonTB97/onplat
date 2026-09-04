@@ -2,6 +2,9 @@
 // x-assigned-vessels), matching wadl-api's auth extractor; a real session
 // replaces it later. No external hosts — same-origin only.
 
+import type { YardClockInfo } from "./clock";
+import type { YardClock } from "./yardClock";
+
 /** A half-open interval, `[start, end)`. Epoch milliseconds, as the API sends. */
 export interface Window {
   start: number;
@@ -30,6 +33,11 @@ export interface Timeframe {
   now: number;
   availability_code: string;
   availability: Window | null;
+  /** The clock the hull is on — the yard's document, or the UTC default,
+   *  and which. Served with the first read the shell makes per hull so every
+   *  board renders in the yard's clock from its first paint. Optional only
+   *  for an API older than the clock. */
+  yard_clock?: YardClockInfo;
 }
 
 /**
@@ -1333,6 +1341,63 @@ export async function revertManningBook(id: Identity, vesselId: string): Promise
     headers: headers(id),
   });
   if (!res.ok) throw new Error(`manning book revert → ${res.status}`);
+}
+
+/* ------------------------------------------------------------ the yard clock */
+
+/** One finding the clock door makes without refusing. */
+export interface ClockDoorFinding {
+  severity: "warn" | "info";
+  text: string;
+}
+
+/** What the clock door previews: the wall clock now, this year's transitions
+ *  as local readings, today's shifts as instants, and which clock the served
+ *  schedule of record was parsed in. */
+export interface ClockPreview {
+  now_local: string;
+  offset_now: string;
+  transitions: { at_ms: number; local: string; to: string }[];
+  shifts_today: { name: string; start_ms: number; end_ms: number; local: string }[];
+  schedule_of_record: { label: string; parsed_in: string | null } | null;
+}
+
+/** The hull's clock in effect, with the wall clock and offset right now. */
+export async function getYardClock(
+  id: Identity,
+  vesselId: string,
+): Promise<YardClockInfo & { now_local: string; offset_now: string }> {
+  const res = await fetch(`/api/vessels/${vesselId}/yard-clock`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`yard clock → ${res.status}`);
+  return (await res.json()) as never;
+}
+
+/** Ingests the yard's clock, refused whole with every reason (422 — the
+ *  server's sentence is the error). `dryRun` previews the findings and this
+ *  year's transitions and stores nothing. */
+export async function importYardClock(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  clock: YardClock,
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; findings: ClockDoorFinding[]; preview: ClockPreview }> {
+  const res = await fetch(`/api/vessels/${vesselId}/yard-clock${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, clock }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "yard clock");
+  return (await res.json()) as never;
+}
+
+/** Back to the UTC default — every clock on screen carries a Z again. */
+export async function revertYardClock(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/yard-clock/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`yard clock revert → ${res.status}`);
 }
 
 /** One surveyed space of a geometry register (docs/geometry-accuracy.md). */

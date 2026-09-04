@@ -47,7 +47,12 @@ import {
   revertManningBook,
   type GeometryInfo,
   type ManningBook,
+  getYardClock,
+  importYardClock,
+  revertYardClock,
+  type ClockDoorFinding,
 } from "./api";
+import { fmtStamp, type YardClockInfo } from "./clock";
 import { DiscardButton } from "./DiscardButton";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
 import {
@@ -64,6 +69,14 @@ import {
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
 import { commitBtnStyle, C, errText, mh, msgColor } from "./theme";
+import {
+  crossCheckInstants,
+  intlCrossCheck,
+  offsetLabel,
+  parseClockCsv,
+  shiftChip,
+  transitionLabel,
+} from "./yardClock";
 
 /** A staged document: previewed by the server, nothing stored, Confirm or walk away. */
 interface Staged {
@@ -79,12 +92,17 @@ export default function SourcesBoard({
   vesselId,
   hullLabel,
   asOf,
+  onMutated,
   onOpenModule,
 }: {
   identity: Identity;
   vesselId: string;
   hullLabel: string;
   asOf: AsOf;
+  /** Called after any commit or revert here changed the hull's served facts,
+   *  so the app re-reads what every other screen is built on — the
+   *  timeframe's clock above all. */
+  onMutated: () => void;
   /** Routes to the module where a document's import door lives. */
   onOpenModule: (moduleId: string) => void;
 }) {
@@ -99,6 +117,9 @@ export default function SourcesBoard({
   const [shipRegister, setShipRegister] = useState<RegisterInfo | null>(null);
   const [couplings, setCouplings] = useState<CouplingsInfo | null>(null);
   const [hazards, setHazards] = useState<LiveHazard[]>([]);
+  /** The hull's clock in effect, as the door serves it: the document or the
+   *  honest UTC default. Null only while the read is failing. */
+  const [yardClock, setYardClockInfo] = useState<(YardClockInfo & { now_local: string; offset_now: string }) | null>(null);
   /** Whether the coupling door should propose deck penetrations from deck
    *  order and frame overlap. On by default: a register without vertical
    *  paths lets heat go nowhere, which is a lie the trace would then tell. */
@@ -395,6 +416,51 @@ export default function SourcesBoard({
       });
   };
 
+  // The yard clock's door. The CSV is parsed here (the same form the boot
+  // loader reads), the server previews it — refused whole with every reason,
+  // or findings: shifts that leave the day open, a schedule of record parsed
+  // in another clock — and the browser's own tz database is asked whether it
+  // agrees with the authored rule at now, half a year on, and an hour either
+  // side of each transition. A disagreement is a finding on the card before
+  // anything is stored: a mis-authored rule is wrong by an hour for half the
+  // year, and this is where it is caught.
+  const stageClock = (file: File) => {
+    setMsg(null);
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const clock = parseClockCsv(text);
+        return importYardClock(identity, vesselId, file.name, clock, true).then((r) => {
+          setBusy(null);
+          const findings: ClockDoorFinding[] = [
+            ...r.findings,
+            ...intlCrossCheck(clock, crossCheckInstants(clock, Date.now())),
+          ];
+          const transitions = r.preview.transitions.map((t) => `${t.local} (${t.to})`).join(", ");
+          setStaged({
+            kind: "Yard clock",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              `${clock.zone} · now ${r.preview.now_local} (${r.preview.offset_now})` +
+              (transitions ? ` · this year the clock moves ${transitions}` : " · the clock never moves") +
+              ` · ${clock.shifts.map(shiftChip).join(" · ")}` +
+              (findings.length > 0 ? ` · ⚠ ${findings.map((f) => f.text).join(" · ")}` : " · the browser's tz database agrees with the rule") +
+              " — Confirm puts every clock on every screen in this zone",
+            commit: () =>
+              importYardClock(identity, vesselId, file.name, clock, false).then(
+                (x) => `✓ ${x.label}: every time on screen now reads in ${clock.zone} — ${clock.shifts.length} shifts, watch ${clock.watch_minutes / 60} h`,
+              ),
+          });
+        });
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setMsg(errText(e));
+      });
+  };
+
   const confirmStaged = () => {
     const p = staged;
     if (!p) return;
@@ -405,6 +471,7 @@ export default function SourcesBoard({
         setBusy(null);
         setMsg(done);
         setNonce((n) => n + 1);
+        onMutated();
       })
       .catch((e: unknown) => {
         setBusy(null);
@@ -424,8 +491,9 @@ export default function SourcesBoard({
       getRegister(identity, vesselId).catch(() => null),
       getCouplings(identity, vesselId).catch(() => null),
       listHazards(identity, vesselId, asOf).catch(() => []),
+      getYardClock(identity, vesselId).catch(() => null),
     ])
-      .then(([r, z, m, g, sr, cp, hz]) => {
+      .then(([r, z, m, g, sr, cp, hz, yc]) => {
         if (stale) return;
         setRegister(r);
         setZones(z);
@@ -434,6 +502,7 @@ export default function SourcesBoard({
         setShipRegister(sr);
         setCouplings(cp);
         setHazards(hz);
+        setYardClockInfo(yc);
       })
       .catch((e: unknown) => {
         if (stale) return;
@@ -485,6 +554,7 @@ export default function SourcesBoard({
           { value: register.schedule_source ? "ingested" : "generated", label: "schedule of record" },
           { value: zones.source ? "authored" : "inferred", label: "zone chart" },
           { value: register.reconciliation.source ? "ingested" : "seeded", label: "budget book" },
+          { value: yardClock?.source === "document" ? yardClock.clock.zone : "UTC", label: "yard clock", title: yardClock?.source === "document" ? `Every clock on screen is ${yardClock.clock.zone}'s wall clock, from ${yardClock.label}.` : "No yard clock loaded — every time on screen is a UTC instant marked Z." },
         ]}
         note="Every document behind the screens, with how much of it landed and how much of what landed is authored versus guessed. Each card is also that document's door: pick a file or drop it on the card — the server previews everything the import would claim before anything is stored."
       />
@@ -817,6 +887,45 @@ export default function SourcesBoard({
         />
 
         <SourceCard
+          kind="Yard clock"
+          status={
+            yardClock?.source === "document"
+              ? { label: "INGESTED", tone: "#3D6BFF" }
+              : { label: "DEFAULT · UTC", tone: "#f59e0b" }
+          }
+          name={
+            yardClock?.source === "document"
+              ? `${yardClock.label} — ${yardClock.clock.zone}`
+              : "no yard clock — every time on screen is a Z-stamped UTC instant"
+          }
+          lines={clockLines(yardClock, register.schedule_source)}
+          upload={{
+            label: "⭱ Upload clock CSV",
+            accept: ".csv,text/csv,text/plain",
+            title:
+              "Ingest the yard's clock (CSV lines: zone,<IANA name>,<±HH:MM>; daylight,<±HH:MM>,<month>,<week 1-5>,<sun..sat>,<HH:MM>,<month>,<week>,<weekday>,<HH:MM>; watch,<minutes>; shift,<name>,<HH:MM>,<HH:MM>). Refused whole with every reason. The preview lists this year's clock changes and today's shifts, and checks the rule against this browser's own tz database before Confirm.",
+            onFile: stageClock,
+          }}
+          importHint="Read by every clock on every screen"
+          onOpenHome={() => onOpenModule("dailyOps")}
+          revertTitle="Back to UTC — every clock on screen is Z again, in amber, until a yard clock is loaded."
+          onRevert={
+            yardClock?.source === "document"
+              ? () => {
+                  setMsg("⏳ discarding the yard clock…");
+                  void revertYardClock(identity, vesselId)
+                    .then(() => {
+                      setMsg("✓ back to UTC — every clock on screen is Z again");
+                      setNonce((n) => n + 1);
+                      onMutated();
+                    })
+                    .catch((e: unknown) => setMsg(errText(e)));
+                }
+              : undefined
+          }
+        />
+
+        <SourceCard
           kind="Geometry register"
           status={geometry?.register ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "NOT LOADED", tone: "#94a3b8" }}
           name={geometry?.register?.label ?? "no geometry register — positions are placard parses"}
@@ -921,6 +1030,53 @@ export default function SourcesBoard({
   );
 }
 
+/**
+ * The yard clock card's lines: the offsets and the rule as the card describes
+ * them, the watch and the shifts by the yard's names, and — when a schedule
+ * of record is served — the reminder that its wall clock was stamped in the
+ * clock it was imported under.
+ */
+function clockLines(
+  yc: (YardClockInfo & { now_local: string; offset_now: string }) | null,
+  scheduleSource: string | null,
+): { text: string; tone?: string; gloss?: string }[] {
+  if (!yc) return [{ text: "yard clock unavailable", tone: C.danger }];
+  const c = yc.clock;
+  const rule = c.daylight;
+  const lines: { text: string; tone?: string; gloss?: string }[] = [
+    {
+      text:
+        `standard ${offsetLabel(c.standard_offset_minutes)}` +
+        (rule
+          ? ` · daylight ${offsetLabel(rule.offset_minutes)} from ${transitionLabel(rule.start)} to ${transitionLabel(rule.end)}`
+          : " · no daylight rule — the clock never moves"),
+      gloss:
+        "An authored rule, not a tz database: the yard's own signed claim about its clock, evaluated identically on the server and in this shell against one shared vector file. A legislative change is a document edit, not a code release.",
+    },
+    {
+      text: `watch ${c.watch_minutes / 60} h · ${c.shifts.map(shiftChip).join(" · ")}`,
+      gloss: "The watch is the floor of time resolution on every board; the shifts are the chips on Daily Ops and the Reports' shift sheet, by the yard's names.",
+    },
+    {
+      text: `now ${yc.now_local} (${yc.offset_now}) · the record stamps ${fmtStamp(Date.now())}`,
+      tone: C.dim,
+    },
+  ];
+  if (yc.source !== "document") {
+    lines.push({
+      text: "No yard clock loaded: every board renders UTC and marks it Z rather than guess a zone. Load the yard's clock here and every clock on every screen becomes the yard's wall clock.",
+      tone: C.warn,
+    });
+  } else if (scheduleSource) {
+    lines.push({
+      text: `${scheduleSource} was read in the clock in effect when it was imported — re-import it after a clock change to re-stamp its wall clock`,
+      tone: C.dim,
+      gloss: "The XER carries P6's wall clock; the door converts it in the hull's clock at import time. The clock door's preview says so when the two disagree.",
+    });
+  }
+  return lines;
+}
+
 /** One document's card: what it is, what landed, the door in, and the way out. */
 function SourceCard({
   kind,
@@ -932,6 +1088,7 @@ function SourceCard({
   importHint,
   onOpenHome,
   onRevert,
+  revertTitle,
 }: {
   kind: string;
   status: { label: string; tone: string };
@@ -944,6 +1101,8 @@ function SourceCard({
   importHint?: string;
   onOpenHome?: () => void;
   onRevert?: () => void;
+  /** What the screens fall back to when this document is discarded. */
+  revertTitle?: string;
 }) {
   const [dragOver, setDragOver] = useState(false);
   return (
@@ -1009,7 +1168,7 @@ function SourceCard({
           {onRevert && (
             <DiscardButton
               what="this document"
-              title="Throw this document away — the screens return to what the tool can honestly serve without it."
+              title={revertTitle ?? "Throw this document away — the screens return to what the tool can honestly serve without it."}
               onDiscard={onRevert}
             />
           )}

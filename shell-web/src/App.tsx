@@ -40,6 +40,7 @@ import Reports from "./Reports";
 import SequenceBoard from "./SequenceBoard";
 import { fmtInstant, isProjection, TimeControl, type Horizon } from "./TimeControl";
 import WorkOrders from "./WorkOrders";
+import { setYardClock } from "./clock";
 import { C } from "./theme";
 
 // The module rail, grouped the way a working day runs rather than the way the
@@ -148,6 +149,11 @@ export default function App() {
   // clearance). The shared reads below are keyed on it, so the top bar and the
   // alert bell move in the same refresh as the screen that made the change.
   const [dataEpoch, setDataEpoch] = useState(0);
+  // Bumped when the hull's yard clock is put in effect (`clock.ts` holds the
+  // clock every formatter reads; a module-level value is invisible to React,
+  // so the epoch is what makes a board re-derive its shift windows and
+  // re-render its times). Passed down with the frame.
+  const [clockEpoch, setClockEpoch] = useState(0);
 
   useEffect(() => {
     listVessels(DEMO_IDENTITY)
@@ -214,16 +220,34 @@ export default function App() {
   // The hull's time frame. Re-read on hull change and never cached across hulls:
   // each availability has its own bounds, and scrubbing one hull's window over
   // another's data is how a projection ends up outside the range the API accepts.
+  // It carries the hull's yard clock, which is put in effect here — the one
+  // place — before the frame lands, so no board renders a frame in the wrong
+  // clock. Re-read on `dataEpoch` too: a clock committed or reverted in Data
+  // Sources must reach every other screen in the same refresh.
   useEffect(() => {
     setJobCode(null);
     if (!selected) {
       setFrame(null);
-      return;
+      return undefined;
     }
+    let stale = false;
     timeframe(DEMO_IDENTITY, selected)
-      .then(setFrame)
-      .catch(() => setFrame(null));
-  }, [selected]);
+      .then((f) => {
+        if (stale) return;
+        setYardClock(f.yard_clock);
+        setClockEpoch((n) => n + 1);
+        setFrame(f);
+      })
+      .catch(() => {
+        if (stale) return;
+        setYardClock(null);
+        setClockEpoch((n) => n + 1);
+        setFrame(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [selected, dataEpoch]);
 
   // A module that needs a hull is not rendered until there is one. Rendering it
   // with an empty id fired six requests at `/api/vessels//…` on every load and
@@ -520,6 +544,7 @@ export default function App() {
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
+              clockEpoch={clockEpoch}
               spaces={rows}
               verdictsOk={outOfScope ? null : verdictsOk}
               onOpenSpace={jump}
@@ -577,6 +602,7 @@ export default function App() {
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
+              clockEpoch={clockEpoch}
               spaces={rows}
               issues={issues}
               verdictsOk={outOfScope ? null : verdictsOk}
@@ -611,6 +637,7 @@ export default function App() {
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
+              onMutated={() => setDataEpoch((n) => n + 1)}
               onOpenModule={(id) => {
                 const target = MODULES.find((mod) => mod.id === id && mod.built);
                 if (target) setModule(target);

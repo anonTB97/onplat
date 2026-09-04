@@ -1,22 +1,39 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { Activity, DeckStateRow, Issue, LiveHazard } from "./api";
+import { setYardClock } from "./clock";
 import {
+  clockNote,
   conflictLog,
   csvCell,
   fieldConditions,
   reportFilename,
+  shiftChoices,
   shiftSheet,
   shiftWindow,
   toCsv,
   toPrintHtml,
   zoneSheet,
 } from "./reports";
+import { UTC_CLOCK, type YardClock } from "./yardClock";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
 // A UTC midnight, so the shift windows are easy to reason about.
 const MIDNIGHT = Date.UTC(2026, 8, 2);
 const CUT = { hull: "CVN-73 PIA-26", asOfMs: MIDNIGHT + 9 * HOUR, scheduleSource: "sample.xer", producedBy: "Foreman" };
+
+const NORFOLK: YardClock = {
+  ...UTC_CLOCK,
+  zone: "America/New_York",
+  standard_offset_minutes: -300,
+  daylight: {
+    offset_minutes: -240,
+    start: { month: 3, week: 2, weekday: 0, minute_of_day: 120 },
+    end: { month: 11, week: 1, weekday: 0, minute_of_day: 120 },
+  },
+};
+
+afterEach(() => setYardClock(null));
 
 function space(no: string, zone: string, held: boolean): DeckStateRow {
   return {
@@ -57,8 +74,9 @@ describe("shift sheet", () => {
       activity("A2", "3-148-2-E", "SM-ELEC", MIDNIGHT, MIDNIGHT + DAY),
       activity("A3", null, "SM-ELEC", MIDNIGHT, MIDNIGHT + DAY),
     ];
-    const r = shiftSheet({ cut: CUT, activities: acts, spaces: SPACES, shift: "days", zone: null });
-    expect(r.scope).toContain("Days 0700–1530 (Z)");
+    const r = shiftSheet({ cut: CUT, activities: acts, spaces: SPACES, shift: "Days", zone: null });
+    expect(r.scope).toContain("Days 0700–1530");
+    expect(r.scope).not.toContain("(Z)");
     // SM-ELEC has two activities in the window, so it is the heavier trade.
     expect(r.sections.map((s) => s.heading)).toEqual(["SM-ELEC", "SM-PIPE"]);
     const pipe = r.sections[1]!.rows[0]!;
@@ -80,18 +98,48 @@ describe("shift sheet", () => {
   });
 
   it("says so when nothing is planned rather than printing an empty table", () => {
-    const r = shiftSheet({ cut: CUT, activities: [], spaces: SPACES, shift: "night", zone: null });
+    const r = shiftSheet({ cut: CUT, activities: [], spaces: SPACES, shift: "Mids", zone: null });
     expect(r.sections[0]!.rows[0]![0]).toMatch(/No activities/);
   });
 });
 
 describe("shift windows", () => {
-  it("are anchored to the as-of day and labelled Zulu until the yard clock lands", () => {
-    const days = shiftWindow(MIDNIGHT + 9 * HOUR, "days")!;
+  it("are anchored to the as-of day under the UTC default, with no zone marker", () => {
+    const days = shiftWindow(MIDNIGHT + 9 * HOUR, "Days")!;
     expect(days.start).toBe(MIDNIGHT + 7 * HOUR);
     expect(days.end).toBe(MIDNIGHT + 15.5 * HOUR);
-    expect(days.label).toContain("(Z)");
+    expect(days.label).toBe("Days 0700–1530");
     expect(shiftWindow(MIDNIGHT, "instant")).toBeNull();
+    // A name the clock does not carry is no window, not a guessed one.
+    expect(shiftWindow(MIDNIGHT, "Nights")).toBeNull();
+  });
+
+  it("shift windows follow the calendar and name the shifts the yard's way", () => {
+    // 2026-09-04 13:15Z is 09:15 in Norfolk; Days runs 07:00–15:30 EDT = 11:00Z–19:30Z.
+    const at = Date.UTC(2026, 8, 4, 13, 15);
+    const days = shiftWindow(at, "Days", NORFOLK)!;
+    expect(days.start).toBe(Date.UTC(2026, 8, 4, 11));
+    expect(days.end).toBe(Date.UTC(2026, 8, 4, 19, 30));
+    expect(days.label).toBe("Days 0700–1530");
+    // Mids belongs to the local date it starts on, and runs across midnight.
+    const guam: YardClock = {
+      ...UTC_CLOCK,
+      zone: "Pacific/Guam",
+      standard_offset_minutes: 600,
+      shifts: [
+        { name: "Days", start_minute: 360, length_minutes: 720 },
+        { name: "Nights", start_minute: 1080, length_minutes: 720 },
+      ],
+    };
+    const nights = shiftWindow(at, "Nights", guam)!;
+    expect(nights.start).toBe(Date.UTC(2026, 8, 4, 8)); // 18:00 ChST on 09/04
+    expect(nights.end).toBe(Date.UTC(2026, 8, 4, 20)); // 06:00 ChST on 09/05
+    expect(nights.label).toBe("Nights 1800–0600");
+    expect(shiftChoices(guam).map((c) => c.label)).toEqual(["This instant", "Days 0600–1800", "Nights 1800–0600"]);
+    expect(shiftChoices(NORFOLK).map((c) => c.id)).toEqual(["instant", "Days", "Swing", "Mids"]);
+    // The module clock is what the boards read.
+    setYardClock({ label: "CVN73-clock.csv", source: "document", clock: NORFOLK });
+    expect(shiftWindow(at, "Days")!.start).toBe(Date.UTC(2026, 8, 4, 11));
   });
 });
 
@@ -150,5 +198,24 @@ describe("CSV and print", () => {
     expect(html).toContain("CVN-73 PIA-26");
     expect(html).toContain("Decision support");
     expect(reportFilename(r, "csv")).toMatch(/^field-condition-register-cvn-73-pia-26-whole-hull-asof-\d{12}\.csv$/);
+  });
+
+  it("the CSV cut line carries the offset once", () => {
+    // Under the default the stamp is Zulu and the footer says no clock is loaded.
+    const utc = toCsv(fieldConditions({ cut: CUT, hazards: [], spaces: SPACES }));
+    expect(utc).toContain("cut_at,2026-09-02 09:00Z");
+    expect(clockNote(CUT.asOfMs)).toContain("no yard clock loaded");
+    // Under Norfolk the same instant is 05:00 with its offset, and the sheet names the zone once.
+    setYardClock({ label: "CVN73-clock.csv", source: "document", clock: NORFOLK });
+    const r = fieldConditions({ cut: CUT, hazards: [], spaces: SPACES });
+    const csv = toCsv(r);
+    expect(csv).toContain("cut_at,2026-09-02 05:00 −04:00");
+    expect(csv.filter((l) => l.includes("−04:00"))).toHaveLength(1);
+    expect(r.notes).toContain("Clocks: the yard's, America/New_York (UTC−04:00 at the cut).");
+    expect(toPrintHtml(r)).toContain("cut 2026-09-02 05:00 −04:00");
+    expect(reportFilename(r, "csv")).toContain("-asof-202609020500.csv");
+    // The shift sheet's scope reads the yard's way, with no (Z).
+    const sheet = shiftSheet({ cut: CUT, activities: [], spaces: SPACES, shift: "Days", zone: null });
+    expect(sheet.scope).toBe("Days 0700–1530 · all zones");
   });
 });

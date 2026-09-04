@@ -6,9 +6,33 @@
 // playing flag stuck true. Both are properties of `availabilityGrid` +
 // `clampInto`, so both are pinned here as pure arithmetic.
 
-import { describe, expect, it } from "vitest";
-import { availabilityGrid, clampInto, HORIZONS, isProjection } from "./TimeControl";
-import { blockStart, DAY_MS, WATCH_MS } from "./watch";
+import { afterEach, describe, expect, it } from "vitest";
+import { setYardClock } from "./clock";
+import {
+  availabilityGrid,
+  clampInto,
+  fmtInstant,
+  HORIZONS,
+  isProjection,
+  nextNotch,
+  onLocalDate,
+  sameWatchOn,
+} from "./TimeControl";
+import { blockIndex, blockStart, DAY_MS, WATCH_MS } from "./watch";
+import { UTC_CLOCK, type YardClock } from "./yardClock";
+
+const NORFOLK: YardClock = {
+  ...UTC_CLOCK,
+  zone: "America/New_York",
+  standard_offset_minutes: -300,
+  daylight: {
+    offset_minutes: -240,
+    start: { month: 3, week: 2, weekday: 0, minute_of_day: 120 },
+    end: { month: 11, week: 1, weekday: 0, minute_of_day: 120 },
+  },
+};
+
+afterEach(() => setYardClock(null));
 
 // A hull three months into a nine-month availability — long enough that every
 // horizon's old window was smaller than the run.
@@ -77,5 +101,54 @@ describe("the availability grid", () => {
     expect(isProjection(null, NOW, "day")).toBe(false);
     // At Week, half a step of slack keeps the grid's now-notch in the live band.
     expect(isProjection(NOW, NOW, "week")).toBe(false);
+  });
+
+  it("the day grid's notches are the yard's watches across the November fall-back and playback still advances strictly", () => {
+    setYardClock({ label: "CVN73-clock.csv", source: "document", clock: NORFOLK });
+    // Two local days: 00:00 EDT Oct 31 (04:00Z) to 00:00 EST Nov 2 (05:00Z) — 49 hours.
+    const avail = { start: Date.UTC(2026, 9, 31, 4), end: Date.UTC(2026, 10, 2, 5) };
+    const step = HORIZONS.day.step;
+    const grid = availabilityGrid("day", NOW, avail);
+    expect(grid.start).toBe(avail.start);
+    const end = clampInto(avail.end - 1, grid, step);
+    expect(end).toBe(Date.UTC(2026, 10, 2, 1)); // 20:00 EST Nov 1 — the last 20–24 watch
+    const notches = [grid.start];
+    for (;;) {
+      const next = nextNotch(notches.at(-1)!, grid, step);
+      if (next > end) break;
+      expect(next).toBeGreaterThan(notches.at(-1)!);
+      notches.push(next);
+      expect(notches.length).toBeLessThan(20);
+    }
+    expect(notches).toHaveLength(12);
+    expect(notches.at(-1)).toBe(end);
+    // The 00–04 watch of Nov 1 starts at 04:00Z and runs five hours to 09:00Z.
+    const fallBack = notches.indexOf(Date.UTC(2026, 10, 1, 4));
+    expect(fallBack).toBe(6);
+    expect(notches[fallBack + 1]).toBe(Date.UTC(2026, 10, 1, 9));
+    expect(fmtInstant(notches[fallBack]!, "day")).toBe("Sun 1 Nov · 00–04");
+    // An availability opening mid-watch starts its grid at the next watch.
+    const late = availabilityGrid("day", NOW, { start: avail.start + 30 * 60_000, end: avail.end });
+    expect(late.start).toBe(Date.UTC(2026, 9, 31, 8));
+  });
+
+  it("the date picker keeps the watch index on the picked local day", () => {
+    setYardClock({ label: "CVN73-clock.csv", source: "document", clock: NORFOLK });
+    // 08:00 EDT on Fri 4 Sep — the 08–12 watch.
+    const at = Date.UTC(2026, 8, 4, 12);
+    expect(blockIndex(at)).toBe(2);
+    expect(fmtInstant(at, "day")).toBe("Fri 4 Sep · 08–12");
+    // Picked Mon 2 Nov (EST): the same watch is 08:00 EST = 13:00Z.
+    const picked = onLocalDate(at, 2026, 11, 2, "day");
+    expect(picked).toBe(Date.UTC(2026, 10, 2, 13));
+    expect(blockIndex(picked)).toBe(2);
+    expect(fmtInstant(picked, "day")).toBe("Mon 2 Nov · 08–12");
+    // At Week the place in the day is the time of day, on the picked local date.
+    expect(onLocalDate(at, 2026, 9, 5, "week")).toBe(Date.UTC(2026, 8, 5, 12));
+    // ‹ › move to the same watch on the adjacent local day — 25 hours across the fall-back.
+    expect(sameWatchOn(at, 1)).toBe(Date.UTC(2026, 8, 5, 12));
+    const beforeFallBack = Date.UTC(2026, 9, 31, 12); // 08:00 EDT Sat 31 Oct
+    expect(sameWatchOn(beforeFallBack, 1)).toBe(Date.UTC(2026, 10, 1, 13)); // 08:00 EST Sun 1 Nov
+    expect(sameWatchOn(beforeFallBack, 1) - beforeFallBack).toBe(25 * 3_600_000);
   });
 });

@@ -1,4 +1,5 @@
 import type { DecisionState, ReadinessState } from "./api";
+import { fmtStamp } from "./clock";
 
 // One palette for authorization state, shared by every surface, so a colour
 // means exactly one thing across the product.
@@ -254,11 +255,11 @@ export const commitBtnStyle: React.CSSProperties = {
   border: `1px solid ${C.accent}`,
 };
 
-/** A hold time, or an honest statement that there is no clock on it. */
+/** A hold time, or an honest statement that there is no clock on it. The
+ *  time itself is `clock.ts`'s record-grade stamp — the yard's wall clock
+ *  with its offset, or Z under the UTC default. */
 export const fmtClear = (ms: number | null): string =>
-  ms === null
-    ? "on verification, not on a clock"
-    : `${new Date(ms).toISOString().replace("T", " ").slice(0, 16)}Z`;
+  ms === null ? "on verification, not on a clock" : fmtStamp(ms);
 
 /**
  * A stable colour per zone, hashed from the name rather than indexed from a

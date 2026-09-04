@@ -27,6 +27,11 @@ Role menu → **Foreman**. The front door is **Daily Ops**, the shift board.
   with a "show all" foot, so the sheet-metal column reads as a column and not
   a scroll. Point at a held row: the hazard holding it and who clears it are
   on the row, not behind a click.
+- The instants are the yard's: the export's `06:00` is Norfolk's 06:00
+  (10:00Z in summer) because the schedule was read in the hull's clock,
+  `CVN73-clock.csv`, loaded at boot before the export — the banner says
+  `parsed in America/New_York`. With no clock loaded the server serves UTC
+  and says `default_utc` rather than guess one.
 - **Reports** → *Shift sheet* → print. The sheet carries hull, instant,
   schedule source and the producer, and each figure names its layer
   (schedule of record, engine, or shell estimate). A zone filter cuts it to a

@@ -75,8 +75,10 @@ both. No database is needed — the demo runs on the in-memory store.
 The demo boots on the reference hull: the generated CVN-73 documents in
 `reference/cvn73` loaded through the same doors a yard would use, and the
 sample P6 export `reference/p6-sample/CVN73-PIA26-full.xer` as the schedule of
-record (476 spaces, 5,706 activities, six zones — `docs/zone-scheme.md`).
-`WADL_DEMO=seed` serves the small 24-space seed instead. A scripted,
+record (476 spaces, 5,706 activities, six zones — `docs/zone-scheme.md`),
+its wall clock read in the yard's clock from `reference/cvn73/CVN73-clock.csv`
+(Norfolk; the banner names the zone). `WADL_DEMO=seed` serves the small
+24-space seed instead. A scripted,
 role-by-role walk over the hull is in `docs/demo-script.md`.
 
 **In a Codespace:** *Code ▾ → Codespaces → Create codespace*. The devcontainer

@@ -14,7 +14,13 @@
 //!    comes through as `None` + LOW, and a broken row is rejected with its line
 //!    number rather than smoothed over.
 
-#![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    missing_docs,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use wadl_domain::units::ManHours;
 use wadl_ingest::xer::{ingest_xer, XerStatus};
@@ -238,4 +244,90 @@ fn the_sample_reconciles_with_the_demo_work_orders() {
     assert_eq!(hours("WI-3905"), (340, 0));
     assert_eq!(hours("WI-1905"), (160, 0));
     assert_eq!(hours("WI-5571"), (140, 0));
+}
+
+/// A two-task export at chosen wall times, for the clock tests.
+fn xer_at(start: &str, end: &str) -> String {
+    format!(
+        "\
+%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\tstatus_code\ttask_type\tearly_start_date\tearly_end_date\n\
+%R\t1\tA1\tShaft alley weld\tTK_NotStart\tTT_Task\t{start}\t{end}\n%E\n"
+    )
+}
+
+fn norfolk() -> wadl_domain::civil::YardClock {
+    let v: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../reference/clock/yard-clock-vectors.json"
+    )))
+    .unwrap();
+    serde_json::from_value(v["clocks"]["norfolk"].clone()).unwrap()
+}
+
+/// The XER's wall clock is the yard's: a 06:00 start on a Norfolk summer day
+/// is 10:00Z. The UTC form (`ingest_xer`) is unchanged, so the CLI's
+/// evidence table reads as it always did.
+#[test]
+fn wall_clock_is_read_in_the_yard_clock() {
+    use wadl_ingest::xer::ingest_xer_in;
+    let input = xer_at("2026-08-10 06:00", "2026-08-10 14:00");
+    let in_norfolk = ingest_xer_in(&input, "x", &norfolk());
+    assert!(in_norfolk.rejected.is_empty(), "{:?}", in_norfolk.rejected);
+    let w = in_norfolk.activities[0].planned.expect("dated");
+    assert_eq!(w.start.epoch_millis(), hour("2026-08-10 10:00"));
+    assert_eq!(w.end.epoch_millis(), hour("2026-08-10 18:00"));
+    assert!(in_norfolk.wall_clock_findings.is_empty());
+
+    let in_utc = ingest_xer(&input, "x");
+    let u = in_utc.activities[0].planned.expect("dated");
+    assert_eq!(u.start.epoch_millis(), hour("2026-08-10 06:00"));
+}
+
+/// A start the clock skipped is accepted — read as standard time, the
+/// instant the clock reached when it jumped — and the finding names it.
+#[test]
+fn a_start_in_the_gap_is_accepted_with_a_finding() {
+    use wadl_ingest::xer::ingest_xer_in;
+    let input = xer_at("2026-03-08 02:30", "2026-03-08 09:00");
+    let report = ingest_xer_in(&input, "x", &norfolk());
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    let w = report.activities[0].planned.expect("dated");
+    assert_eq!(
+        w.start.epoch_millis(),
+        hour("2026-03-08 07:30"),
+        "02:30 EST"
+    );
+    assert_eq!(
+        report.wall_clock_findings.len(),
+        1,
+        "{:?}",
+        report.wall_clock_findings
+    );
+    let finding = &report.wall_clock_findings[0];
+    assert!(
+        finding.starts_with("line 3: A1 start 2026-03-08 02:30 does not exist in America/New_York"),
+        "{finding}"
+    );
+    assert!(
+        finding.ends_with("read as 02:30 standard (07:30Z)"),
+        "{finding}"
+    );
+
+    // The repeated hour: first occurrence, said so.
+    let report = ingest_xer_in(
+        &xer_at("2026-11-01 01:30", "2026-11-01 09:00"),
+        "x",
+        &norfolk(),
+    );
+    let w = report.activities[0].planned.expect("dated");
+    assert_eq!(
+        w.start.epoch_millis(),
+        hour("2026-11-01 05:30"),
+        "01:30 EDT, the first one"
+    );
+    assert!(
+        report.wall_clock_findings[0].contains("occurs twice"),
+        "{:?}",
+        report.wall_clock_findings
+    );
 }

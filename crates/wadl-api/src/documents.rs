@@ -337,6 +337,8 @@ fn instant_from_log(raw: &str) -> Option<i64> {
 /// What the boot loader loaded, for the startup banner.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LoadedDocuments {
+    /// The yard clock's label, zone and shift count.
+    pub clock: Option<(String, String, usize)>,
     /// The register's label, decks and spaces.
     pub register: Option<(String, usize, usize)>,
     /// The zone chart's label and blocks.
@@ -363,11 +365,13 @@ fn find_doc(dir: &Path, suffix: &str) -> Option<(String, String)> {
 }
 
 /// Loads a directory of documents into a hull, in the order the doors would
-/// need them: the register first (everything else names its spaces), then
-/// the zone chart and geometry, then the couplings with their derived
-/// vertical adjacency, then the morning's log. Files are found by suffix
-/// (`-register.csv`, `-zones.csv`, `-couplings.csv`, `-geometry.csv`,
-/// `-hazards.csv`); absent ones are skipped, and the seed stands in.
+/// need them: the yard clock first (the export that follows is read in it),
+/// then the register (everything else names its spaces), then the zone
+/// chart and geometry, then the couplings with their derived vertical
+/// adjacency, then the morning's log. Files are found by suffix
+/// (`-clock.csv`, `-register.csv`, `-zones.csv`, `-couplings.csv`,
+/// `-geometry.csv`, `-hazards.csv`); absent ones are skipped, and the seed
+/// stands in.
 ///
 /// # Errors
 /// The first document that cannot be carried, with the reason — the hull
@@ -386,6 +390,9 @@ pub async fn load_demo_docs(
         now_ms,
     };
     let mut loaded = LoadedDocuments::default();
+    if let Some((name, text)) = find_doc(dir, "-clock.csv") {
+        loaded.clock = Some(doors.clock(&name, &text).await?);
+    }
     if let Some((name, text)) = find_doc(dir, "-register.csv") {
         loaded.register = Some(doors.register(&name, &text).await?);
     }
@@ -417,6 +424,27 @@ fn err(name: &str, e: impl std::fmt::Display) -> String {
 }
 
 impl Loader<'_> {
+    async fn clock(&self, name: &str, text: &str) -> Result<(String, String, usize), String> {
+        let clock = crate::yard_clock::parse_clock_csv(text).map_err(|e| err(name, e))?;
+        let problems = clock.validate();
+        if !problems.is_empty() {
+            return Err(err(name, problems.join("; ")));
+        }
+        let counts = (name.to_owned(), clock.zone.clone(), clock.shifts.len());
+        self.store
+            .set_yard_clock(
+                self.scope,
+                self.vessel,
+                wadl_store::memory::YardClockDoc {
+                    label: name.to_owned(),
+                    clock,
+                },
+            )
+            .await
+            .map_err(|e| err(name, e))?;
+        Ok(counts)
+    }
+
     async fn placards(&self) -> Result<Vec<CompartmentSummary>, String> {
         self.store
             .list_compartments(self.scope, self.vessel)

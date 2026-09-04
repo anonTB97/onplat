@@ -469,10 +469,16 @@ pub(crate) async fn timeframe(
         .store
         .get_vessel(&scope, VesselId::from_uuid(id))
         .await?;
+    // The yard clock rides on the first read the shell makes per hull, so
+    // every board renders yard-local from its first paint after this one.
+    let clock =
+        crate::yard_clock::clock_in_effect(state.store.as_ref(), &scope, VesselId::from_uuid(id))
+            .await?;
     Ok(Json(json!({
         "now": state.clock.now(),
         "availability_code": vessel.availability_code,
         "availability": vessel.availability,
+        "yard_clock": clock.summary(),
     })))
 }
 
@@ -1836,8 +1842,16 @@ pub(crate) async fn import_schedule(
     let vessel = VesselId::from_uuid(id);
     state.store.get_vessel(&scope, vessel).await?;
     let body: ImportSchedule = read_import_body(req).await?;
-    let sor = crate::schedule::parse_xer(&body.label, &body.xer)
-        .map_err(|reasons| ApiError::OutOfRange(format!("XER rejected: {reasons}")))?;
+    // The export's wall clock is the yard's: read in the hull's clock, and
+    // the record remembers which one, so a later clock change can say
+    // "re-import" instead of serving instants four hours out.
+    let clock = crate::yard_clock::clock_in_effect(state.store.as_ref(), &scope, vessel).await?;
+    let parsed =
+        crate::schedule::parse_xer_in(&body.label, &body.xer, &clock.clock, &clock.parsed_in())
+            .map_err(|reasons| ApiError::OutOfRange(format!("XER rejected: {reasons}")))?;
+    let clock_served = json!({ "zone": clock.clock.zone, "label": clock.label });
+    let wall_clock_findings = parsed.wall_clock_findings;
+    let sor = parsed.sor;
     // A file that parses to nothing is refused, not previewed: every line of
     // an alien file reads as XER "header noise", so without this check a
     // grabbed-the-wrong-file upload sails to a live Confirm button whose
@@ -1867,8 +1881,11 @@ pub(crate) async fn import_schedule(
             "reconciliation": reconciliation,
             "mapping": mapping,
             "delta": delta,
+            "clock": clock_served,
+            "wall_clock_findings": wall_clock_findings,
         })));
     }
+    let parsed_in = sor.parsed_in.clone();
     state
         .store
         .set_schedule_of_record(&scope, vessel, sor)
@@ -1881,6 +1898,7 @@ pub(crate) async fn import_schedule(
         "activities": activities,
         "edges": edges,
         "delta": delta,
+        "parsed_in": parsed_in,
     }))
     .unwrap_or_else(|_| format!("{{\"label\":\"{}\"}}", body.label));
     state
@@ -1901,6 +1919,8 @@ pub(crate) async fn import_schedule(
         "reconciliation": reconciliation,
         "mapping": mapping,
         "delta": delta,
+        "clock": clock_served,
+        "wall_clock_findings": wall_clock_findings,
     })))
 }
 

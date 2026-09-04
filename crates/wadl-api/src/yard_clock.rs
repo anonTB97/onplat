@@ -72,18 +72,29 @@ pub(crate) async fn clock_in_effect(
     scope: &TenantScope,
     vessel: VesselId,
 ) -> Result<ClockInEffect, ApiError> {
-    Ok(match store.yard_clock(scope, vessel).await? {
-        Some(doc) => ClockInEffect {
-            label: Some(doc.label),
-            source: "document",
-            clock: doc.clock,
-        },
-        None => ClockInEffect {
-            label: None,
-            source: "default_utc",
-            clock: YardClock::utc(),
-        },
-    })
+    Ok(ClockInEffect::from_doc(
+        store.yard_clock(scope, vessel).await?,
+    ))
+}
+
+impl ClockInEffect {
+    /// The clock a stored document puts in effect, or the UTC default when
+    /// there is none.
+    #[must_use]
+    pub fn from_doc(doc: Option<YardClockDoc>) -> Self {
+        match doc {
+            Some(doc) => Self {
+                label: Some(doc.label),
+                source: "document",
+                clock: doc.clock,
+            },
+            None => Self {
+                label: None,
+                source: "default_utc",
+                clock: YardClock::utc(),
+            },
+        }
+    }
 }
 
 /// `GET /api/vessels/:id/yard-clock` — the clock in effect, with the wall

@@ -23,6 +23,7 @@
 
 use std::collections::BTreeMap;
 
+use wadl_domain::civil::{self, WallNote, YardClock};
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::ManHours;
@@ -142,12 +143,47 @@ pub fn parse_xer(input: &str) -> XerDocument {
     doc
 }
 
-/// An XER timestamp, `YYYY-MM-DD HH:MM`, to a UTC instant.
-fn parse_when(value: &str) -> Option<Timestamp> {
+/// An XER timestamp, `YYYY-MM-DD HH:MM`, read as the yard's wall clock, to
+/// a UTC instant — plus what the wall clock did not say plainly (a time the
+/// clock skipped, or one it repeated). P6 writes server-local wall time
+/// with no zone, so the zone is the hull's clock document, never a guess.
+fn parse_when(value: &str, clock: &YardClock) -> Option<(Timestamp, Option<WallNote>)> {
+    use chrono::{Datelike as _, Timelike as _};
     let parsed = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M").ok()?;
-    Some(Timestamp::from_epoch_millis(
-        parsed.and_utc().timestamp_millis(),
-    ))
+    let days = civil::days_from_civil(
+        parsed.year(),
+        u8::try_from(parsed.month()).ok()?,
+        u8::try_from(parsed.day()).ok()?,
+    );
+    let minute = u16::try_from(parsed.hour() * 60 + parsed.minute()).ok()?;
+    let (ms, note) = clock.to_utc(days, minute);
+    Some((Timestamp::from_epoch_millis(ms), note))
+}
+
+/// The finding for a wall time the clock skipped or repeated: what the file
+/// said, what it was read as, and the instant — so a scheduler can see the
+/// hour P6 and the yard disagree about instead of a silent shift.
+fn wall_clock_finding(
+    line: usize,
+    code: &str,
+    what: &str,
+    raw: &str,
+    note: WallNote,
+    clock: &YardClock,
+    at: Timestamp,
+) -> String {
+    let zulu = civil::wall_label(YardClock::utc().local(at.epoch_millis()).minute_of_day);
+    let wall = raw.split_once(' ').map_or(raw, |(_, t)| t);
+    match note {
+        WallNote::Gap => format!(
+            "line {line}: {code} {what} {raw} does not exist in {} — read as {wall} standard ({zulu}Z)",
+            clock.zone
+        ),
+        WallNote::Overlap => format!(
+            "line {line}: {code} {what} {raw} occurs twice in {} — read as the first occurrence ({zulu}Z)",
+            clock.zone
+        ),
+    }
 }
 
 /// A numeric quantity, integer man-hours. XER may write `680` or `680.0`; the
@@ -234,6 +270,9 @@ pub struct XerIngestReport {
     pub relationships: Vec<XerRelationship>,
     /// Every line that could not be honestly accepted, and why.
     pub rejected: Vec<Rejection>,
+    /// Wall times the yard's clock skipped or repeated, accepted with the
+    /// reading that was made — findings, not rejections.
+    pub wall_clock_findings: Vec<String>,
 }
 
 /// Resource assignments summed per task: (budget, earned, trade).
@@ -358,17 +397,37 @@ fn wbs_area_by_id(doc: &XerDocument) -> BTreeMap<String, String> {
 /// present-but-unparseable date, because silently dropping a malformed date
 /// would demote "the schedule said something broken" to "the schedule said
 /// nothing", and those need different people to fix them.
-fn planned_window(table: &XerTable, row: &[String]) -> Result<Option<Window>, String> {
-    let when = |field: &str| -> Result<Option<Timestamp>, String> {
+fn planned_window(
+    table: &XerTable,
+    row: &[String],
+    line: usize,
+    code: &str,
+    ctx: &TaskContext<'_>,
+    findings: &mut Vec<String>,
+) -> Result<Option<Window>, String> {
+    let mut when = |field: &str, what: &str| -> Result<Option<Timestamp>, String> {
         match table.get(row, field) {
             None => Ok(None),
-            Some(raw) => parse_when(raw)
-                .map(Some)
-                .ok_or_else(|| format!("unparseable {field}: {raw:?}")),
+            Some(raw) => {
+                let (at, note) = parse_when(raw, ctx.clock)
+                    .ok_or_else(|| format!("unparseable {field}: {raw:?}"))?;
+                if let Some(note) = note {
+                    findings.push(wall_clock_finding(
+                        line, code, what, raw, note, ctx.clock, at,
+                    ));
+                }
+                Ok(Some(at))
+            }
         }
     };
-    let start = when("act_start_date")?.or(when("early_start_date")?);
-    let finish = when("act_end_date")?.or(when("early_end_date")?);
+    let start = match when("act_start_date", "actual start")? {
+        Some(at) => Some(at),
+        None => when("early_start_date", "start")?,
+    };
+    let finish = match when("act_end_date", "actual finish")? {
+        Some(at) => Some(at),
+        None => when("early_end_date", "finish")?,
+    };
     match (start, finish) {
         (Some(a), Some(b)) if a < b => Ok(Some(Window::new(a, b))),
         // A milestone's start equals its finish; give it a minute of width so a
@@ -383,10 +442,30 @@ fn planned_window(table: &XerTable, row: &[String]) -> Result<Option<Window>, St
     }
 }
 
-/// Ingests one XER export. `source_label` names the file for provenance — every
-/// accepted activity carries it, because nothing enters without a source.
+/// Ingests one XER export with its wall clock read as UTC — the CLI's
+/// evidence-table path, and any caller with no yard clock in hand. The
+/// served schedule goes through [`ingest_xer_in`] with the hull's clock.
 #[must_use]
 pub fn ingest_xer(input: &str, source_label: &str) -> XerIngestReport {
+    ingest_xer_in(input, source_label, &YardClock::utc())
+}
+
+/// The lookups one TASK row is resolved against, and the clock its wall
+/// times are read in.
+struct TaskContext<'a> {
+    resources: BTreeMap<String, (i64, i64, String)>,
+    compartments: BTreeMap<&'a str, &'a str>,
+    wi_numbers: BTreeMap<&'a str, &'a str>,
+    areas: BTreeMap<String, String>,
+    source_label: &'a str,
+    clock: &'a YardClock,
+}
+
+/// Ingests one XER export, its wall clock read in `clock`. `source_label`
+/// names the file for provenance — every accepted activity carries it,
+/// because nothing enters without a source.
+#[must_use]
+pub fn ingest_xer_in(input: &str, source_label: &str, clock: &YardClock) -> XerIngestReport {
     let doc = parse_xer(input);
     let mut report = XerIngestReport {
         rejected: doc.rejected.clone(),
@@ -399,23 +478,19 @@ pub fn ingest_xer(input: &str, source_label: &str) -> XerIngestReport {
             .map(str::to_owned)
     });
 
-    let resources = resources_by_task(&doc);
-    let compartments = udf_by_task(&doc, "compartment");
-    let wi_numbers = udf_by_task(&doc, "wi_number");
-    let areas = wbs_area_by_id(&doc);
+    let ctx = TaskContext {
+        resources: resources_by_task(&doc),
+        compartments: udf_by_task(&doc, "compartment"),
+        wi_numbers: udf_by_task(&doc, "wi_number"),
+        areas: wbs_area_by_id(&doc),
+        source_label,
+        clock,
+    };
 
     let mut code_of_task: BTreeMap<&str, &str> = BTreeMap::new();
     if let Some(tasks) = doc.table("TASK") {
         for (line, row) in &tasks.rows {
-            match extract_activity(
-                tasks,
-                row,
-                &resources,
-                &compartments,
-                &wi_numbers,
-                &areas,
-                source_label,
-            ) {
+            match extract_activity(tasks, row, *line, &ctx, &mut report.wall_clock_findings) {
                 Ok(activity) => {
                     if let (Some(id), code) = (tasks.get(row, "task_id"), activity.code.clone()) {
                         code_of_task.insert(id, tasks.get(row, "task_code").unwrap_or_default());
@@ -440,15 +515,12 @@ pub fn ingest_xer(input: &str, source_label: &str) -> XerIngestReport {
 }
 
 /// One TASK row to an activity, or the reason it cannot be honestly accepted.
-#[allow(clippy::too_many_arguments, reason = "one lookup table per XER table")]
 fn extract_activity(
     tasks: &XerTable,
     row: &[String],
-    resources: &BTreeMap<String, (i64, i64, String)>,
-    compartments: &BTreeMap<&str, &str>,
-    wi_numbers: &BTreeMap<&str, &str>,
-    areas: &BTreeMap<String, String>,
-    source_label: &str,
+    line: usize,
+    ctx: &TaskContext<'_>,
+    findings: &mut Vec<String>,
 ) -> Result<XerActivity, String> {
     let code = tasks
         .get(row, "task_code")
@@ -461,17 +533,18 @@ fn extract_activity(
         other => return Err(format!("unknown status_code {other:?}")),
     };
     let task_id = tasks.get(row, "task_id").unwrap_or_default();
-    let (budget, earned, trade) = resources
-        .get(task_id)
-        .cloned()
-        .unwrap_or((0, 0, String::new()));
+    let (budget, earned, trade) =
+        ctx.resources
+            .get(task_id)
+            .cloned()
+            .unwrap_or((0, 0, String::new()));
     // Locating an activity, in order of trust: the dedicated UDF is the one
     // authored home the crosswalk names; failing that, a placard parsed out of
     // the activity's own NAME — schedulers write "... (3-160-2-Q)" constantly,
     // and refusing to read it would unlocate half of a real export. The two
     // paths are graded apart because they are different claims: the UDF is the
     // schedule saying where, the name is this parser guessing where.
-    let (compartment, compartment_reliability) = match compartments.get(task_id).copied() {
+    let (compartment, compartment_reliability) = match ctx.compartments.get(task_id).copied() {
         Some(udf) => (Some(udf.to_owned()), Reliability::High),
         None => match placard_in(name) {
             Some(found) => (Some(found), Reliability::Medium),
@@ -481,20 +554,20 @@ fn extract_activity(
     Ok(XerActivity {
         code: code.to_owned(),
         name: name.to_owned(),
-        work_order_code: wi_numbers.get(task_id).map(|s| (*s).to_owned()),
+        work_order_code: ctx.wi_numbers.get(task_id).map(|s| (*s).to_owned()),
         compartment_no: compartment.map(CompartmentNo::new),
         compartment_reliability,
         trade,
-        planned: planned_window(tasks, row)?,
+        planned: planned_window(tasks, row, line, code, ctx, findings)?,
         budget_hours: ManHours::new(budget),
         earned_hours: ManHours::new(earned),
         status,
         is_milestone: tasks.get(row, "task_type") == Some("TT_Mile"),
         wbs_area: tasks
             .get(row, "wbs_id")
-            .and_then(|id| areas.get(id))
+            .and_then(|id| ctx.areas.get(id))
             .cloned(),
-        source_ref: format!("{source_label} · {code}"),
+        source_ref: format!("{} · {code}", ctx.source_label),
     })
 }
 

@@ -1,0 +1,7 @@
+# CVN-73 yard clock — Norfolk. Offsets are ±HH:MM; transition = month,week(1-5, 5=last),weekday(sun..sat),wall time.
+zone,America/New_York,-05:00
+daylight,-04:00,3,2,sun,02:00,11,1,sun,02:00
+watch,240
+shift,Days,07:00,15:30
+shift,Swing,15:30,24:00
+shift,Mids,00:00,07:00

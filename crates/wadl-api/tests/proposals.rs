@@ -291,6 +291,14 @@ async fn the_next_export_says_which_proposals_it_reflects() {
     let (_, list) = call(&app, &w, "GET", "/schedule-proposals", None).await;
     assert_eq!(list["proposals"][0]["status"], "reflected", "{list}");
     assert_eq!(list["counts"]["reflected"], 1);
-    // The past did not change: the proposal's own record still says where it came from.
-    assert_eq!(list["proposals"][0]["from"]["start"], start);
+    // The past did not change: the proposal's own record still says where it
+    // came from. `xer_with` writes `start` as a UTC wall clock, and the seed
+    // world reads the export in the yard's clock (Norfolk, UTC−04:00 in May),
+    // so the activity — and the proposal's `from` — sits four hours after
+    // the UTC instant the wall clock was written from.
+    assert_eq!(
+        list["proposals"][0]["from"]["start"],
+        start + 4 * 3_600_000,
+        "the export's wall clock is the yard's, not Zulu"
+    );
 }

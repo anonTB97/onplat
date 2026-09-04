@@ -19,10 +19,10 @@
 //!   sets this, behind whatever terminates TLS.
 //! * `WADL_STATIC_DIR` — a built `shell-web/dist` to serve as the site; unset
 //!   means API-only (development, where vite serves the shell).
-//! * `WADL_DEMO_DOCS` — a directory of the hull's documents (compartment
-//!   register, zone chart, geometry, couplings, field-condition log, and a
-//!   `*.xer`) to load at boot through the doors' own paths; the served hull
-//!   IS the documents. `reference/cvn73` is the shipped one.
+//! * `WADL_DEMO_DOCS` — a directory of the hull's documents (yard clock,
+//!   compartment register, zone chart, geometry, couplings, field-condition
+//!   log, and a `*.xer`) to load at boot through the doors' own paths; the
+//!   served hull IS the documents. `reference/cvn73` is the shipped one.
 //! * `WADL_SCHEDULE_XER` — a P6 export to load as the schedule of record
 //!   (overrides any `*.xer` in `WADL_DEMO_DOCS`).
 //! * `WADL_MAX_IN_FLIGHT`, `WADL_REQUEST_TIMEOUT_SECS` — overload limits;
@@ -97,6 +97,9 @@ async fn build_store(
             std::io::Error::other("demo documents rejected")
         })?;
         println!("demo documents from {}:", dir.display());
+        if let Some((name, zone, shifts)) = &loaded.clock {
+            println!("  yard clock:          {name} — {zone}, {shifts} shifts");
+        }
         if let Some((name, decks, spaces)) = &loaded.register {
             println!("  register:            {name} — {spaces} spaces on {decks} decks");
         }
@@ -142,11 +145,14 @@ async fn build_store(
             e
         })?;
         match wadl_api::schedule::load_xer(&store, world.cvn73, &label, &input) {
-            Ok(count) => {
+            Ok(loaded) => {
                 println!(
-                    "schedule of record: {label} — {count} activities for {}",
-                    world.cvn73
+                    "schedule of record: {label} — {} activities for {} · parsed in {}",
+                    loaded.activities, world.cvn73, loaded.parsed_in
                 );
+                for finding in &loaded.wall_clock_findings {
+                    println!("  wall clock:          {finding}");
+                }
             }
             Err(reasons) => {
                 // All-or-nothing, and refusing to start beats serving a partial

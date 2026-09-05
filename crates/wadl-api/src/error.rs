@@ -7,6 +7,7 @@
 
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
+use serde_json::{json, Value};
 
 use wadl_store::StoreError;
 
@@ -15,6 +16,23 @@ use wadl_store::StoreError;
 pub(crate) enum ApiError {
     /// No caller identity, or an unparseable one.
     Unauthorized,
+    /// An identity hop that asserted no person, or a person id outside the
+    /// contract's charset. Carries a `detail` because this is the one 401 a
+    /// proxy owner fixes by changing their configuration, and a bare
+    /// "unauthorized" would send them to the key first.
+    IdentityRefused(String),
+    /// The caller is known and the hull is theirs, but their role lacks the
+    /// capability the route needs. Carries the sentence in yard words, the
+    /// capability's code and the caller's role codes, so the shell can show
+    /// who may and an assessor can read the policy off the refusal.
+    Forbidden {
+        /// `"Foreman may not record a clearance — clear_hazard is held by …"`.
+        detail: String,
+        /// The capability's wire code.
+        capability: &'static str,
+        /// The caller's recognised role codes.
+        roles: Vec<String>,
+    },
     /// The resource does not exist within the caller's scope.
     NotFound,
     /// The request is well-formed but asks for something the data cannot answer —
@@ -51,15 +69,40 @@ impl From<StoreError> for ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, title, detail) = match self {
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", None),
-            Self::NotFound => (StatusCode::NOT_FOUND, "not found", None),
+impl ApiError {
+    /// Status, title, detail, and any extra problem members.
+    fn problem(
+        self,
+    ) -> (
+        StatusCode,
+        &'static str,
+        Option<String>,
+        Vec<(&'static str, Value)>,
+    ) {
+        match self {
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", None, vec![]),
+            Self::IdentityRefused(detail) => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                Some(detail),
+                vec![],
+            ),
+            Self::Forbidden {
+                detail,
+                capability,
+                roles,
+            } => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                Some(detail),
+                vec![("capability", json!(capability)), ("roles", json!(roles))],
+            ),
+            Self::NotFound => (StatusCode::NOT_FOUND, "not found", None, vec![]),
             Self::OutOfRange(detail) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "instant out of range",
                 Some(detail),
+                vec![],
             ),
             Self::PayloadTooLarge(ceiling) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -68,16 +111,30 @@ impl IntoResponse for ApiError {
                     "the body exceeds the import ceiling of {} MB",
                     ceiling / (1024 * 1024)
                 )),
+                vec![],
             ),
-            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error", None),
-        };
-        let body = serde_json::json!({
-            "type": "about:blank",
-            "title": title,
-            "status": status.as_u16(),
-            "detail": detail,
-        });
-        let body = serde_json::to_string(&body).unwrap_or_else(|_| {
+            Self::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+                None,
+                vec![],
+            ),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, title, detail, extras) = self.problem();
+        let mut body = serde_json::Map::new();
+        body.insert("type".to_owned(), json!("about:blank"));
+        body.insert("title".to_owned(), json!(title));
+        body.insert("status".to_owned(), json!(status.as_u16()));
+        body.insert("detail".to_owned(), json!(detail));
+        for (key, value) in extras {
+            body.insert(key.to_owned(), value);
+        }
+        let body = serde_json::to_string(&Value::Object(body)).unwrap_or_else(|_| {
             // A serde_json failure on a fixed literal object is not reachable;
             // fall back to a minimal valid problem document rather than panic.
             String::from("{\"type\":\"about:blank\",\"title\":\"internal error\",\"status\":500}")

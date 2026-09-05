@@ -29,7 +29,16 @@
 //!   defaults in [`wadl_api::hardening::Limits`].
 //! * `WADL_PROXY_KEY` — arms proxy-asserted identity: requests must carry a
 //!   matching `x-wadl-proxy-key` header before their identity headers are
-//!   trusted. Unset means the dev header shim. See `wadl-api`'s auth module.
+//!   trusted, and must name a person (`x-wadl-person`). Unset means the dev
+//!   header shim — DEMO MODE, every door open unless `x-wadl-roles` narrows
+//!   it. See `wadl-api`'s auth and roles modules.
+//! * `WADL_DEFAULT_ROLES` — comma-separated role codes granted to every
+//!   proxy-authenticated person whose proxy asserts no `x-wadl-roles` (a
+//!   pilot whose proxy cannot map groups sets `planner`). Ignored in dev
+//!   mode; an unknown code refuses to boot, like the empty key. Without it,
+//!   such a person is a `reader`.
+//! * `WADL_MARKINGS` — `|`-separated handling markings for the shell's band,
+//!   served on `/api/whoami`; default the prototype's own three.
 //!
 //! The port default is not hardcoded at call sites because an orphaned dev
 //! server silently holding the port once made every later start bind nothing —
@@ -44,7 +53,7 @@ use std::time::Duration;
 use wadl_api::hardening::{self, Limits};
 use wadl_domain::Clock;
 use wadl_store::clock::SystemClock;
-use wadl_store::InMemoryStore;
+use wadl_store::{Actor, InMemoryStore};
 
 /// Builds the store: the database-backed one when the binary carries the `postgres`
 /// feature AND `DATABASE_URL` is set (the migrated, seeded database is the
@@ -84,9 +93,12 @@ async fn build_store(
     let mut xer_path = std::env::var("WADL_SCHEDULE_XER").ok();
     if let Ok(dir) = std::env::var("WADL_DEMO_DOCS") {
         let dir = std::path::PathBuf::from(&dir);
+        // The boot loader is the binary acting on its own account: its
+        // ledger rows name `system:boot`, never a person.
+        let boot_scope = world.yard_scope().with_actor(Actor::system("boot"));
         let loaded = wadl_api::documents::load_demo_docs(
             &store,
-            &world.yard_scope(),
+            &boot_scope,
             world.cvn73,
             &dir,
             clock.now().epoch_millis(),
@@ -175,6 +187,21 @@ async fn main() -> std::io::Result<()> {
         eprintln!("WADL_PROXY_KEY is set but empty — set a key, or unset it for the dev shim");
         return Err(std::io::Error::other("empty proxy key"));
     }
+    // A default role nobody recognises would silently make every pilot user
+    // a reader while the unit file says otherwise; refuse to start instead.
+    let unknown_roles = wadl_api::auth::unknown_default_roles();
+    if !unknown_roles.is_empty() {
+        eprintln!(
+            "WADL_DEFAULT_ROLES names no role: {} — codes are {}",
+            unknown_roles.join(", "),
+            wadl_api::roles::Role::ALL
+                .iter()
+                .map(|r| r.code())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        return Err(std::io::Error::other("unknown default role"));
+    }
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let (store, store_banner) = build_store(&clock).await?;
 
@@ -211,9 +238,10 @@ async fn main() -> std::io::Result<()> {
     // Print the demo identity so an operator can set the dev-shim headers,
     // and which trust boundary is armed so nobody has to guess from behavior.
     let identity = if std::env::var("WADL_PROXY_KEY").is_ok() {
-        "proxy-asserted — identity headers accepted only with x-wadl-proxy-key"
+        "proxy-asserted — identity headers accepted only with x-wadl-proxy-key; \
+         x-wadl-person required"
     } else {
-        "dev header shim — identity headers trusted as given (loopback only)"
+        "dev-headers — DEMO MODE (every door open; x-wadl-roles narrows it; loopback only)"
     };
     // The seeded identity below is identical in both stores by construction —
     // `wadl seed` writes the same world the demo store builds in memory.

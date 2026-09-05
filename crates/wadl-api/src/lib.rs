@@ -1,11 +1,12 @@
 //! The HTTP surface for Shipyard AI Onboard.
 //!
 //! Thin by policy: handlers resolve a [`wadl_store::TenantScope`], call the
-//! store or the decision engine, and shape the result. The two invariants that
-//! matter most here are enforced structurally — every scoped handler runs the
-//! [`auth`] extractor first, so no tenant data is touched without a scope, and
-//! authorization state is read *through* [`wadl_engine`], never computed in a
-//! handler.
+//! store or the decision engine, and shape the result. Three invariants are
+//! enforced structurally — every scoped handler runs the [`auth`] extractor
+//! first, so no tenant data is touched without a scope; every write route is
+//! judged by the [`roles`] gate against one capability table before its
+//! handler runs; and authorization state is read *through* [`wadl_engine`],
+//! never computed in a handler.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::doc_markdown)]
@@ -25,12 +26,14 @@ pub mod documents;
 mod error;
 mod handlers;
 pub mod hardening;
+pub mod roles;
 pub mod routes;
 pub mod schedule;
 pub mod yard_clock;
 
 use std::sync::Arc;
 
+use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -64,7 +67,7 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
-        .route("/api/whoami", get(handlers::whoami))
+        .route("/api/whoami", get(roles::whoami))
         .route("/api/vessels", get(handlers::list_vessels))
         .route("/api/vessels/:id", get(handlers::get_vessel))
         .route(
@@ -204,6 +207,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/vessels/:id/packages", get(handlers::list_packages))
         .route("/api/vessels/:id/packages/:no", get(handlers::get_package))
+        // The capability gate: `route_layer` (not `layer`) so it runs only
+        // for a matched route and sees `MatchedPath` — a 404 for an unknown
+        // path never reaches it.
+        .route_layer(middleware::from_fn(roles::gate))
         .with_state(state)
 }
 

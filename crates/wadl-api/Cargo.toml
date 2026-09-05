@@ -15,7 +15,10 @@ wadl-mitigate.workspace = true
 wadl-issues.workspace = true
 wadl-ingest.workspace = true
 wadl-store.workspace = true
-axum.workspace = true
+# `matched-path` (no extra crate) lets the capability gate read the route
+# pattern a request matched, so one `route_layer` judges every write route
+# from the `roles::GATED` table instead of a check in each handler.
+axum = { workspace = true, features = ["matched-path"] }
 # Gzip for the hand-rolled compression layer (hardening.rs) — see the
 # admission note in the workspace manifest.
 flate2.workspace = true

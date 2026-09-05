@@ -106,9 +106,11 @@ impl AsOf {
 /// `GET /health` — whether this process can answer, and whether its store
 /// can. A load balancer reads the status code; an operator reads the body:
 /// which backend, whether a round trip just succeeded, the migration the
-/// database is at, and the document shape this build writes. Unreachable
-/// store → 503, so a pool that lost its database drops out of rotation
-/// instead of serving 500s to every screen.
+/// database is at, the document shape this build writes, and which identity
+/// boundary is armed (the shell reads `identity_mode` before it decides
+/// whether to send dev headers at all). Unreachable store → 503, so a pool
+/// that lost its database drops out of rotation instead of serving 500s to
+/// every screen.
 pub(crate) async fn health(State(state): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
     let store = state.store.health().await;
     let status = if store.reachable {
@@ -121,6 +123,7 @@ pub(crate) async fn health(State(state): State<AppState>) -> (axum::http::Status
         Json(json!({
             "status": if store.reachable { "ok" } else { "degraded" },
             "decision_support_only": true,
+            "identity_mode": crate::auth::identity_mode(),
             "store": store,
             "now": state.clock.now(),
         })),
@@ -129,14 +132,14 @@ pub(crate) async fn health(State(state): State<AppState>) -> (axum::http::Status
 
 pub(crate) async fn list_vessels(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
 ) -> Json<Value> {
     Json(json!(state.store.list_vessels(&scope).await))
 }
 
 pub(crate) async fn get_vessel(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = state
@@ -148,7 +151,7 @@ pub(crate) async fn get_vessel(
 
 pub(crate) async fn list_compartments(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -194,7 +197,7 @@ async fn overlay_geometry(
 /// it reads as in progress, and that is a flag, not an omission.
 pub(crate) async fn list_work_orders(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -240,7 +243,7 @@ pub(crate) async fn list_work_orders(
 /// negative lags where cure-window inversions hide.
 pub(crate) async fn list_activities(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -304,7 +307,7 @@ pub(crate) async fn list_activities(
 /// the options panel; nothing here writes anything.
 pub(crate) async fn schedule_alternatives(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -462,7 +465,7 @@ async fn reconcile(
 /// worse, mark a projection as live.
 pub(crate) async fn timeframe(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = state
@@ -484,7 +487,7 @@ pub(crate) async fn timeframe(
 
 pub(crate) async fn stranded_hours(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let report = state
@@ -497,7 +500,7 @@ pub(crate) async fn stranded_hours(
 /// The hull's decks, ordered downward.
 pub(crate) async fn list_decks(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let decks = state
@@ -516,7 +519,7 @@ pub(crate) async fn list_decks(
 /// same engine build run in the browser and on a phone.
 pub(crate) async fn compartment_state(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -698,7 +701,7 @@ fn booked_work(
 /// query Deck Explorer draws a deck sheet from.
 pub(crate) async fn deck_states(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -775,7 +778,7 @@ pub(crate) async fn deck_states(
 /// proceed?*), and the two are kept apart deliberately.
 pub(crate) async fn readiness(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -958,7 +961,7 @@ async fn mitigation_inputs(
 /// here changes a hazard, a schedule or an authorization.
 pub(crate) async fn mitigations(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1055,7 +1058,7 @@ struct DecisionDetail<'a> {
 /// about an audit record.
 pub(crate) async fn record_decision(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
     body: Result<Json<DecisionBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1161,7 +1164,7 @@ pub(crate) async fn record_decision(
 /// six compartments appears once with its full effect rather than six times.
 pub(crate) async fn leverage(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1255,7 +1258,7 @@ async fn derived_issues(
 /// issue somebody has answered for.
 pub(crate) async fn issues(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1333,7 +1336,7 @@ pub(crate) async fn issues(
 /// a break names the sequence number where trust stops.
 pub(crate) async fn ledger(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -1397,7 +1400,7 @@ struct AckDetail<'a> {
 /// not on offer is refused.
 pub(crate) async fn acknowledge_issue(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     body: Result<Json<AckBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1452,7 +1455,7 @@ pub(crate) async fn acknowledge_issue(
 /// space, kind, when it was raised, and its label.
 pub(crate) async fn list_hazards(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1489,7 +1492,7 @@ pub(crate) struct RaiseHazardBody {
 /// the hazard drives re-derives on the next read.
 pub(crate) async fn raise_hazard(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     body: Result<Json<RaiseHazardBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1595,7 +1598,7 @@ pub(crate) struct ClearHazardBody {
 /// basis in the hashed detail) before the response returns.
 pub(crate) async fn clear_hazard(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     body: Result<Json<ClearHazardBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1834,7 +1837,7 @@ fn refused_by_code(
 /// so a foreign hull is not-found before a single body byte is buffered.
 pub(crate) async fn import_schedule(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -2032,7 +2035,7 @@ pub(crate) async fn ledger_document(
 /// schedule of record. The undo the import door needs to be safe to try.
 pub(crate) async fn revert_schedule(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -2154,7 +2157,7 @@ fn zone_audit(
 /// was inferred from.
 pub(crate) async fn zones(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -2290,7 +2293,7 @@ fn adjacency_reasons<'a>(
 /// graph; the screens draw it and never re-derive it.
 pub(crate) async fn zone_adjacent(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, zone)): Path<(Uuid, String)>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -2377,7 +2380,7 @@ pub(crate) struct ImportZones {
 /// including the spaces it would put out of bounds — without storing anything.
 pub(crate) async fn import_zones(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -2533,7 +2536,7 @@ pub(crate) struct ImportBudgets {
 /// book WOULD produce against the current register, storing nothing.
 pub(crate) async fn import_budgets(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -2654,7 +2657,7 @@ fn reconcile_against(
 /// work items.
 pub(crate) async fn revert_budgets(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -2685,7 +2688,7 @@ pub(crate) struct ImportManning {
 /// boards show demand only and say so.
 pub(crate) async fn get_manning(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -2705,7 +2708,7 @@ pub(crate) async fn get_manning(
 /// reverted whole.
 pub(crate) async fn import_manning(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -2894,7 +2897,7 @@ fn geometry_findings(
 /// parses all round, and the surface says so.
 pub(crate) async fn get_geometry(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -2923,7 +2926,7 @@ pub(crate) async fn get_geometry(
 /// exactly the thing a person should look at, not a thing to hide.
 pub(crate) async fn import_geometry(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -3024,7 +3027,7 @@ pub(crate) async fn import_geometry(
 /// Discards the geometry register; positions return to placard parses.
 pub(crate) async fn revert_geometry(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -3045,7 +3048,7 @@ pub(crate) async fn revert_geometry(
 /// Discards the ingested manning book; the boards return to demand only.
 pub(crate) async fn revert_manning(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -3066,7 +3069,7 @@ pub(crate) async fn revert_manning(
 /// Discards the ingested zone chart; the views return to inferred bands.
 pub(crate) async fn revert_zones(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -3103,7 +3106,7 @@ pub(crate) struct ImportRegister {
 /// is loaded, and either way what the reads are currently built from.
 pub(crate) async fn get_register(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -3249,7 +3252,7 @@ fn register_rejections(body: &ImportRegister) -> Vec<String> {
 /// the seeded register stops existing for this hull.
 pub(crate) async fn import_register(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -3312,7 +3315,7 @@ pub(crate) async fn import_register(
 /// Discards the ingested compartment register; the seed is served again.
 pub(crate) async fn revert_register(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -3352,7 +3355,7 @@ pub(crate) struct ImportCouplings {
 /// may name and how many edges the cascade currently walks.
 pub(crate) async fn get_couplings(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -3445,7 +3448,7 @@ fn coupling_rejections(
 /// previews, including every derived edge, and stores nothing.
 pub(crate) async fn import_couplings(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -3520,7 +3523,7 @@ pub(crate) async fn import_couplings(
 /// Discards the ingested coupling register; the seeded edges are walked again.
 pub(crate) async fn revert_couplings(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -3653,7 +3656,7 @@ async fn raise_logged_row(
 /// and the commit as one `HAZARD_LOG_IMPORTED` with the counts.
 pub(crate) async fn import_hazard_log(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -3910,7 +3913,7 @@ fn proposed_window(
 /// P6 reflected.
 pub(crate) async fn propose_schedule_change(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     body: Result<Json<ProposalBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
@@ -3995,7 +3998,7 @@ pub(crate) async fn propose_schedule_change(
 /// ledger with where it stands against the schedule currently served.
 pub(crate) async fn list_schedule_proposals(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -4031,7 +4034,7 @@ pub(crate) struct WithdrawBody {
 /// back, as a later ledger entry; the original stays in the chain.
 pub(crate) async fn withdraw_schedule_proposal(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     body: Result<Json<WithdrawBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
@@ -4076,7 +4079,7 @@ pub(crate) async fn withdraw_schedule_proposal(
 /// The distributed packages on a hull.
 pub(crate) async fn list_packages(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let packages = state
@@ -4095,7 +4098,7 @@ pub(crate) async fn list_packages(
 /// one held compartment strands man-hours it does not contain.
 pub(crate) async fn get_package(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, code)): Path<(Uuid, String)>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -4193,27 +4196,6 @@ async fn decide(
     }))
 }
 
-/// `GET /api/whoami` — the caller's resolved identity, as the server sees it.
-///
-/// Serves the outcome of the trust boundary rather than echoing headers: the
-/// tenant and hull assignments that every scoped query will actually run
-/// under, plus which identity mode admitted them. The shell uses this to show
-/// doors a caller can open instead of doors that exist (least privilege made
-/// visible), and an operator uses it to verify a proxy configuration end to
-/// end with one curl.
-pub(crate) async fn whoami(Caller(scope): Caller) -> Json<Value> {
-    Json(json!({
-        "org": scope.org.to_string(),
-        "assigned_vessels": scope
-            .assigned_vessels
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-        "identity_mode": crate::auth::identity_mode(),
-        "decision_support_only": true,
-    }))
-}
-
 /// How a scheduled activity participates in a work-on-work conflict, judged
 /// from its trade and name. `None` = neither class.
 ///
@@ -4259,7 +4241,7 @@ fn work_class(trade: &str, name: &str) -> Option<&'static str> {
 /// no screen has to re-explain it.
 pub(crate) async fn work_conflicts(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {

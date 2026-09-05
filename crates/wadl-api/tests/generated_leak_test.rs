@@ -2,10 +2,15 @@
 // Regenerate after changing `wadl_api::routes::inventory()`; CI runs
 // `gen-leak-tests --check` and fails if this file has drifted.
 //
-// Each test calls a tenant-scoped endpoint AS the yard tenant (assigned to
-// every yard hull, so assignment is never the reason) using the NAVY
+// Each leak test calls a tenant-scoped endpoint AS the yard tenant (assigned
+// to every yard hull, so assignment is never the reason) using the NAVY
 // tenant's hull id, and asserts not-found. That is the cross-tenant leak
 // the row-level-security model must prevent.
+//
+// Each weakest-role test calls a gated write route in-tenant, on an
+// assigned hull, as a `reader`, and asserts 403 naming the capability the
+// route needs (`wadl_api::roles::GATED`). That is the least-privilege
+// refusal the role matrix must produce.
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use axum::body::Body;
@@ -29,6 +34,36 @@ async fn status(
         .body(body.map_or_else(Body::empty, Body::from))
         .unwrap();
     app.oneshot(request).await.unwrap().status()
+}
+
+/// Status and problem body for an in-tenant request as a `reader`.
+async fn as_reader(
+    method: &str,
+    path: &str,
+    org: &str,
+    assigned: &str,
+    body: Option<&'static str>,
+) -> (StatusCode, serde_json::Value) {
+    let (app, _world) = wadl_api::demo_app();
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-org-id", org)
+        .header("x-assigned-vessels", assigned)
+        .header("x-wadl-person", "dev:reader")
+        .header("x-wadl-roles", "reader")
+        .header("content-type", "application/json")
+        .body(body.map_or_else(Body::empty, Body::from))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 fn yard_assigned(w: &wadl_store::memory::DemoWorld) -> String {
@@ -967,4 +1002,601 @@ async fn control_in_tenant_get_vessel_is_ok() {
 #[test]
 fn every_scoped_id_route_has_a_leak_test() {
     assert_eq!(wadl_api::routes::scoped_id_routes().len(), 50);
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_hazards() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/hazards"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"compartment":"3-148-2-E","kind":"hot_work_live","label":"leak test"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/hazards must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("raise_hazard")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_hazards_import() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/hazards/import"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","rows":[{"compartment":"3-148-2-E","kind":"stop_work","label":"leak"}]}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/hazards/import must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("raise_hazard")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_hazards_clear() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/hazards/clear"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"compartment":"3-148-2-E","kind":"energised_bus","basis":"leak test"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/hazards/clear must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("clear_hazard")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_compartments_no_decision() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/compartments/:no/decision"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"disposition":"rejected","option":{},"reason":"leak test"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/compartments/:no/decision must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("decide")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_issues_acknowledge() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/issues/acknowledge"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"key":"issue:held:0-000-0-X","note":"leak test"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/issues/acknowledge must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("decide")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_schedule_proposals() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-proposals"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"activity":"A00010","start_ms":1,"end_ms":2,"reason":"leak test"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/schedule-proposals must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("propose")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_schedule_proposals_withdraw() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-proposals/withdraw"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"seq":1,"reason":"leak test"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/schedule-proposals/withdraw must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("propose")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_register() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/register"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","decks":[{"code":"3rd","label":"Third Deck","ordinal":3}],"spaces":[{"compartment_no":"3-148-2-E","name":"leak","deck_code":"3rd","zone":"Z5","category":"E"}]}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/register must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_register_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/register/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/register/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_couplings() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/couplings"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","edges":[{"from":"3-148-2-E","to":"3-160-2-Q","code":"deck_penetration"}]}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/couplings must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_couplings_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/couplings/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/couplings/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_zones() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/zones"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"label":"leak test","bounds":[{"zone":"Z1","lo_frame":0,"hi_frame":1}]}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/zones must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_zones_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/zones/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/zones/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_geometry() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/geometry"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","spaces":[{"compartment_no":"3-148-2-E","fwd_frame":148,"aft_frame":152}],"decks":[]}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/geometry must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_geometry_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/geometry/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/geometry/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_schedule_of_record() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-of-record"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"label":"leak test","xer":""}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/schedule-of-record must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_schedule_of_record_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-of-record/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/schedule-of-record/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_manning_book() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/manning-book"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"label":"leak test","crews":[{"trade":"Electrical","headcount":1}]}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/manning-book must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_manning_book_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/manning-book/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/manning-book/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_budget_book() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/budget-book"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","items":[{"code":"WI-0","title":"t","trade":"t","budget_hours":1,"earned_hours":0}]}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/budget-book must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_budget_book_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/budget-book/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/budget-book/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_yard_clock() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/yard-clock"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","clock":{"zone":"UTC","standard_offset_minutes":0,"daylight":null,"watch_minutes":240,"shifts":[{"name":"Days","start_minute":420,"length_minutes":510}]}}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/yard-clock must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_yard_clock_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/yard-clock/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/yard-clock/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[test]
+fn every_gated_route_has_a_weakest_role_test() {
+    assert_eq!(wadl_api::roles::GATED.len(), 23);
 }

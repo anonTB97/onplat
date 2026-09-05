@@ -117,6 +117,8 @@ route with a foreign hull id and requires not-found (CI job `leak-tests`).
 | Other request bodies | axum default (small) | router default |
 | Bind address | `127.0.0.1` unless `WADL_BIND` set | `serve` binary |
 | Identity trust | dev shim, or proxy-asserted when `WADL_PROXY_KEY` set | `wadl-api` auth extractor |
+| Person | required in proxy mode (`x-wadl-person`); `dev:anonymous` on the shim | `wadl-api` auth extractor; hashed into every ledger row |
+| Roles without `x-wadl-roles` | `reader`, or `WADL_DEFAULT_ROLES` when set | `wadl-api` auth extractor; refused at boot if unknown |
 | Store | in-memory demo; PostgreSQL when built with the `postgres` feature and `DATABASE_URL` is set (RLS armed per request) | `serve` binary + `wadl-store` |
 
 ## 5. Control implementation statements
@@ -136,11 +138,20 @@ Status vocabulary: **Implemented** (in this tree, verified), **Hybrid**
   *Verified by:* generated leak tests; `pg_rls` on live PostgreSQL;
   WADL-SA-03/04.
 - **AC-6 (Implemented).** Assignment is per hull; `GET /api/whoami` serves
-  the caller's resolved scope and trust mode, and the shell wears both in
-  its chrome — the signed-in block shows the scope the server resolved, and
-  a session admitted by the dev shim is marked with an amber `DEV ID` badge
-  so it can never pass for an authenticated one in a screenshot.
-  *Verified by:* WADL-SA-06.
+  the caller's resolved scope, trust mode, person, roles and capabilities,
+  and the shell wears them in its chrome — the signed-in block shows what
+  the server resolved, and a session admitted by the dev shim is marked
+  with an amber badge so it can never pass for an authenticated one in a
+  screenshot. Least privilege is a code table (`wadl_api::roles::MATRIX`,
+  eight roles, six capabilities, served on `whoami` as `role_matrix`) and
+  one `route_layer` gate over every write route (`roles::GATED`): a role
+  without the capability is refused 403 with a sentence naming who holds
+  it, nothing is written, and a dry run is never refused. Proxy users
+  arriving without roles are `reader` unless the deployment sets
+  `WADL_DEFAULT_ROLES` (an SSP-visible decision, refused at boot if it
+  names an unknown role).
+  *Verified by:* generated weakest-role tests (one per gated route, as a
+  `reader`, 403); `roles` unit tests place every POST; WADL-SA-06/11.
 - **AC-11 / AC-12 (Hybrid).** Session locking, idle timeout, and
   re-authentication are the identity terminator/broker's share, with the
   required settings in `deploy/README.md` §Session lifetime. The binary is
@@ -149,16 +160,24 @@ Status vocabulary: **Implemented** (in this tree, verified), **Hybrid**
 ### AU — Audit and Accountability
 
 - **AU-2 / AU-3 (Implemented).** One JSON object per request on stdout —
-  timestamp, method, path, status, duration, asserted tenant — for every
-  `/api` request and every non-2xx anywhere; refusals (401/404/413/422/503)
-  are logged at least as loudly as successes. Decisions are additionally
-  recorded in the domain ledger with actor and rationale.
+  timestamp, method, path, status, duration, asserted tenant and asserted
+  person — for every `/api` request and every non-2xx anywhere; refusals
+  (401/403/404/413/422/503) are logged at least as loudly as successes.
+  Decisions, clearances, acknowledgements, proposals and every document
+  commit or revert are additionally recorded in the domain ledger with the
+  person who acted and the rationale.
   *Verified by:* WADL-SA-07 (behavioral); audit layer is outermost in
-  `wadl_api::hardening::harden`.
+  `wadl_api::hardening::harden`; `identity` integration tests read the
+  person back off the ledger.
 - **AU-9 / AU-10 (Hybrid).** The hash-chained ledger is verifiable with
-  `wadl-cli verify-ledger` (non-repudiation of recorded decisions);
-  transport-log integrity is journald's sealing/forwarding under
-  `deploy/wadl.service`.
+  `wadl-cli verify-ledger` (non-repudiation of recorded decisions). From
+  migration 0017 every row is chain format 2: the acting person's id and
+  display name are inside the row's hash, so a row cannot be re-attributed
+  without breaking the chain; rows from before are format 1 and verify in
+  the same chain, honestly unattributed. Transport-log integrity is
+  journald's sealing/forwarding under `deploy/wadl.service`.
+  *Verified by:* `ledger` unit tests (v1→v2 switch, altered actor breaks);
+  `pg_rls` round trip on live PostgreSQL.
 
 ### CM — Configuration Management
 
@@ -178,9 +197,14 @@ Status vocabulary: **Implemented** (in this tree, verified), **Hybrid**
   at the accredited terminator; the binary trusts identity assertions only
   from that hop, proven by the `WADL_PROXY_KEY` shared key compared in
   constant time. Requests reaching the port without it are refused before
-  identity is read. The terminator must strip the identity headers from
-  client traffic (`deploy/README.md`).
-  *Verified by:* auth unit tests (both modes); WADL-SA-05/06.
+  identity is read. On that hop the terminator asserts the person
+  (`x-wadl-person`, the certificate's stable subject — required, 401
+  without it), a percent-encoded display name (`x-wadl-person-name`,
+  display only, falls back to the id) and role codes (`x-wadl-roles`);
+  the six-header contract is `docs/briefs/proxy-owner-contract.md`. The
+  terminator must strip all six from client traffic (`deploy/README.md`).
+  *Verified by:* auth unit tests (both modes, person, name, roles);
+  WADL-SA-05/06/11.
 
 ### RA / SA — Risk Assessment, Acquisition
 

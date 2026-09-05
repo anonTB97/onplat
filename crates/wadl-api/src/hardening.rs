@@ -87,18 +87,16 @@ pub fn harden(router: Router, limits: Limits, clock: Arc<dyn Clock>) -> Router {
 /// request bodies (an import's content is accounted for by the ledger and
 /// the door's own receipt, not the transport log).
 ///
-/// The `org` field repeats the caller's asserted tenant so log lines can be
-/// grouped per tenant; in proxy-asserted mode (see `auth`) that assertion is
-/// only accepted from the authenticated proxy hop.
+/// The `org` and `person` fields repeat the caller's asserted tenant and
+/// subject (`-` when absent) so log lines can be grouped per tenant and per
+/// person; in proxy-asserted mode (see `auth`) those assertions are only
+/// accepted from the authenticated proxy hop, and a line written before the
+/// gate refused them still shows what was claimed.
 async fn audited(clock: &dyn Clock, req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
-    let org = req
-        .headers()
-        .get("x-org-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("-")
-        .to_owned();
+    let org = raw_header(req.headers(), "x-org-id");
+    let person = raw_header(req.headers(), crate::auth::PERSON_HEADER);
     let started = clock.now().epoch_millis();
     let res = next.run(req).await;
     let finished = clock.now().epoch_millis();
@@ -114,10 +112,21 @@ async fn audited(clock: &dyn Clock, req: Request, next: Next) -> Response {
                 "status": status,
                 "dur_ms": finished - started,
                 "org": org,
+                "person": person,
             })
         );
     }
     res
+}
+
+/// A header as asserted, `-` when absent or not a string — for the audit
+/// line, which records the claim, not the verdict.
+fn raw_header(headers: &axum::http::HeaderMap, name: &str) -> String {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-")
+        .to_owned()
 }
 
 /// The concurrency + timeout guard. Shedding uses `try_acquire` — a request

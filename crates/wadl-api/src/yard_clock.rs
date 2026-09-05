@@ -101,7 +101,7 @@ impl ClockInEffect {
 /// clock and offset right now so a reader can check it against the window.
 pub(crate) async fn get_yard_clock(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -137,7 +137,7 @@ pub(crate) struct ImportClock {
 /// Confirm.
 pub(crate) async fn import_yard_clock(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -208,7 +208,7 @@ pub(crate) async fn import_yard_clock(
 /// on screen carries a `Z` again.
 pub(crate) async fn revert_yard_clock(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);

@@ -8,6 +8,12 @@
 //! adding a scoped endpoint to the inventory produces its leak test, and
 //! `--check` fails CI if the committed file has drifted from the inventory —
 //! which is how an endpoint ends up without a test being a build failure.
+//!
+//! The same file carries one weakest-role test per gated write route
+//! (`wadl_api::roles::GATED`): the request is in-tenant, on an assigned hull,
+//! as a `reader`, and must be refused 403 with the route's capability named.
+//! A door added to the gate table gets its test; a door left out of the table
+//! fails the roles unit test that places every POST.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::disallowed_methods)] // xtask is dev tooling, not a library crate
@@ -47,7 +53,15 @@ fn run() -> Result<()> {
 }
 
 fn fn_name(spec: &RouteSpec) -> String {
-    let raw = format!("leak_{}_{}", spec.method.to_ascii_lowercase(), spec.path);
+    ident(&format!(
+        "leak_{}_{}",
+        spec.method.to_ascii_lowercase(),
+        spec.path
+    ))
+}
+
+/// A Rust identifier from a route: non-alphanumerics collapse to one `_`.
+fn ident(raw: &str) -> String {
     let mut name = String::with_capacity(raw.len());
     let mut last_underscore = false;
     for ch in raw.chars() {
@@ -70,10 +84,15 @@ fn render() -> String {
          // Regenerate after changing `wadl_api::routes::inventory()`; CI runs\n\
          // `gen-leak-tests --check` and fails if this file has drifted.\n\
          //\n\
-         // Each test calls a tenant-scoped endpoint AS the yard tenant (assigned to\n\
-         // every yard hull, so assignment is never the reason) using the NAVY\n\
+         // Each leak test calls a tenant-scoped endpoint AS the yard tenant (assigned\n\
+         // to every yard hull, so assignment is never the reason) using the NAVY\n\
          // tenant's hull id, and asserts not-found. That is the cross-tenant leak\n\
          // the row-level-security model must prevent.\n\
+         //\n\
+         // Each weakest-role test calls a gated write route in-tenant, on an\n\
+         // assigned hull, as a `reader`, and asserts 403 naming the capability the\n\
+         // route needs (`wadl_api::roles::GATED`). That is the least-privilege\n\
+         // refusal the role matrix must produce.\n\
          #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]\n\n\
          use axum::body::Body;\n\
          use axum::http::{Request, StatusCode};\n\
@@ -95,6 +114,30 @@ fn render() -> String {
          \x20       .body(body.map_or_else(Body::empty, Body::from))\n\
          \x20       .unwrap();\n\
          \x20   app.oneshot(request).await.unwrap().status()\n\
+         }\n\n\
+         /// Status and problem body for an in-tenant request as a `reader`.\n\
+         async fn as_reader(\n\
+         \x20   method: &str,\n\
+         \x20   path: &str,\n\
+         \x20   org: &str,\n\
+         \x20   assigned: &str,\n\
+         \x20   body: Option<&'static str>,\n\
+         ) -> (StatusCode, serde_json::Value) {\n\
+         \x20   let (app, _world) = wadl_api::demo_app();\n\
+         \x20   let request = Request::builder()\n\
+         \x20       .method(method)\n\
+         \x20       .uri(path)\n\
+         \x20       .header(\"x-org-id\", org)\n\
+         \x20       .header(\"x-assigned-vessels\", assigned)\n\
+         \x20       .header(\"x-wadl-person\", \"dev:reader\")\n\
+         \x20       .header(\"x-wadl-roles\", \"reader\")\n\
+         \x20       .header(\"content-type\", \"application/json\")\n\
+         \x20       .body(body.map_or_else(Body::empty, Body::from))\n\
+         \x20       .unwrap();\n\
+         \x20   let response = app.oneshot(request).await.unwrap();\n\
+         \x20   let status = response.status();\n\
+         \x20   let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();\n\
+         \x20   (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))\n\
          }\n\n\
          fn yard_assigned(w: &wadl_store::memory::DemoWorld) -> String {\n\
          \x20   [w.cvn73, w.cvn71, w.cvn75, w.ddg, w.lpd]\n\
@@ -147,11 +190,54 @@ fn render() -> String {
         "#[test]\n\
          fn every_scoped_id_route_has_a_leak_test() {{\n\
          \x20   assert_eq!(wadl_api::routes::scoped_id_routes().len(), {count});\n\
-         }}\n",
+         }}\n\n",
         count = scoped.len(),
     );
 
+    render_weakest_role(&mut out, &scoped);
     out
+}
+
+/// The weakest-role block: one 403 test per gated route, plus its count.
+fn render_weakest_role(out: &mut String, scoped: &[RouteSpec]) {
+    for (method, path, capability) in wadl_api::roles::GATED {
+        let name = ident(&format!(
+            "weakest_role_{}_{}",
+            method.to_ascii_lowercase(),
+            path
+        ));
+        // The sample body from the inventory, so the request reaches the gate
+        // the way a real client's would; the gate judges before the body.
+        let body = scoped
+            .iter()
+            .find(|r| r.method == *method && r.path == *path)
+            .and_then(|r| r.sample_body)
+            .map_or_else(|| "None".to_owned(), |b| format!("Some(r#\"{b}\"#)"));
+        let _ = write!(
+            out,
+            "#[tokio::test]\n\
+             async fn {name}() {{\n\
+             \x20   let (_, w) = wadl_api::demo_app();\n\
+             \x20   let org = w.yard_org.as_uuid().to_string();\n\
+             \x20   let assigned = yard_assigned(&w);\n\
+             \x20   let hull = w.cvn73.as_uuid().to_string();\n\
+             \x20   let path = \"{path}\".replace(\":id\", &hull).replace(\":no\", \"4-141-0-C\");\n\
+             \x20   let (code, problem) = as_reader(\"{method}\", &path, &org, &assigned, {body}).await;\n\
+             \x20   assert_eq!(code, StatusCode::FORBIDDEN, \"a reader at {method} {path} must be 403\");\n\
+             \x20   assert_eq!(problem.get(\"capability\").and_then(serde_json::Value::as_str), Some(\"{cap}\"));\n\
+             }}\n\n",
+            cap = capability.code(),
+        );
+    }
+
+    let _ = write!(
+        out,
+        "#[test]\n\
+         fn every_gated_route_has_a_weakest_role_test() {{\n\
+         \x20   assert_eq!(wadl_api::roles::GATED.len(), {count});\n\
+         }}\n",
+        count = wadl_api::roles::GATED.len(),
+    );
 }
 
 /// Runs the rendered source through `rustfmt` (reading stdin, writing stdout)

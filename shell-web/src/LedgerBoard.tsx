@@ -72,6 +72,9 @@ function summarise(e: AuditEntry): string {
     if (typeof d.note === "string" && d.note) parts.push(`“${d.note}”`);
     const issue = d.issue as Record<string, unknown> | undefined;
     if (issue && typeof issue.kind === "string") parts.push(`finding: ${issue.kind}`);
+    // A document line names its kind and label: `yard_clock · CVN73-clock.csv`.
+    if (typeof d.kind === "string") parts.push(d.kind);
+    if (typeof d.label === "string" && d.label) parts.push(d.label);
     return parts.join(" · ") || "recorded without commentary";
   } catch {
     return e.detail.slice(0, 120);

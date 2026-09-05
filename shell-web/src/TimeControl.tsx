@@ -579,7 +579,7 @@ export function TimeControl({
               title="No yard clock is loaded for this hull, so every time on screen is a UTC instant marked Z. Load the yard's clock in Data Sources and every board reads in the yard's wall clock."
               style={{ fontFamily: "monospace", color: C.warn, fontSize: 10.5 }}
             >
-              UTC · no yard clock — load one in Data Sources
+              {zoneLabel(at)}
             </span>
           ) : (
             <span

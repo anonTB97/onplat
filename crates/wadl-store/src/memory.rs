@@ -276,6 +276,11 @@ struct AuditRow {
     occurred_at_ms: i64,
     prev_hash: Option<Vec<u8>>,
     entry_hash: Vec<u8>,
+    /// The person the scope acted as. Always present here: this store has
+    /// only ever written format-2 rows, so a `None` would be a bug, not a
+    /// row from before migration 0017.
+    actor_id: String,
+    actor_name: String,
 }
 
 /// The seeded in-memory store.
@@ -2458,8 +2463,17 @@ impl Repositories for InMemoryStore {
             .iter()
             .rfind(|r| r.vessel == vessel)
             .map(|r| r.entry_hash.clone());
-        let entry_hash =
-            crate::ledger::compute_hash(prev.as_deref(), action, detail, occurred_at_ms);
+        // Format 2: the person is in the hash. `scope.actor` is never absent
+        // — a scope nobody named acts as `system:unattributed`.
+        let actor = &scope.actor;
+        let entry_hash = crate::ledger::compute_hash_v2(
+            prev.as_deref(),
+            action,
+            detail,
+            occurred_at_ms,
+            &actor.id,
+            &actor.name,
+        );
         let seq = i64::try_from(log.len()).unwrap_or(i64::MAX) + 1;
         log.push(AuditRow {
             vessel,
@@ -2469,6 +2483,8 @@ impl Repositories for InMemoryStore {
             occurred_at_ms,
             prev_hash: prev.clone(),
             entry_hash: entry_hash.clone(),
+            actor_id: actor.id.clone(),
+            actor_name: actor.name.clone(),
         });
         Ok(AuditRecord {
             seq,
@@ -2478,6 +2494,9 @@ impl Repositories for InMemoryStore {
             occurred_at_ms,
             entry_hash: hex::encode(entry_hash),
             prev_hash: prev.map(hex::encode),
+            actor_id: Some(actor.id.clone()),
+            actor_name: Some(actor.name.clone()),
+            chain_version: crate::ledger::CHAIN_VERSION,
         })
     }
 
@@ -2507,6 +2526,9 @@ impl Repositories for InMemoryStore {
                 occurred_at_ms: r.occurred_at_ms,
                 entry_hash: hex::encode(&r.entry_hash),
                 prev_hash: r.prev_hash.as_ref().map(hex::encode),
+                actor_id: Some(r.actor_id.clone()),
+                actor_name: Some(r.actor_name.clone()),
+                chain_version: crate::ledger::CHAIN_VERSION,
             })
             .rev()
             .collect())

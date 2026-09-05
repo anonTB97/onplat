@@ -45,7 +45,7 @@ pub mod scope;
 pub use error::StoreError;
 pub use memory::InMemoryStore;
 pub use repo::Repositories;
-pub use scope::TenantScope;
+pub use scope::{Actor, ActorSource, TenantScope};
 
 /// The shape version stamped into every stored document (`schema_version`
 /// in the jsonb). Bump it when a document's fields change meaning, so a

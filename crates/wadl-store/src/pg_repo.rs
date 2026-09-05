@@ -1572,13 +1572,22 @@ impl Repositories for PgStore {
         .bind(vessel.as_uuid())
         .fetch_optional(&mut *tx)
         .await?;
-        let entry_hash =
-            crate::ledger::compute_hash(prev.as_deref(), action, detail, occurred_at_ms);
+        // Format 2 from migration 0017 on: the person is in the hash, and the
+        // table's check constraint refuses a format-2 row that names nobody.
+        let actor = &scope.actor;
+        let entry_hash = crate::ledger::compute_hash_v2(
+            prev.as_deref(),
+            action,
+            detail,
+            occurred_at_ms,
+            &actor.id,
+            &actor.name,
+        );
         let seq: i64 = sqlx::query_scalar(
             "INSERT INTO audit_entry
                 (org_id, vessel_id, action, detail, subject_ref, occurred_at,
-                 prev_hash, entry_hash)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 prev_hash, entry_hash, actor_id, actor_name, chain_version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              RETURNING entry_id",
         )
         .bind(scope.org.as_uuid())
@@ -1589,6 +1598,9 @@ impl Repositories for PgStore {
         .bind(occurred_at)
         .bind(prev.as_deref())
         .bind(entry_hash.as_slice())
+        .bind(&actor.id)
+        .bind(&actor.name)
+        .bind(i16::from(crate::ledger::CHAIN_VERSION))
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1600,6 +1612,9 @@ impl Repositories for PgStore {
             occurred_at_ms,
             entry_hash: hex::encode(entry_hash),
             prev_hash: prev.map(hex::encode),
+            actor_id: Some(actor.id.clone()),
+            actor_name: Some(actor.name.clone()),
+            chain_version: crate::ledger::CHAIN_VERSION,
         })
     }
 
@@ -1614,7 +1629,7 @@ impl Repositories for PgStore {
         let rows = sqlx::query(
             "SELECT entry_id, action, detail, subject_ref,
                     (EXTRACT(EPOCH FROM occurred_at) * 1000)::bigint AS occurred_at_ms,
-                    prev_hash, entry_hash
+                    prev_hash, entry_hash, actor_id, actor_name, chain_version
                FROM audit_entry
               WHERE vessel_id = $1
                 AND ($2::text IS NULL OR subject_ref = $2)
@@ -1635,6 +1650,12 @@ impl Repositories for PgStore {
                 occurred_at_ms: row.get("occurred_at_ms"),
                 entry_hash: hex::encode(row.get::<Vec<u8>, _>("entry_hash")),
                 prev_hash: row.get::<Option<Vec<u8>>, _>("prev_hash").map(hex::encode),
+                actor_id: row.get("actor_id"),
+                actor_name: row.get("actor_name"),
+                // A version outside u8 is not a version this build can hash;
+                // 0 makes `verify_records` report it as a mismatch rather than
+                // silently reading it as format 1.
+                chain_version: u8::try_from(row.get::<i16, _>("chain_version")).unwrap_or(0),
             })
             .collect())
     }

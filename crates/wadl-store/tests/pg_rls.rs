@@ -636,6 +636,90 @@ async fn the_ledger_chains_and_filters_in_postgres() {
     ));
 }
 
+/// Migration 0017: a ledger row names its person, hashed under chain format
+/// 2, and a format-1 row from before the migration still verifies in the same
+/// chain — the pilot database will hold both.
+#[tokio::test]
+async fn a_ledger_row_names_its_person_and_a_v1_row_before_it_still_verifies() {
+    use wadl_store::ledger::{compute_hash, verify_records};
+    use wadl_store::{Actor, ActorSource};
+
+    let store = require_db!();
+    // The LPD: assigned only through `yard_scope_all`, so no other test's
+    // appends interleave with this chain.
+    let hull = vessel(LPD);
+    let scope =
+        yard_scope_all().with_actor(Actor::new("1234567890", "R. Alvarez", ActorSource::Proxy));
+
+    // A format-1 row, as the build before this one wrote them: no actor, no
+    // version (the column default is 1), hashed the old way onto the chain's
+    // current tail. Inserted as the migration owner, which bypasses RLS the
+    // same way the seed does.
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let tail: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT entry_hash FROM audit_entry WHERE vessel_id = $1 ORDER BY entry_id DESC LIMIT 1",
+    )
+    .bind(Uuid::from_u128(LPD))
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    let v1_hash = compute_hash(tail.as_deref(), "LEGACY_ROW", "before 0017", 1_000);
+    sqlx::query(
+        "INSERT INTO audit_entry
+            (org_id, vessel_id, action, detail, occurred_at, prev_hash, entry_hash)
+         VALUES ($1, $2, 'LEGACY_ROW', 'before 0017', to_timestamp(1), $3, $4)",
+    )
+    .bind(Uuid::from_u128(YARD_ORG))
+    .bind(Uuid::from_u128(LPD))
+    .bind(tail.as_deref())
+    .bind(v1_hash.as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // A format-2 row through the store, under the person.
+    let appended = store
+        .append_audit(&scope, hull, "HAZARD_CLEARED", "3-148-2-E", None, 2_000)
+        .await
+        .unwrap();
+    assert_eq!(appended.chain_version, 2);
+    assert_eq!(appended.actor_id.as_deref(), Some("1234567890"));
+    assert_eq!(appended.actor_name.as_deref(), Some("R. Alvarez"));
+
+    // Read back newest first; the chain verifies oldest first across formats.
+    let newest_first = store.list_audit(&scope, hull, None).await.unwrap();
+    let newest = newest_first.first().unwrap();
+    assert_eq!(newest.actor_id.as_deref(), Some("1234567890"));
+    assert_eq!(newest.chain_version, 2);
+    let legacy = newest_first.get(1).unwrap();
+    assert_eq!(legacy.action, "LEGACY_ROW");
+    assert_eq!(legacy.chain_version, 1);
+    assert_eq!(legacy.actor_id, None);
+    let oldest_first: Vec<_> = newest_first.iter().rev().cloned().collect();
+    assert_eq!(verify_records(&oldest_first), Ok(()));
+
+    // The constraint: a format-2 row that names nobody is refused by the
+    // table itself, not only by the code that writes it.
+    let refused = sqlx::query(
+        "INSERT INTO audit_entry
+            (org_id, vessel_id, action, detail, occurred_at, prev_hash, entry_hash, chain_version)
+         VALUES ($1, $2, 'NOBODY', 'x', to_timestamp(3), NULL, '\\x00'::bytea, 2)",
+    )
+    .bind(Uuid::from_u128(YARD_ORG))
+    .bind(Uuid::from_u128(LPD))
+    .execute(&pool)
+    .await;
+    let message = refused.expect_err("a v2 row with no actor must not insert");
+    assert!(
+        message
+            .to_string()
+            .contains("audit_entry_v2_names_a_person"),
+        "unexpected refusal: {message}"
+    );
+}
+
 #[tokio::test]
 async fn a_clearance_closes_the_row_and_respects_both_gates() {
     let store = require_db!();

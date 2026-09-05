@@ -512,4 +512,12 @@ pub struct AuditRecord {
     pub entry_hash: String,
     /// The previous entry's hash, hex. `None` for the first entry.
     pub prev_hash: Option<String>,
+    /// The person who acted, as the identity hop asserted them. `None` on
+    /// rows written before people were asserted (chain format 1).
+    pub actor_id: Option<String>,
+    /// That person's display name at the time. Hashed with the id from
+    /// format 2 on, so a later rename does not rewrite history.
+    pub actor_name: Option<String>,
+    /// Which chain format hashed this row: 1 before migration 0017, 2 since.
+    pub chain_version: u8,
 }

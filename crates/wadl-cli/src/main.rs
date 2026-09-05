@@ -180,10 +180,18 @@ async fn seed(database_url: Option<String>) -> Result<()> {
 fn verify_ledger(input: &Path) -> Result<()> {
     let text =
         std::fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
+    // Exports from before chain format 2 carry no `chain_version` or actor
+    // fields; serde defaults read them as format 1, which is what they are.
     let entries: Vec<LedgerEntry> = serde_json::from_str(&text).context("parsing ledger JSON")?;
     match ledger::verify_chain(&entries) {
         Ok(()) => {
-            println!("ledger intact — {} entries verify", entries.len());
+            let named = entries.iter().filter(|e| e.chain_version >= 2).count();
+            println!(
+                "ledger intact — {} entries verify ({} name a person, {} from before people were asserted)",
+                entries.len(),
+                named,
+                entries.len() - named
+            );
             Ok(())
         }
         Err(brk) => {

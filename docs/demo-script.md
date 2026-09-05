@@ -27,11 +27,20 @@ Role menu → **Foreman**. The front door is **Daily Ops**, the shift board.
   with a "show all" foot, so the sheet-metal column reads as a column and not
   a scroll. Point at a held row: the hazard holding it and who clears it are
   on the row, not behind a click.
-- The instants are the yard's: the export's `06:00` is Norfolk's 06:00
+- The clocks are the yard's. The shift chips read `This instant · Days
+  0700–1530 · Swing 1530–2400 · Mids 0000–0700` — the yard's own shifts from
+  `CVN73-clock.csv`, on the local calendar day — and the slice line reads
+  `Days 0700–1530 · 09/04` with no `Z` anywhere on the board; the time strip
+  names the zone once, `America/New_York · UTC−04:00`, and the watch chips
+  beside it read `00–04 … 20–24`. The export's `06:00` is Norfolk's 06:00
   (10:00Z in summer) because the schedule was read in the hull's clock,
-  `CVN73-clock.csv`, loaded at boot before the export — the banner says
-  `parsed in America/New_York`. With no clock loaded the server serves UTC
-  and says `default_utc` rather than guess one.
+  loaded at boot before the export — the banner says `parsed in
+  America/New_York`. Scrub to the first Sunday in November and the `00–04`
+  chip says it is five hours that night. In **Data Sources**, discard the
+  Yard clock card: the strip turns amber `UTC · no yard clock loaded`, every
+  time on every screen carries `Z` again, and the Decisions Ledger records
+  `DOCUMENT_REVERTED · yard_clock` — the product says "no yard clock" rather
+  than guess one. Restart the API to get the clock back.
 - **Reports** → *Shift sheet* → print. The sheet carries hull, instant,
   schedule source and the producer, and each figure names its layer
   (schedule of record, engine, or shell estimate). A zone filter cuts it to a

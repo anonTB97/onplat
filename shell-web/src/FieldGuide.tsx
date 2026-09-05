@@ -191,7 +191,10 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
             <Go to="dailyOps" label="Daily Ops" onOpenModule={onOpenModule} /> — the day&apos;s
             slice per shift, printable as the pass-down board.{" "}
             <span style={dt}>Continuously:</span> the time control up top is one instant for the
-            whole app — scrub it and every screen answers for the same moment.
+            whole app — scrub it and every screen answers for the same moment. Every clock on
+            screen is the yard&apos;s own wall clock, and the strip names the zone once; until a
+            yard clock is loaded in Data Sources every time carries a <code>Z</code> and the strip
+            is amber, because the tool says &quot;no yard clock&quot; rather than guess one.
           </p>
           <p style={{ margin: 0 }}>
             <span style={dt}>The one discipline to keep:</span> the instant <i>marks</i> rows in or

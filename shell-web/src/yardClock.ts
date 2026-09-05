@@ -628,6 +628,9 @@ export function intlCrossCheck(clock: YardClock, instants: number[]): ClockFindi
     }
     const rule = offsetAt(clock, at);
     if (browser !== rule) {
+      // Deliberately a Z-marked UTC instant: the two readings disagree on what
+      // the wall clock is, so UTC is the only clock both sides can name. This
+      // module is pure and does not import the applied clock (`clock.ts`).
       out.push({
         severity: "warn",
         text: `at ${new Date(at).toISOString().slice(0, 16).replace("T", " ")}Z the rule reads ${offsetLabel(rule)} but the browser's ${clock.zone} reads ${offsetLabel(browser)} — check the daylight rule`,

@@ -73,12 +73,13 @@ const fmtWindow = (w: { start: number; end: number } | null): string => {
 };
 
 /** An instant, to the minute — refusals are priced to the minute, not the day. */
-import { fmtDay, fmtDayTime } from "./clock";
+import { fmtDate, fmtDay, fmtDayTime, fmtStamp, fmtTime } from "./clock";
 
 /** The as-of stamp an export's filename carries — a file found on a desktop
- *  next month must say which instant it spoke for. */
+ *  next month must say which instant it spoke for. The yard's wall clock,
+ *  `Z` only under the UTC default: `-asof-20260904-0915`. */
 const stamp = (ms: number | null): string =>
-  ms === null ? "" : `-asof-${new Date(ms).toISOString().slice(0, 16).replace(/[:T]/g, "")}`;
+  ms === null ? "" : `-asof-${fmtDate(ms).replaceAll("-", "")}-${fmtTime(ms).replace(":", "")}`;
 
 /** Client-side CSV download; the blob URL is revoked once clicked. */
 function downloadCsv(lines: string[], filename: string): void {
@@ -553,8 +554,8 @@ export default function SequenceBoard({
                   [
                     a.code, esc(a.name), a.work_order_code ?? "", a.compartment_no ?? "",
                     a.compartment_reliability, a.trade,
-                    a.planned ? new Date(a.planned.start).toISOString() : "",
-                    a.planned ? new Date(a.planned.end).toISOString() : "",
+                    a.planned ? fmtStamp(a.planned.start) : "",
+                    a.planned ? fmtStamp(a.planned.end) : "",
                     String(a.budget_hours), String(a.earned_hours), a.status,
                     a.executability.verdict, esc(a.source_ref),
                   ].join(","),

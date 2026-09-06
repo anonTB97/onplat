@@ -29,6 +29,7 @@ pub mod hardening;
 pub mod roles;
 pub mod routes;
 pub mod schedule;
+mod schedule_door;
 pub mod yard_clock;
 
 use std::sync::Arc;
@@ -179,11 +180,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/vessels/:id/schedule-of-record",
-            post(handlers::import_schedule),
+            post(schedule_door::import_schedule),
         )
         .route(
             "/api/vessels/:id/schedule-of-record/revert",
-            post(handlers::revert_schedule),
+            post(schedule_door::revert_schedule),
         )
         .route(
             "/api/vessels/:id/yard-clock",

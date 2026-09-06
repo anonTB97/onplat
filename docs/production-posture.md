@@ -108,9 +108,21 @@ headers from client traffic; `deploy/README.md` documents the contract).
 pairing is verifiable end to end with one call, and the shell can show a
 caller the doors they can actually open (AC-6).
 
-**Still ahead:** session lifetime/re-authentication rules at the broker, and
-a full role→capability matrix once roles beyond per-hull assignment exist in
-the domain.
+**A person and a role on the hop (S12, done).** The proxy also asserts
+`x-wadl-person` (the stable subject, required in proxy mode and refused with
+a sentence without it), `x-wadl-person-name` (display only, percent-encoded)
+and `x-wadl-roles`; the same extractor resolves them into an `Actor` that
+every ledger row hashes (chain format 2 — the rows from before keep
+verifying), and one table-driven `route_layer` gate refuses a role without
+a door's capability with a 403 that names who may, writing nothing.
+`/api/whoami` serves the person, the roles, the capabilities and the matrix
+itself, so the shell boots from it — hull list, markings, greyed doors, the
+ledger's By column — and the dev shim is an explicitly labelled DEMO MODE.
+The contract the proxy owner implements is `docs/identity-proxy-contract.md`.
+
+**Still ahead:** session lifetime/re-authentication rules at the broker
+(the terminator's share, specified in `deploy/README.md`); a directory-backed
+person row behind `actor_id`; per-hull roles if a second hull ever needs them.
 
 ## Pillar 3 — Transport and browser protections
 
@@ -212,7 +224,8 @@ implementation statements and verification pointers, is the generated
 | AC-3 / AC-4 (enforcement, information flow) | `TenantScope` extractor on every scoped route; PostgreSQL RLS; generated cross-tenant leak tests |
 | AU-2 / AU-9 / AU-10 (audit, protection, non-repudiation) | hash-chained decision ledger + `verify-ledger`; JSON audit stream (every /api request, every refusal) into the journal |
 | CM-7 (least functionality) | feature-gated postgres; `default-features = false` everywhere; loopback bind default; no CORS; systemd sandbox in `deploy/wadl.service` |
-| IA-2 (identification) | single identity seam in `auth.rs` with proxy-asserted trust mode (`WADL_PROXY_KEY`); `/api/whoami` for end-to-end verification |
+| AC-6 (least privilege) | role → capability matrix in `roles.rs`, one gate over every POST, generated weakest-role test per gated route; served on `/api/whoami` |
+| IA-2 (identification) | single identity seam in `auth.rs` with proxy-asserted trust mode (`WADL_PROXY_KEY`) and a required person (`x-wadl-person`); `/api/whoami` for end-to-end verification; `docs/identity-proxy-contract.md` |
 | RA-5 / SA-11 (vuln monitoring, developer testing) | cargo-deny on every push; clippy wall; leak/RLS/property/golden tests in CI |
 | SC-5 (denial-of-service protection) | per-door body ceilings; concurrency shed; request timeout |
 | SC-8 (transmission confidentiality) | TLS at the accredited terminator; loopback default until then |
@@ -246,7 +259,8 @@ implementation statements and verification pointers, is the generated
   mitigation in place, the named closure path, and the trigger. Session
   lifetime/re-auth rules are specified for the terminator in
   `deploy/README.md`.
-- **Conditional (tracked as POAM-6).** Role→capability matrix beyond
-  per-hull assignment, when such roles enter the domain model: asserted by
-  the proxy, enforced at the one extractor, served via `/api/whoami`,
-  leak-tested per role.
+- **Wave 4 — S12, done (closes POAM-6).** A person on every ledger row and
+  a role → capability matrix: asserted by the proxy, resolved at the one
+  extractor, hashed into the ledger (chain format 2), enforced by one gate,
+  served via `/api/whoami`, leak-tested per role; the shell boots from the
+  answer and the dev shim is a labelled DEMO MODE.

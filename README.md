@@ -89,7 +89,27 @@ in the Ports tab.
 Worth a look once it is up: **Zone Manager** → **Deck Explorer** with Z4 in
 focus and the next-door strip; **Sequence Board** → *Not executable* →
 `A51350` → *Propose to P6*; **Conflicts & Risk** for the man-hours at risk;
-and the hull dropdown → an *(unassigned)* hull to see the RBAC refusal.
+and the hull dropdown → a *not assigned · demo* hull to see the RBAC refusal.
+
+The shell runs in **DEMO MODE** on the dev shim (the amber badge on the role
+button): switching role switches the demo person it asserts, so a Foreman's
+clear button is grey with the server's sentence and a Safety clearance lands
+in the ledger under *Demo Safety Officer (Y-1007)*. The same contract by
+hand, straight at the API — the headers the yard's proxy would assert:
+
+```sh
+curl -s -H 'x-org-id: 00000000-0000-0000-0000-000000000001' \
+  -H 'x-assigned-vessels: 00000000-0000-0000-0000-000000000073' \
+  -H 'x-wadl-person: 1234567890' -H 'x-wadl-person-name: R.%20Alvarez' -H 'x-wadl-roles: foreman' \
+  http://127.0.0.1:8080/api/whoami
+# → "person":{"id":"1234567890","name":"R. Alvarez","source":"dev-shim"}, "roles":["foreman"], "capabilities":["read","raise_hazard"]
+```
+
+As that foreman `POST …/hazards/clear` is 403 *Foreman may not record a
+clearance — clear_hazard is held by Ship Super and Safety* and nothing is
+written; with `x-wadl-roles: safety` the clearance lands and `GET …/ledger`
+names `R. Alvarez` on the newest row. The whole contract — six headers,
+refusals, the staging test — is `docs/identity-proxy-contract.md`.
 
 ## Build and check
 

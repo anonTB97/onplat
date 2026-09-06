@@ -56,11 +56,16 @@ Two items the checklist cannot make honest by itself:
   they do, this paragraph is the procedure.
 - **The survey the yard mails back.** The charter asks the yard to run an
   `ingest-xer` survey on its own export and return UDF names, encoding and
-  counts with no schedule content. Today's `wadl ingest-xer --input` prints
-  the graded report, which lists activity codes; the content-free survey is
-  S13's `--survey`. Until it lands, the yard answers Y8's questions from P6's
-  own UDF and activity-code dictionaries, and the export is opened only on the
-  yard's host.
+  counts with no schedule content. That is
+  `wadl ingest-xer --input <export>.xer --survey`: it reads the bytes (UTF-8
+  or Windows-1252, decoded on the yard's host), and prints the projects with
+  their task counts, the UDF names and labels, the activity code types, the
+  resource and task types, the section counts, the encoding, and the
+  quarantine as line, table and class — never a task code, a name or a
+  reason. `--field-map <map.json>` reads through a candidate map so the yard
+  can see what a map would locate before mailing it. Without `--survey` the
+  graded report prints, which lists activity codes and stays on the yard's
+  host.
 
 ## 2. Data-load day
 

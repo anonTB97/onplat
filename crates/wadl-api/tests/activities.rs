@@ -739,4 +739,10 @@ async fn the_reimport_delta_is_served_and_ledgered() {
         replaced["detail"].as_str().unwrap().contains("\"delta\""),
         "the ledger record carries the delta"
     );
+    // And names the run it made: the commit is a run, and the ledger says which.
+    let detail: serde_json::Value =
+        serde_json::from_str(replaced["detail"].as_str().unwrap()).unwrap();
+    assert!(detail["run_id"].is_string(), "{detail}");
+    assert_eq!(detail["seq"], 1, "{detail}");
+    assert_eq!(detail["counts"]["quarantined"], 0, "{detail}");
 }

@@ -26,7 +26,8 @@ import {
   type Mitigation,
   type MitigationAction,
 } from "./api";
-import { C, fmtClear, mh, STATE_STYLE } from "./theme";
+import { useIdentity } from "./identity";
+import { C, errText, fmtClear, mh, STATE_STYLE } from "./theme";
 
 /** Reads an action as a sentence a supervisor could act on. */
 export function actionTitle(a: MitigationAction): string {
@@ -119,7 +120,12 @@ export default function Mitigations({
 }) {
   const [data, setData] = useState<Assessment | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** A refused or failed decision, shown beside the buttons — the options
+   *  stay on screen; a 403 is a sentence about who may, not a lost panel. */
+  const [decideError, setDecideError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { can, refusal } = useIdentity();
+  const mayDecide = can("decide");
   const [reasonFor, setReasonFor] = useState<number | null>(null);
   const [reason, setReason] = useState("");
 
@@ -149,6 +155,7 @@ export default function Mitigations({
 
   const decide = async (option: Mitigation, disposition: "accepted" | "rejected") => {
     setBusy(true);
+    setDecideError(null);
     try {
       await recordDecision(identity, vesselId, compartment, {
         disposition,
@@ -160,7 +167,7 @@ export default function Mitigations({
       setReasonFor(null);
       setData(await mitigations(identity, vesselId, compartment, asOf));
     } catch (e: unknown) {
-      setError(String(e));
+      setDecideError(errText(e));
     } finally {
       setBusy(false);
     }
@@ -334,29 +341,38 @@ export default function Mitigations({
                       background: "#0b0c0e", color: C.text, border: `1px solid ${C.line}`, borderRadius: 4,
                     }}
                   />
-                  <button disabled={busy} onClick={() => void decide(o, "accepted")} style={btn(true)}>
+                  <button disabled={busy || !mayDecide} title={mayDecide ? undefined : refusal("decide")} onClick={() => void decide(o, "accepted")} style={btn(true, mayDecide)}>
                     Record accept
                   </button>
-                  <button disabled={busy} onClick={() => void decide(o, "rejected")} style={btn(false)}>
+                  <button disabled={busy || !mayDecide} title={mayDecide ? undefined : refusal("decide")} onClick={() => void decide(o, "rejected")} style={btn(false, mayDecide)}>
                     Record reject
                   </button>
-                  <button onClick={() => setReasonFor(null)} style={btn(false)}>
+                  <button onClick={() => { setReasonFor(null); setDecideError(null); }} style={btn(false)}>
                     Cancel
                   </button>
                 </>
               ) : (
                 <button
+                  disabled={!mayDecide}
                   onClick={() => {
                     setReasonFor(i);
                     setReason("");
+                    setDecideError(null);
                   }}
-                  title="Records that you were shown these options and chose this one. It does not clear the hazard or move a date."
-                  style={btn(i === 0)}
+                  title={
+                    mayDecide
+                      ? "Records that you were shown these options and chose this one. It does not clear the hazard or move a date."
+                      : refusal("decide")
+                  }
+                  style={btn(i === 0, mayDecide)}
                 >
                   Decide…
                 </button>
               )}
             </div>
+            {reasonFor === i && decideError && (
+              <div style={{ fontSize: 11, color: C.danger, marginTop: 5 }}>{decideError}</div>
+            )}
           </div>
         );
       })}
@@ -487,13 +503,14 @@ export default function Mitigations({
   );
 }
 
-const btn = (primary: boolean): React.CSSProperties => ({
+const btn = (primary: boolean, allowed = true): React.CSSProperties => ({
   font: "inherit",
   fontSize: 11,
   padding: "3px 9px",
   borderRadius: 5,
-  cursor: "pointer",
-  background: primary ? "rgba(61,107,255,0.16)" : "transparent",
-  color: primary ? C.text : C.dim,
-  border: `1px solid ${primary ? C.accent : C.line}`,
+  cursor: allowed ? "pointer" : "not-allowed",
+  background: primary && allowed ? "rgba(61,107,255,0.16)" : "transparent",
+  color: !allowed ? C.faint : primary ? C.text : C.dim,
+  border: `1px solid ${primary && allowed ? C.accent : C.line}`,
+  opacity: allowed ? 1 : 0.7,
 });

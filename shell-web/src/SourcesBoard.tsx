@@ -54,6 +54,7 @@ import {
 } from "./api";
 import { fmtStamp, type YardClockInfo } from "./clock";
 import { DiscardButton } from "./DiscardButton";
+import { holdersOf, ROLE_WORDS, useIdentity, type Capability } from "./identity";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
 import {
   fmtBytes,
@@ -127,6 +128,7 @@ export default function SourcesBoard({
   /** What the door is doing right now — a P6 export is megabytes, and reading
    *  or ingesting one deserves a visible verb rather than a frozen screen. */
   const [busy, setBusy] = useState<string | null>(null);
+  const { can, refusal } = useIdentity();
 
   // The three doors. Each stages a server-side dry run: everything the import
   // would say, nothing it would do. Confirm commits; Cancel costs nothing.
@@ -461,6 +463,11 @@ export default function SourcesBoard({
       });
   };
 
+  /** What committing a staged document needs: a hazard log raises, the rest commit. */
+  const stagedCapability = (kind: string): Capability =>
+    kind === "Field-condition log" ? "raise_hazard" : "commit_document";
+  const mayCommitStaged = staged ? can(stagedCapability(staged.kind)) : false;
+
   const confirmStaged = () => {
     const p = staged;
     if (!p) return;
@@ -573,8 +580,13 @@ export default function SourcesBoard({
           <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <button
               onClick={confirmStaged}
-              title="Store the document. Reversible: every card has a Discard that brings the previous state back."
-              style={commitBtnStyle}
+              disabled={!mayCommitStaged}
+              title={
+                mayCommitStaged
+                  ? "Store the document. Reversible: every card has a Discard that brings the previous state back."
+                  : refusal(stagedCapability(staged.kind))
+              }
+              style={mayCommitStaged ? commitBtnStyle : { ...commitBtnStyle, cursor: "not-allowed", color: C.faint, border: `1px solid ${C.line}`, background: "transparent", opacity: 0.7 }}
             >
               Confirm import
             </button>
@@ -589,6 +601,11 @@ export default function SourcesBoard({
               Cancel
             </button>
           </span>
+          {!mayCommitStaged && (
+            <span style={{ width: "100%", fontSize: 11, color: C.warn }}>
+              {refusal(stagedCapability(staged.kind))} — the preview above cost nothing and stored nothing.
+            </span>
+          )}
         </div>
       )}
 
@@ -1005,6 +1022,7 @@ export default function SourcesBoard({
             onFile: stageHazardLog,
           }}
           importHint="Raised and cleared one at a time on the Deck Explorer"
+          commitCapability="raise_hazard"
           onOpenHome={() => onOpenModule("deckExplorer")}
         />
 
@@ -1089,6 +1107,7 @@ function SourceCard({
   onOpenHome,
   onRevert,
   revertTitle,
+  commitCapability = "commit_document",
 }: {
   kind: string;
   status: { label: string; tone: string };
@@ -1103,8 +1122,14 @@ function SourceCard({
   onRevert?: () => void;
   /** What the screens fall back to when this document is discarded. */
   revertTitle?: string;
+  /** What committing this document needs — a hazard log raises, the rest commit. */
+  commitCapability?: Capability;
 }) {
   const [dragOver, setDragOver] = useState(false);
+  const { who, can, refusal } = useIdentity();
+  const mayCommit = can(commitCapability);
+  const mayRevert = can("commit_document");
+  const holders = who ? holdersOf(who, commitCapability).map((r) => ROLE_WORDS[r]).join(" or ") : "";
   return (
     <section
       onDragOver={
@@ -1170,6 +1195,7 @@ function SourceCard({
               what="this document"
               title={revertTitle ?? "Throw this document away — the screens return to what the tool can honestly serve without it."}
               onDiscard={onRevert}
+              refusedBecause={mayRevert ? undefined : refusal("commit_document")}
             />
           )}
         </span>
@@ -1183,7 +1209,14 @@ function SourceCard({
         ))}
         {extra}
         {upload && (
-          <div style={{ fontSize: 10, color: C.faint }}>…or drop the file anywhere on this card</div>
+          <div style={{ fontSize: 10, color: C.faint }}>
+            …or drop the file anywhere on this card
+            {!mayCommit && who && (
+              <span style={{ color: C.warn }} title={refusal(commitCapability)}>
+                {" · "}anyone may dry-run; committing needs {holders || "a role that holds it"}
+              </span>
+            )}
+          </div>
         )}
         {importHint && onOpenHome && (
           <button

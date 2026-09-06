@@ -22,6 +22,7 @@ import {
   type Identity,
   type ScheduleProposal,
 } from "./api";
+import { useIdentity } from "./identity";
 import { actionTitle } from "./Mitigations";
 import { C, mh } from "./theme";
 
@@ -35,9 +36,9 @@ const block: React.CSSProperties = {
   border: `1px solid ${C.line}`, borderRadius: 7, padding: "8px 10px",
   display: "flex", flexDirection: "column", gap: 4,
 };
-const proposeBtn = (tone: string): React.CSSProperties => ({
-  font: "inherit", fontSize: 11, cursor: "pointer", padding: "3px 9px", borderRadius: 5,
-  color: tone, background: "transparent", border: `1px solid ${tone}66`,
+const proposeBtn = (tone: string, allowed = true): React.CSSProperties => ({
+  font: "inherit", fontSize: 11, cursor: allowed ? "pointer" : "not-allowed", padding: "3px 9px", borderRadius: 5,
+  color: allowed ? tone : C.faint, background: "transparent", border: `1px solid ${allowed ? tone : C.line}66`,
 });
 
 export function ActivityInspector({
@@ -77,6 +78,8 @@ export function ActivityInspector({
   const [manualStart, setManualStart] = useState("");
   const [busy, setBusy] = useState(false);
   const [proposed, setProposed] = useState<{ ok: boolean; text: string } | null>(null);
+  const { can, refusal } = useIdentity();
+  const mayPropose = can("propose");
   useEffect(() => {
     setReason("");
     setManualStart("");
@@ -371,20 +374,20 @@ export function ActivityInspector({
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                 {alt?.alternative.kind === "viable" && (
                   <button
-                    disabled={busy}
+                    disabled={busy || !mayPropose}
                     onClick={() => alt.alternative.kind === "viable" && send("engine_window", alt.alternative.window.start)}
-                    title="Propose the engine's own window — the first of the same duration the rules permit. Re-checked at the instant before it lands."
-                    style={proposeBtn(C.ok)}
+                    title={mayPropose ? "Propose the engine's own window — the first of the same duration the rules permit. Re-checked at the instant before it lands." : refusal("propose")}
+                    style={proposeBtn(C.ok, mayPropose)}
                   >
                     Slide to {alt.alternative.kind === "viable" ? fmtDay(alt.alternative.window.start) : ""}
                   </button>
                 )}
                 {(alt?.alternative.kind === "verification_gated" || e.verdict === "not_executable" && e.earliest_clear === null) && (
                   <button
-                    disabled={busy}
+                    disabled={busy || !mayPropose}
                     onClick={() => send("hold_pending_verification")}
-                    title="No date can honestly be promised: propose that P6 hold this activity until the named authority verifies the hazard is cleared."
-                    style={proposeBtn("#c4b5fd")}
+                    title={mayPropose ? "No date can honestly be promised: propose that P6 hold this activity until the named authority verifies the hazard is cleared." : refusal("propose")}
+                    style={proposeBtn("#c4b5fd", mayPropose)}
                   >
                     Hold pending verification
                   </button>
@@ -397,14 +400,17 @@ export function ActivityInspector({
                   style={{ font: "inherit", fontSize: 11, padding: "3px 6px", background: "#0b0c0e", color: C.text, border: `1px solid ${C.line}`, borderRadius: 5 }}
                 />
                 <button
-                  disabled={busy || Number.isNaN(manualMs)}
+                  disabled={busy || Number.isNaN(manualMs) || !mayPropose}
                   onClick={() => send("manual", manualMs)}
-                  title="Propose this start with the planned duration. Engine-checked; a window the hull still refuses is recorded as such, not blocked."
-                  style={proposeBtn(C.accent)}
+                  title={mayPropose ? "Propose this start with the planned duration. Engine-checked; a window the hull still refuses is recorded as such, not blocked." : refusal("propose")}
+                  style={proposeBtn(C.accent, mayPropose)}
                 >
                   Propose this start
                 </button>
               </div>
+              {!mayPropose && (
+                <div style={{ fontSize: 10.5, color: C.dim }}>{refusal("propose")}</div>
+              )}
               {proposed && (
                 <div style={{ fontSize: 11, color: proposed.ok ? C.ok : C.danger }}>{proposed.text}</div>
               )}

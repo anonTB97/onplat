@@ -63,7 +63,7 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
           { value: "5", label: "import doors", title: "Schedule (P6 XER), zone chart, budget book, manning book, geometry register (CSV) — each with a dry run, a confirm, and a revert." },
           { value: "5", label: "reports", title: "Shift sheet, zone day sheet, compartment card, conflict log, field-condition register — dated cuts that print and export." },
           { value: "4", label: "location grades", title: "Authored · derived (≈) · WBS zone hint · unlocated. Guessing is allowed because it is graded and reported; guessing silently is forbidden." },
-          { value: "1", label: "ledger", title: "Every decision a planner records lands in one tamper-evident, hash-chained ledger." },
+          { value: "1", label: "ledger", title: "Every decision a person records lands in one tamper-evident, hash-chained ledger that names who recorded it." },
         ]}
         note="Decision support — this tool flags risk; the planner decides. It never modifies the schedule of record: P6 stays the plan's home, this is where the plan meets the ship's authorization state."
       />
@@ -232,6 +232,28 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
               ))}
             </tbody>
           </table>
+        </Section>
+
+        <Section n="07" title="Who you are">
+          <p style={{ margin: "0 0 8px" }}>
+            <span style={dt}>The proxy names you, the ledger records you, your role decides
+            which doors you may commit.</span> The tool never logs anyone in: the yard&apos;s
+            CAC-authenticated proxy asserts who you are on its private hop, and the role button
+            in the top bar shows who the <i>server</i> resolved — the name every ledger row will
+            carry in its <b>By</b> column, and the roles the directory asserted. Each role holds a
+            few capabilities (raise a field condition, record a clearance, commit or revert a
+            document, propose a schedule change, answer for an option or an issue); a door your
+            role does not hold is grey, and its tooltip is the same sentence the server would
+            refuse you with — who may not, and who may. A dry run is never refused: anyone may
+            preview what a document would change.
+          </p>
+          <p style={{ margin: 0, ...dim }}>
+            An amber <b style={{ color: C.warn }}>DEMO MODE</b> badge means the dev identity shim
+            is on: the shell is asserting a demo person for the role you picked, and switching
+            role switches what you may do and who the ledger names. It is a rehearsal of the
+            contract, not a login; the band at the top and bottom wears the markings the
+            deployment served, and reads amber when none were received.
+          </p>
         </Section>
       </div>
     </div>

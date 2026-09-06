@@ -37,6 +37,7 @@ import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./Rea
 import { SelectorRail } from "./DeckRail";
 import { ShipView } from "./ShipView";
 import { VerticalTrace } from "./VerticalTrace";
+import { useIdentity } from "./identity";
 import Mitigations from "./Mitigations";
 import { MARKING_H } from "./Chrome";
 import type { Altitude as ChromeAltitude } from "./Chrome";
@@ -264,6 +265,10 @@ export default function DeckExplorer({
     summary: string;
   } | null>(null);
   const [zoneNonce, setZoneNonce] = useState(0);
+  // The zone chart's door lives on this screen too: commit and discard are
+  // greyed for a person the matrix does not let commit a document.
+  const gate = useIdentity();
+  const mayCommitChart = gate.can("commit_document");
   const [tradeFilter, setTradeFilter] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -1087,6 +1092,7 @@ export default function DeckExplorer({
                       <DiscardButton
                         what="the zone chart"
                         title="Throw the ingested chart away — zone bands return to this tool's own inference, and say so."
+                        refusedBecause={mayCommitChart ? undefined : gate.refusal("commit_document")}
                         onDiscard={() => {
                           setZoneMsg("⏳ discarding the zone chart…");
                           void revertZoneChart(identity, vesselId)
@@ -1141,7 +1147,9 @@ export default function DeckExplorer({
                   <span style={{ color: DIM }}>{zonePending.summary}</span>
                   <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                     <button
-                      style={seg(true)}
+                      style={seg(true, !mayCommitChart)}
+                      disabled={!mayCommitChart}
+                      title={mayCommitChart ? "Store the chart — its bands become authored." : gate.refusal("commit_document")}
                       onClick={() => {
                         const staged = zonePending;
                         setZonePending(null);
@@ -1629,6 +1637,8 @@ function RaiseControl({
   onRaised: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const { can, refusal } = useIdentity();
+  const mayRaise = can("raise_hazard");
   const [kind, setKind] = useState<string>(HAZARD_KINDS[0]?.kind ?? "hot_work_live");
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1662,12 +1672,13 @@ function RaiseControl({
       {!open && (
         <button
           onClick={() => setOpen(true)}
+          disabled={!mayRaise}
           style={{
-            font: "inherit", fontSize: 11.5, cursor: "pointer",
-            background: "transparent", color: C.accent, border: `1px solid ${LINE}`,
+            font: "inherit", fontSize: 11.5, cursor: mayRaise ? "pointer" : "not-allowed",
+            background: "transparent", color: mayRaise ? C.accent : C.faint, border: `1px solid ${LINE}`,
             borderRadius: 5, padding: "3px 9px",
           }}
-          title="Post a field condition — a tag-out, a coating ticket, a hot-work permit, a stop-work — against this space"
+          title={mayRaise ? "Post a field condition — a tag-out, a coating ticket, a hot-work permit, a stop-work — against this space" : refusal("raise_hazard")}
         >
           Raise a field condition here…
         </button>
@@ -1740,6 +1751,8 @@ function ClearControl({
   const [basis, setBasis] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { can, refusal } = useIdentity();
+  const mayClear = can("clear_hazard");
 
   const submit = () => {
     if (busy || basis.trim().length === 0) return;
@@ -1771,14 +1784,19 @@ function ClearControl({
       {!open && (
         <button
           onClick={() => setOpen(true)}
+          disabled={!mayClear}
+          title={mayClear ? "Record that the field condition was verified ended, with the basis — the clearing authority's act" : refusal("clear_hazard")}
           style={{
-            marginTop: 6, font: "inherit", fontSize: 11.5, cursor: "pointer",
-            background: "transparent", color: C.accent, border: `1px solid ${LINE}`,
+            marginTop: 6, font: "inherit", fontSize: 11.5, cursor: mayClear ? "pointer" : "not-allowed",
+            background: "transparent", color: mayClear ? C.accent : C.faint, border: `1px solid ${LINE}`,
             borderRadius: 5, padding: "3px 9px",
           }}
         >
           Record administrative clearance…
         </button>
+      )}
+      {!open && !mayClear && (
+        <div style={{ marginTop: 4, fontSize: 10.5, color: DIM }}>{refusal("clear_hazard")}</div>
       )}
       {open && (
         <div style={{ marginTop: 7 }}>

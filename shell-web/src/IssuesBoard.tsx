@@ -9,8 +9,9 @@
 
 import { useEffect, useState } from "react";
 import { acknowledgeIssue, listIssues, type AsOf, type Identity, type Issue } from "./api";
+import { useIdentity } from "./identity";
 import { Loading } from "./Loading";
-import { chipStyle, C, fmtClear, mh, STATE_STYLE } from "./theme";
+import { chipStyle, C, errText, fmtClear, mh, STATE_STYLE } from "./theme";
 
 /**
  * Persona-shaped cuts of the board. Each lens is the subset of kinds one job
@@ -154,6 +155,8 @@ export default function IssuesBoard({
   const [ackNote, setAckNote] = useState("");
   const [ackErr, setAckErr] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const { can, refusal } = useIdentity();
+  const mayDecide = can("decide");
 
   useEffect(() => {
     setError(null);
@@ -206,7 +209,7 @@ export default function IssuesBoard({
         setAckNote("");
         setReloadNonce((n) => n + 1);
       })
-      .catch((e: unknown) => setAckErr(String(e)));
+      .catch((e: unknown) => setAckErr(errText(e)));
   };
 
   return (
@@ -336,11 +339,12 @@ export default function IssuesBoard({
                   )}
                   {!i.acknowledged && (
                     <button
+                      disabled={!mayDecide}
                       onClick={() => { setAckFor(ackFor === i.key ? null : i.key); setAckNote(""); setAckErr(null); }}
-                      title="Record in the audit ledger that somebody answered for this issue. Closes and hides nothing — the row stays as long as its facts hold."
+                      title={mayDecide ? "Record in the audit ledger that somebody answered for this issue. Closes and hides nothing — the row stays as long as its facts hold." : refusal("decide")}
                       style={{
-                        font: "inherit", fontSize: 11, cursor: "pointer", padding: "3px 4px", marginLeft: 8,
-                        borderRadius: 5, color: C.dim, background: "transparent",
+                        font: "inherit", fontSize: 11, cursor: mayDecide ? "pointer" : "not-allowed", padding: "3px 4px", marginLeft: 8,
+                        borderRadius: 5, color: mayDecide ? C.dim : C.faint, background: "transparent",
                         border: "1px solid transparent", textDecoration: "underline",
                         textDecorationColor: "#3a3d49", textUnderlineOffset: 3,
                       }}

@@ -7,7 +7,8 @@ use wadl_plan::Package;
 use crate::error::StoreError;
 use crate::model::{
     ActivitySummary, AuditRecord, CompartmentSummary, DeckSummary, PackageSummary,
-    ScheduleEdgeSummary, StrandedReport, VesselSummary, WorkOrderSummary,
+    ScheduleEdgeSummary, ScheduleRun, ScheduleRunSummary, StrandedReport, VesselSummary,
+    WorkOrderSummary,
 };
 use crate::scope::TenantScope;
 
@@ -171,6 +172,105 @@ pub trait Repositories: Send + Sync {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<(), StoreError>;
+
+    /// The hull's P6 field map document, or `None` while the default
+    /// convention (today's hard-wired names) reads its exports.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::FieldMapDoc>, StoreError>;
+
+    /// Replaces a hull's field map. All-or-nothing at the caller: the API
+    /// validates the map and refuses a malformed one whole; the store holds
+    /// it as the JSON value it is.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: crate::memory::FieldMapDoc,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's field map; the default convention reads its
+    /// exports again. A no-op when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// Records one schedule import AND serves it, as one write: the run
+    /// gets its `run_id` and `seq` here (whatever the caller passed is
+    /// overwritten), its document becomes the schedule of record, and the
+    /// served pointer moves to it. The run must carry its document.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`;
+    /// [`StoreError::Backend`] when the run carries no document.
+    async fn commit_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run: ScheduleRun,
+    ) -> Result<ScheduleRunSummary, StoreError>;
+
+    /// Every run on the hull, newest first, without their documents.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn list_schedule_runs(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<ScheduleRunSummary>, StoreError>;
+
+    /// One run whole — summary, report and document — or `None` when no run
+    /// on this hull carries the id.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: uuid::Uuid,
+    ) -> Result<Option<ScheduleRun>, StoreError>;
+
+    /// Serves a prior run again: its document becomes the schedule of
+    /// record and the served pointer moves to it. History is untouched — no
+    /// new run is recorded; the caller ledgers the change.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope` or no run
+    /// on it carries the id; [`StoreError::Backend`] when the store no
+    /// longer holds the run's document (see [`ScheduleRun::doc`]).
+    async fn serve_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: uuid::Uuid,
+    ) -> Result<ScheduleRunSummary, StoreError>;
+
+    /// The run whose document is served, or `None` when the served
+    /// schedule is not a run's (the generated register, or a document set
+    /// through [`Self::set_schedule_of_record`] without a run).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn served_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ScheduleRunSummary>, StoreError>;
 
     /// The hull's ingested zone chart — authored frame bounds per zone —
     /// or `None` when no chart has been ingested and every band a view draws

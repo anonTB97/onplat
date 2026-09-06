@@ -322,6 +322,17 @@ pub struct InMemoryStore {
     /// the seed world reads yard-local; absent, every clock is UTC and the
     /// API says so.
     yard_clock: std::sync::RwLock<BTreeMap<VesselId, YardClockDoc>>,
+    /// The P6 field map per hull. Absent, the default convention reads
+    /// the hull's exports.
+    field_map: std::sync::RwLock<BTreeMap<VesselId, FieldMapDoc>>,
+    /// Every schedule import per hull, oldest first; the document of the
+    /// newest [`MAX_RUN_DOCS`] kept, older ones summary and report only.
+    /// Lock order, where several are taken: runs, then the schedule of
+    /// record, then the served pointer.
+    schedule_runs: std::sync::RwLock<BTreeMap<VesselId, Vec<crate::model::ScheduleRun>>>,
+    /// Which run's document the schedule of record IS, per hull. Absent
+    /// when the served schedule is not a run's.
+    served_run: std::sync::RwLock<BTreeMap<VesselId, Uuid>>,
     /// An ingested geometry register per hull — surveyed extents + deck bands.
     geometry: std::sync::RwLock<BTreeMap<VesselId, GeometryRegister>>,
     /// Administrative clearances recorded against the seeded hazards, keyed by
@@ -366,7 +377,7 @@ struct HazardClearance {
 /// reconciled-by-construction and becomes what the scheduler actually said —
 /// at which point reconciliation is a *report*, computed by the API against
 /// the work orders, rather than a property.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScheduleOfRecord {
     /// Where it came from, e.g. `CVN73-PIA26.xer` — surfaced to the reader so
     /// an ingested register never presents as the generated one.
@@ -378,7 +389,37 @@ pub struct ScheduleOfRecord {
     /// Which clock the export's wall times were read in when this record
     /// was made (`America/New_York · CVN73-clock.csv`). `None` for a record
     /// stored before the yard clock existed — read as "unknown", never as UTC.
+    #[serde(default)]
     pub parsed_in: Option<String>,
+}
+
+/// The P6 field map as a stored document: which export fields carry the
+/// compartment, the work item, the work type and the trade, plus where it
+/// came from. Held as the JSON value it is — the store never depends on the
+/// ingest crate, whose `FieldMap` type is the one that validates it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FieldMapDoc {
+    /// `CVN73-fieldmap.json`, or the door's label.
+    pub label: String,
+    /// The map, in the shape `wadl_ingest::field_map::FieldMap` serializes.
+    pub map: serde_json::Value,
+}
+
+/// How many runs the in-memory store keeps the DOCUMENT of. Every run keeps
+/// its summary and report forever; the rows of a run older than this are
+/// dropped, because the full export is ~2 MB a run and the demo store is a
+/// process, not a disk. PostgreSQL keeps every document.
+pub const MAX_RUN_DOCS: usize = 12;
+
+/// A run id from the instant the caller stamped the run with: a version-7
+/// UUID, time-ordered for the index, whose random tail keeps two runs in
+/// the same millisecond apart. Minted from the given instant, never from a
+/// clock of the store's own.
+#[must_use]
+pub(crate) fn mint_run_id(imported_at_ms: i64) -> Uuid {
+    let secs = u64::try_from(imported_at_ms.div_euclid(1000)).unwrap_or(0);
+    let nanos = u32::try_from(imported_at_ms.rem_euclid(1000)).unwrap_or(0) * 1_000_000;
+    Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, secs, nanos))
 }
 
 /// The yard clock as a stored document: the clock plus where it came from.
@@ -807,6 +848,9 @@ impl InMemoryStore {
                     .map(|v| (v, YardClockDoc::norfolk_seed()))
                     .collect(),
             ),
+            field_map: std::sync::RwLock::new(BTreeMap::new()),
+            schedule_runs: std::sync::RwLock::new(BTreeMap::new()),
+            served_run: std::sync::RwLock::new(BTreeMap::new()),
             geometry: std::sync::RwLock::new(BTreeMap::new()),
             cleared_hazards: std::sync::Mutex::new(Vec::new()),
             compartment_register: std::sync::RwLock::new(BTreeMap::new()),
@@ -1801,6 +1845,101 @@ impl InMemoryStore {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(vessel, sor);
+        // A document set without a run is not a run's: the pointer clears.
+        self.served_run
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+    }
+
+    /// Records a schedule run and serves it, unscoped — the boot loader's
+    /// path before any tenant exists. Same contract as the scoped
+    /// [`Repositories::commit_schedule_run`]: assigns `run_id` and `seq`,
+    /// moves the served pointer, keeps the document of the newest
+    /// [`MAX_RUN_DOCS`] runs.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] when the run carries no document.
+    pub fn load_schedule_run(
+        &self,
+        vessel: VesselId,
+        run: crate::model::ScheduleRun,
+    ) -> Result<crate::model::ScheduleRunSummary, StoreError> {
+        let Some(doc) = run.doc else {
+            return Err(StoreError::Backend(
+                "a schedule run must carry its document".to_owned(),
+            ));
+        };
+        let mut runs = self
+            .schedule_runs
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let list = runs.entry(vessel).or_default();
+        let seq = i64::try_from(list.len())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let run_id = mint_run_id(run.summary.imported_at_ms);
+        let summary = crate::model::ScheduleRunSummary {
+            run_id,
+            seq,
+            served: true,
+            schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+            ..run.summary
+        };
+        self.schedule_of_record
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc.clone());
+        self.served_run
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, run_id);
+        list.push(crate::model::ScheduleRun {
+            summary: summary.clone(),
+            report: run.report,
+            doc: Some(doc),
+        });
+        let evict = list.len().saturating_sub(MAX_RUN_DOCS);
+        for old in list.iter_mut().take(evict) {
+            old.doc = None;
+        }
+        Ok(summary)
+    }
+
+    /// The hull's field map document, unscoped — for boot wiring, where
+    /// the XER loader needs the map before any tenant exists.
+    #[must_use]
+    pub fn field_map_of(&self, vessel: VesselId) -> Option<FieldMapDoc> {
+        self.field_map
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
+
+    /// Whether `run_id` is the served run on the hull.
+    fn is_served_run(&self, vessel: VesselId, run_id: Uuid) -> bool {
+        self.served_run
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            == Some(&run_id)
+    }
+
+    /// One run whole, with its `served` flag current.
+    fn run_of(&self, vessel: VesselId, run_id: Uuid) -> Option<crate::model::ScheduleRun> {
+        let runs = self
+            .schedule_runs
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut run = runs
+            .get(&vessel)?
+            .iter()
+            .find(|r| r.summary.run_id == run_id)
+            .cloned()?;
+        drop(runs);
+        run.summary.served = self.is_served_run(vessel, run_id);
+        Some(run)
     }
 
     fn ingested(&self, vessel: VesselId) -> Option<ScheduleOfRecord> {
@@ -2072,6 +2211,11 @@ impl Repositories for InMemoryStore {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&vessel);
+        // The runs stay: history is history. Only the pointer clears.
+        self.served_run
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
         Ok(())
     }
 
@@ -2127,6 +2271,128 @@ impl Repositories for InMemoryStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&vessel);
         Ok(())
+    }
+
+    async fn field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<FieldMapDoc>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.field_map_of(vessel))
+    }
+
+    async fn set_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: FieldMapDoc,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.field_map
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc);
+        Ok(())
+    }
+
+    async fn clear_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.field_map
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn commit_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run: crate::model::ScheduleRun,
+    ) -> Result<crate::model::ScheduleRunSummary, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.load_schedule_run(vessel, run)
+    }
+
+    async fn list_schedule_runs(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<crate::model::ScheduleRunSummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let summaries: Vec<crate::model::ScheduleRunSummary> = self
+            .schedule_runs
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .map(|runs| runs.iter().rev().map(|r| r.summary.clone()).collect())
+            .unwrap_or_default();
+        Ok(summaries
+            .into_iter()
+            .map(|mut s| {
+                s.served = self.is_served_run(vessel, s.run_id);
+                s
+            })
+            .collect())
+    }
+
+    async fn schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: Uuid,
+    ) -> Result<Option<crate::model::ScheduleRun>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.run_of(vessel, run_id))
+    }
+
+    async fn serve_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: Uuid,
+    ) -> Result<crate::model::ScheduleRunSummary, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let run = self.run_of(vessel, run_id).ok_or(StoreError::NotFound)?;
+        let Some(doc) = run.doc else {
+            return Err(StoreError::Backend(format!(
+                "run {run_id} is older than the last {MAX_RUN_DOCS} runs — its document is no longer held and cannot be served again"
+            )));
+        };
+        self.schedule_of_record
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc);
+        self.served_run
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, run_id);
+        Ok(crate::model::ScheduleRunSummary {
+            served: true,
+            ..run.summary
+        })
+    }
+
+    async fn served_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::model::ScheduleRunSummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let served = self
+            .served_run
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .copied();
+        Ok(served
+            .and_then(|id| self.run_of(vessel, id))
+            .map(|r| r.summary))
     }
 
     async fn zone_register(

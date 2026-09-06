@@ -30,7 +30,8 @@
     clippy::doc_markdown,
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic
+    clippy::panic,
+    clippy::indexing_slicing
 )]
 
 use sqlx::Row as _;
@@ -996,4 +997,299 @@ async fn the_ship_registers_round_trip_and_replace_the_seed() {
             .edge_count(),
         seeded_edges
     );
+}
+
+/// A run as the door would build one: the summary's `run_id`, `seq` and
+/// `served` are placeholders the store overwrites.
+fn run_named(label: &str, code: &str, at_ms: i64) -> wadl_store::model::ScheduleRun {
+    use wadl_store::model::{
+        ActivityStatus, ActivitySummary, ImportedBy, QuarantinedRow, Reliability, RunCounts,
+        ScheduleRun, ScheduleRunReport, ScheduleRunSummary,
+    };
+    let activity = ActivitySummary {
+        activity_id: wadl_domain::ids::ActivityId::from_uuid(Uuid::from_u128(0xA1)),
+        code: code.to_owned(),
+        name: format!("Work {code}"),
+        work_order_code: Some("WI-3318".to_owned()),
+        compartment_no: Some(wadl_domain::CompartmentNo::new("4-110-2-W")),
+        compartment_reliability: Reliability::High,
+        wbs_area: Some("Z6".to_owned()),
+        trade: "SM-PRES".to_owned(),
+        planned: None,
+        budget_hours: wadl_domain::units::ManHours::new(40),
+        earned_hours: wadl_domain::units::ManHours::ZERO,
+        status: ActivityStatus::NotStarted,
+        is_milestone: false,
+        source_ref: format!("{label} · {code}"),
+    };
+    ScheduleRun {
+        summary: ScheduleRunSummary {
+            run_id: Uuid::nil(),
+            seq: 0,
+            label: label.to_owned(),
+            imported_at_ms: at_ms,
+            imported_by: ImportedBy {
+                org: org(YARD_ORG),
+                person: Some("dev:planner".to_owned()),
+                via: "door".to_owned(),
+            },
+            encoding: "utf-8".to_owned(),
+            decoded_by: "browser".to_owned(),
+            projects_served: vec!["CVN73-PIA26".to_owned()],
+            counts: RunCounts {
+                task_rows: 2,
+                served: 1,
+                work: 1,
+                quarantined: 1,
+                ..RunCounts::default()
+            },
+            field_map: serde_json::json!({ "compartment": { "source": "udf", "name": "COMPT" } }),
+            served: false,
+            schema_version: 0,
+        },
+        report: ScheduleRunReport {
+            quarantine: vec![QuarantinedRow {
+                line: 44,
+                table: "TASK".to_owned(),
+                code: Some("A4021".to_owned()),
+                class: "unparseable_date".to_owned(),
+                reason: "unparseable early_start_date: \"2026-13-40 06:00\"".to_owned(),
+            }],
+            fields_seen: serde_json::json!({ "sections": { "TASK": 2 } }),
+            findings: vec!["2 projects in this export".to_owned()],
+            ..ScheduleRunReport::default()
+        },
+        doc: Some(wadl_store::memory::ScheduleOfRecord {
+            label: label.to_owned(),
+            activities: vec![activity],
+            edges: vec![],
+            parsed_in: Some("America/New_York · CVN73-clock.csv".to_owned()),
+        }),
+    }
+}
+
+/// Two commits on the reference hull: each is a run AND the served
+/// document, in one write.
+async fn two_runs(
+    store: &PgStore,
+    scope: &TenantScope,
+    hull: VesselId,
+) -> (
+    wadl_store::model::ScheduleRunSummary,
+    wadl_store::model::ScheduleRunSummary,
+) {
+    let first = store
+        .commit_schedule_run(scope, hull, run_named("a.xer", "A1", 1_000_000))
+        .await
+        .unwrap();
+    let second = store
+        .commit_schedule_run(scope, hull, run_named("b.xer", "B1", 2_000_000))
+        .await
+        .unwrap();
+    (first, second)
+}
+
+#[tokio::test]
+async fn schedule_runs_are_recorded_listed_newest_first_and_stay_in_tenant() {
+    let store = require_db!();
+    let scope = yard_scope();
+    // Its own hull: the tests run in parallel, and two writers on one hull's
+    // served pointer would race each other, not the store.
+    let hull = vessel(CVN75);
+    let (first, second) = two_runs(&store, &scope, hull).await;
+    assert_ne!(first.run_id, second.run_id);
+    assert_ne!(first.run_id, Uuid::nil(), "the store minted it");
+    assert_eq!(second.seq, first.seq + 1);
+    assert!(second.served);
+    assert_eq!(second.schema_version, wadl_store::DOCUMENT_SCHEMA_VERSION);
+
+    // Newest first, no documents, the served flag on the last commit only.
+    let runs = store.list_schedule_runs(&scope, hull).await.unwrap();
+    assert_eq!(runs[0].run_id, second.run_id);
+    assert_eq!(runs[1].run_id, first.run_id);
+    assert!(runs[0].served && !runs[1].served);
+    assert_eq!(runs[1].label, "a.xer");
+    assert_eq!(runs[1].imported_at_ms, 1_000_000);
+    assert_eq!(runs[1].imported_by.person.as_deref(), Some("dev:planner"));
+    assert_eq!(runs[1].imported_by.via, "door");
+    assert_eq!(runs[1].encoding, "utf-8");
+    assert_eq!(runs[1].decoded_by, "browser");
+    assert_eq!(runs[1].counts.quarantined, 1);
+    assert_eq!(runs[1].projects_served, ["CVN73-PIA26"]);
+    assert_eq!(runs[1].field_map["compartment"]["name"], "COMPT");
+    assert_eq!(
+        store
+            .served_schedule_run(&scope, hull)
+            .await
+            .unwrap()
+            .map(|r| r.run_id),
+        Some(second.run_id)
+    );
+    let served_rows = store.list_activities(&scope, hull).await.unwrap();
+    assert_eq!(served_rows[0].code, "B1");
+
+    // The detail carries the report and the document; the run's own row
+    // says which run its document is.
+    let whole = store
+        .schedule_run(&scope, hull, first.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(whole.report.quarantine[0].line, 44);
+    assert_eq!(whole.report.quarantine[0].class, "unparseable_date");
+    assert_eq!(whole.report.fields_seen["sections"]["TASK"], 2);
+    assert_eq!(whole.report.findings, ["2 projects in this export"]);
+    let doc = whole.doc.expect("PostgreSQL keeps every document");
+    assert_eq!(doc.label, "a.xer");
+    assert_eq!(doc.activities[0].code, "A1");
+    assert_eq!(
+        doc.parsed_in.as_deref(),
+        Some("America/New_York · CVN73-clock.csv")
+    );
+
+    // The navy sees none of it, even claiming the hull.
+    let navy = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.list_schedule_runs(&navy, hull).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.schedule_run(&navy, hull, first.run_id).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.serve_schedule_run(&navy, hull, first.run_id).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store
+            .commit_schedule_run(&navy, hull, run_named("navy.xer", "N1", 3_000_000))
+            .await,
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn serving_a_prior_run_moves_the_pointer_and_a_revert_keeps_history() {
+    let store = require_db!();
+    let scope = yard_scope();
+    // Its own hull, for the same reason as the run-list test.
+    let hull = vessel(CVN71);
+    let (first, _second) = two_runs(&store, &scope, hull).await;
+
+    // Serve run 1 again: the pointer follows, the register follows, no new
+    // run is recorded.
+    let before = store.list_schedule_runs(&scope, hull).await.unwrap().len();
+    let served = store
+        .serve_schedule_run(&scope, hull, first.run_id)
+        .await
+        .unwrap();
+    assert_eq!(served.run_id, first.run_id);
+    assert!(served.served);
+    assert_eq!(
+        store
+            .served_schedule_run(&scope, hull)
+            .await
+            .unwrap()
+            .map(|r| r.seq),
+        Some(first.seq)
+    );
+    assert_eq!(
+        store
+            .schedule_source(&scope, hull)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("a.xer")
+    );
+    let served_rows = store.list_activities(&scope, hull).await.unwrap();
+    assert_eq!(served_rows[0].code, "A1");
+    let runs = store.list_schedule_runs(&scope, hull).await.unwrap();
+    assert_eq!(runs.len(), before);
+    assert!(runs[1].served && !runs[0].served);
+    assert!(matches!(
+        store.serve_schedule_run(&scope, hull, Uuid::nil()).await,
+        Err(StoreError::NotFound)
+    ));
+
+    // A document set without a run is nobody's run; a revert keeps history.
+    store
+        .set_schedule_of_record(
+            &scope,
+            hull,
+            run_named("plain.xer", "P1", 4_000_000).doc.unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .served_schedule_run(&scope, hull)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .list_schedule_runs(&scope, hull)
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| !r.served));
+    store.clear_schedule_of_record(&scope, hull).await.unwrap();
+    assert!(store
+        .served_schedule_run(&scope, hull)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store.list_schedule_runs(&scope, hull).await.unwrap().len() >= 2);
+}
+
+#[tokio::test]
+async fn the_field_map_round_trips_and_stays_in_tenant() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN73);
+
+    store.clear_field_map(&scope, hull).await.unwrap();
+    assert!(store.field_map(&scope, hull).await.unwrap().is_none());
+
+    let doc = wadl_store::memory::FieldMapDoc {
+        label: "CVN73-fieldmap.json".to_owned(),
+        map: serde_json::json!({
+            "compartment": { "source": "udf", "name": "COMPT" },
+            "work_item": { "source": "udf", "name": "WI" },
+            "work_type": { "source": "none" },
+            "trade": { "source": "resource" },
+            "projects": ["CVN73-PIA26"],
+            "placards_from_names": true
+        }),
+    };
+    store
+        .set_field_map(&scope, hull, doc.clone())
+        .await
+        .unwrap();
+    let served = store.field_map(&scope, hull).await.unwrap().unwrap();
+    assert_eq!(served, doc, "the map comes back as it went in, unstamped");
+
+    let foreign = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.field_map(&foreign, hull).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.set_field_map(&foreign, hull, doc.clone()).await,
+        Err(StoreError::NotFound)
+    ));
+
+    let mut replaced = doc;
+    replaced.label = "CVN73-fieldmap-v2.json".to_owned();
+    replaced.map["projects"] = serde_json::json!([]);
+    store
+        .set_field_map(&scope, hull, replaced.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.field_map(&scope, hull).await.unwrap().unwrap(),
+        replaced
+    );
+
+    store.clear_field_map(&scope, hull).await.unwrap();
+    assert!(store.field_map(&scope, hull).await.unwrap().is_none());
 }

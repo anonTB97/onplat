@@ -521,3 +521,127 @@ pub struct AuditRecord {
     /// Which chain format hashed this row: 1 before migration 0017, 2 since.
     pub chain_version: u8,
 }
+
+/// Who imported a schedule run, and through which door.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportedBy {
+    /// The tenant the run was committed under.
+    pub org: wadl_domain::ids::OrgId,
+    /// The person, as the identity hop asserted them (the scope's actor id);
+    /// `None` when the binary acted on its own account.
+    pub person: Option<String>,
+    /// `door`, `boot` or `cli`.
+    pub via: String,
+}
+
+/// What one import counted, at the grain the card and the ledger state it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RunCounts {
+    /// `TASK` rows in the file.
+    pub task_rows: usize,
+    /// Rows served (work plus key events).
+    pub served: usize,
+    /// Rows served as work.
+    pub work: usize,
+    /// Rows served as key events (milestones).
+    pub key_events: usize,
+    /// Rows quarantined with a reason — `TASK` and `TASKPRED` together.
+    pub quarantined: usize,
+    /// Level-of-effort rows excluded from work.
+    pub excluded_loe: usize,
+    /// WBS-summary rows excluded from work.
+    pub excluded_wbs: usize,
+    /// Rows in projects the field map does not serve.
+    pub excluded_project: usize,
+    /// Relationships served.
+    pub edges: usize,
+    /// Relationships quarantined.
+    pub edges_quarantined: usize,
+    /// Material assignments not counted as man-hours.
+    pub material_skipped: usize,
+    /// Equipment assignments not counted as man-hours.
+    pub equipment_skipped: usize,
+}
+
+/// One row the import could not honestly accept, and why — listed with the
+/// run so a scheduler can find it in P6 and fix it there.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QuarantinedRow {
+    /// 1-based line in the export.
+    pub line: usize,
+    /// The section (`TASK`, `TASKPRED`).
+    pub table: String,
+    /// The row's own code when it carried one.
+    pub code: Option<String>,
+    /// The reason's class (`unparseable_date`, `width`, `cross_project_logic`…).
+    pub class: String,
+    /// The reason in words.
+    pub reason: String,
+}
+
+/// A schedule run as the list and the breadcrumb read it: everything about
+/// an import except its rows.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScheduleRunSummary {
+    /// Assigned by the store on commit.
+    pub run_id: uuid::Uuid,
+    /// 1, 2, 3… per hull, assigned by the store on commit.
+    pub seq: i64,
+    /// The source label, e.g. `CVN73-PIA26-full.xer`.
+    pub label: String,
+    /// When it was committed, epoch millis — the caller's clock.
+    pub imported_at_ms: i64,
+    /// Who, and through which door.
+    pub imported_by: ImportedBy,
+    /// `utf-8` or `windows-1252`.
+    pub encoding: String,
+    /// `browser` or `server`.
+    pub decoded_by: String,
+    /// The projects the run served, in file order.
+    pub projects_served: Vec<String>,
+    /// What was counted.
+    pub counts: RunCounts,
+    /// The field map the run was read through, as the document it was.
+    pub field_map: serde_json::Value,
+    /// Whether this run's document is the one currently served. Set by the
+    /// store on every read.
+    pub served: bool,
+    /// The document shape version the run was written in.
+    pub schema_version: u32,
+}
+
+/// What one import found and set aside — the detail behind the counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ScheduleRunReport {
+    /// Every quarantined row with its reason.
+    pub quarantine: Vec<QuarantinedRow>,
+    /// Level-of-effort task codes excluded from work.
+    pub excluded_loe: Vec<String>,
+    /// WBS-summary task codes excluded from work.
+    pub excluded_wbs: Vec<String>,
+    /// `(task_code, project)` for rows in projects the map does not serve.
+    pub excluded_project: Vec<(String, String)>,
+    /// The survey of the file's fields, as the ingest reported it.
+    pub fields_seen: serde_json::Value,
+    /// Findings — the map's and the clock's — none of which refused.
+    pub findings: Vec<String>,
+}
+
+/// One import, whole: its summary, its report, and the schedule of record
+/// it produced.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScheduleRun {
+    /// See [`ScheduleRunSummary`].
+    pub summary: ScheduleRunSummary,
+    /// See [`ScheduleRunReport`].
+    pub report: ScheduleRunReport,
+    /// The run's schedule of record. Required on commit (the store refuses a
+    /// run without one) and always present on a PostgreSQL read; `None` on
+    /// an in-memory read of a run older than the store's document cap
+    /// (`MAX_RUN_DOCS`), which keeps the summary and report of every run but
+    /// the rows of the last twelve — such a run can be listed and inspected
+    /// but not served again or diffed by rows.
+    pub doc: Option<crate::memory::ScheduleOfRecord>,
+}

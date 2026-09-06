@@ -429,9 +429,10 @@ use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
 use wadl_plan::{Package, Segment, SpaceWork};
 
 use crate::memory::{
-    BudgetBook, CompartmentRegister, CouplingRegister, GeometryRegister, ManningBook,
+    BudgetBook, CompartmentRegister, CouplingRegister, FieldMapDoc, GeometryRegister, ManningBook,
     ScheduleOfRecord, YardClockDoc, ZoneRegister,
 };
+use crate::model::{ScheduleRun, ScheduleRunReport, ScheduleRunSummary};
 
 /// The jsonb payload of a `geometry_register` document row: the register minus
 /// its label (the label is the document row's own column).
@@ -520,6 +521,137 @@ const fn kind_name(kind: HazardKind) -> &'static str {
     }
 }
 
+/// Stamps a document with the shape version this build writes, so a later
+/// reader can tell a document written before a field existed from one
+/// written after — and refuse, or migrate, rather than guess. Readers ignore
+/// the key; it is for the operator and the next schema.
+fn stamp_schema_version(doc: &mut serde_json::Value) {
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert(
+            "schema_version".to_owned(),
+            serde_json::Value::from(crate::DOCUMENT_SCHEMA_VERSION),
+        );
+    }
+}
+
+/// The upsert every document goes through, inside the caller's transaction
+/// so a run and its served document commit together or not at all.
+async fn upsert_document(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org: OrgId,
+    vessel: VesselId,
+    kind: &str,
+    label: &str,
+    mut doc: serde_json::Value,
+    run_id: Option<uuid::Uuid>,
+) -> Result<(), StoreError> {
+    stamp_schema_version(&mut doc);
+    sqlx::query(
+        "INSERT INTO ingested_document (org_id, vessel_id, kind, label, doc, run_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (vessel_id, kind)
+         DO UPDATE SET label = EXCLUDED.label, doc = EXCLUDED.doc,
+                       run_id = EXCLUDED.run_id, ingested_at = now()",
+    )
+    .bind(org.as_uuid())
+    .bind(vessel.as_uuid())
+    .bind(kind)
+    .bind(label)
+    .bind(doc)
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// The jsonb a schedule of record is stored as — the run's `doc` column and
+/// the served `ingested_document` row share it, so serving a prior run is a
+/// copy, not a conversion.
+fn sor_json(sor: &ScheduleOfRecord) -> serde_json::Value {
+    serde_json::json!({
+        "activities": sor.activities,
+        "edges": sor.edges,
+        "parsed_in": sor.parsed_in,
+    })
+}
+
+/// A schedule of record back from its jsonb and the row's label.
+fn sor_from_json(label: String, doc: &serde_json::Value) -> Result<ScheduleOfRecord, StoreError> {
+    let field = |name: &str| doc.get(name).cloned().unwrap_or_default();
+    Ok(ScheduleOfRecord {
+        label,
+        activities: serde_json::from_value(field("activities"))
+            .map_err(|e| StoreError::Backend(format!("schedule_of_record doc: {e}")))?,
+        edges: serde_json::from_value(field("edges"))
+            .map_err(|e| StoreError::Backend(format!("schedule_of_record doc: {e}")))?,
+        parsed_in: doc
+            .get("parsed_in")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+/// The `report` column: the run's report plus the summary's counts and
+/// projects, so the list read never touches `doc`.
+fn run_report_json(
+    summary: &ScheduleRunSummary,
+    report: &ScheduleRunReport,
+) -> Result<serde_json::Value, StoreError> {
+    let err = |e: serde_json::Error| StoreError::Backend(format!("schedule run report: {e}"));
+    let mut value = serde_json::to_value(report).map_err(err)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "counts".to_owned(),
+            serde_json::to_value(&summary.counts).map_err(err)?,
+        );
+        obj.insert(
+            "projects_served".to_owned(),
+            serde_json::to_value(&summary.projects_served).map_err(err)?,
+        );
+    }
+    Ok(value)
+}
+
+/// The columns every run read selects; `$1` is the hull. `served` is
+/// whether the hull's schedule-of-record document points at the run.
+const RUN_SELECT: &str = "SELECT r.run_id, r.seq, r.label, r.encoding, r.decoded_by, r.imported_by,
+                r.field_map, r.report, r.schema_version,
+                (EXTRACT(EPOCH FROM r.started_at) * 1000)::bigint AS imported_at_ms,
+                EXISTS (SELECT 1 FROM ingested_document d
+                         WHERE d.vessel_id = r.vessel_id AND d.kind = 'schedule_of_record'
+                           AND d.run_id = r.run_id) AS served
+           FROM ingest_run r
+          WHERE r.vessel_id = $1";
+
+/// One `ingest_run` row to a summary.
+fn run_summary(row: &sqlx::postgres::PgRow) -> Result<ScheduleRunSummary, StoreError> {
+    let err =
+        |what: &str, e: serde_json::Error| StoreError::Backend(format!("ingest_run {what}: {e}"));
+    let report: serde_json::Value = row.get("report");
+    let field = |name: &str| report.get(name).cloned().unwrap_or_default();
+    Ok(ScheduleRunSummary {
+        run_id: row.get("run_id"),
+        seq: i64::from(row.get::<Option<i32>, _>("seq").unwrap_or(0)),
+        label: row.get::<Option<String>, _>("label").unwrap_or_default(),
+        imported_at_ms: row.get("imported_at_ms"),
+        imported_by: serde_json::from_value(row.get::<serde_json::Value, _>("imported_by"))
+            .map_err(|e| err("imported_by", e))?,
+        encoding: row.get::<Option<String>, _>("encoding").unwrap_or_default(),
+        decoded_by: row
+            .get::<Option<String>, _>("decoded_by")
+            .unwrap_or_default(),
+        projects_served: serde_json::from_value(field("projects_served"))
+            .map_err(|e| err("report.projects_served", e))?,
+        counts: serde_json::from_value(field("counts")).map_err(|e| err("report.counts", e))?,
+        field_map: row.get("field_map"),
+        served: row.get("served"),
+        schema_version: row
+            .get::<Option<i32>, _>("schema_version")
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0),
+    })
+}
+
 impl PgStore {
     /// One ingested document for a hull, already scope-gated by the caller.
     async fn document(
@@ -541,39 +673,17 @@ impl PgStore {
     }
 
     /// Replaces (or installs) an ingested document — the all-or-nothing unit.
+    /// A document set this way is not a run's: `run_id` clears.
     async fn put_document(
         &self,
         org: OrgId,
         vessel: VesselId,
         kind: &str,
         label: &str,
-        mut doc: serde_json::Value,
+        doc: serde_json::Value,
     ) -> Result<(), StoreError> {
-        // Every stored document says which shape it was written in, so a
-        // later reader can tell a document written before a field existed
-        // from one written after — and refuse, or migrate, rather than guess.
-        // Readers ignore the key; it is for the operator and the next schema.
-        if let Some(obj) = doc.as_object_mut() {
-            obj.insert(
-                "schema_version".to_owned(),
-                serde_json::Value::from(crate::DOCUMENT_SCHEMA_VERSION),
-            );
-        }
         let mut tx = self.with_tenant(org).await?;
-        sqlx::query(
-            "INSERT INTO ingested_document (org_id, vessel_id, kind, label, doc)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (vessel_id, kind)
-             DO UPDATE SET label = EXCLUDED.label, doc = EXCLUDED.doc,
-                           ingested_at = now()",
-        )
-        .bind(org.as_uuid())
-        .bind(vessel.as_uuid())
-        .bind(kind)
-        .bind(label)
-        .bind(doc)
-        .execute(&mut *tx)
-        .await?;
+        upsert_document(&mut tx, org, vessel, kind, label, doc, None).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -874,13 +984,14 @@ impl Repositories for PgStore {
         sor: ScheduleOfRecord,
     ) -> Result<(), StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
-        let doc = serde_json::json!({
-            "activities": sor.activities,
-            "edges": sor.edges,
-            "parsed_in": sor.parsed_in,
-        });
-        self.put_document(scope.org, vessel, "schedule_of_record", &sor.label, doc)
-            .await
+        self.put_document(
+            scope.org,
+            vessel,
+            "schedule_of_record",
+            &sor.label,
+            sor_json(&sor),
+        )
+        .await
     }
 
     async fn schedule_parsed_in(
@@ -938,6 +1049,235 @@ impl Repositories for PgStore {
     ) -> Result<(), StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         self.delete_document(scope.org, vessel, "yard_clock").await
+    }
+
+    async fn field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<FieldMapDoc>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        // The map is wrapped (`{"map": …}`) so the row's schema_version stamp
+        // sits beside it, never inside it.
+        Ok(self
+            .document(scope.org, vessel, "p6_field_map")
+            .await?
+            .map(|(label, doc)| FieldMapDoc {
+                label,
+                map: doc.get("map").cloned().unwrap_or_default(),
+            }))
+    }
+
+    async fn set_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: FieldMapDoc,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let payload = serde_json::json!({ "map": doc.map });
+        self.put_document(scope.org, vessel, "p6_field_map", &doc.label, payload)
+            .await
+    }
+
+    async fn clear_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "p6_field_map")
+            .await
+    }
+
+    async fn commit_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run: ScheduleRun,
+    ) -> Result<ScheduleRunSummary, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let Some(doc) = run.doc else {
+            return Err(StoreError::Backend(
+                "a schedule run must carry its document".to_owned(),
+            ));
+        };
+        let imported_at = chrono::DateTime::from_timestamp_millis(run.summary.imported_at_ms)
+            .ok_or_else(|| StoreError::Backend("imported_at out of range".to_owned()))?;
+        let run_id = crate::memory::mint_run_id(run.summary.imported_at_ms);
+        let report = run_report_json(&run.summary, &run.report)?;
+        let imported_by = serde_json::to_value(&run.summary.imported_by)
+            .map_err(|e| StoreError::Backend(format!("imported_by: {e}")))?;
+        let count = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
+        let sor = sor_json(&doc);
+        // Run row and served document in ONE transaction, serialized per hull
+        // by the same advisory lock the ledger takes, so two imports cannot
+        // both take the next seq.
+        let mut tx = self.with_tenant(scope.org).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(vessel.as_uuid().to_string())
+            .execute(&mut *tx)
+            .await?;
+        let seq: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(max(seq), 0) + 1 FROM ingest_run WHERE vessel_id = $1",
+        )
+        .bind(vessel.as_uuid())
+        .fetch_one(&mut *tx)
+        .await?;
+        let mut run_doc = sor.clone();
+        stamp_schema_version(&mut run_doc);
+        sqlx::query(
+            "INSERT INTO ingest_run
+                (run_id, org_id, source_system, source_file, started_at, finished_at,
+                 row_count, reject_count, vessel_id, seq, label, encoding, decoded_by,
+                 imported_by, field_map, report, doc, schema_version)
+             VALUES ($1, $2, 'primavera_p6', $3, $4, $4, $5, $6, $7, $8, $3, $9, $10,
+                     $11, $12, $13, $14, $15)",
+        )
+        .bind(run_id)
+        .bind(scope.org.as_uuid())
+        .bind(&run.summary.label)
+        .bind(imported_at)
+        .bind(count(run.summary.counts.served))
+        .bind(count(run.summary.counts.quarantined))
+        .bind(vessel.as_uuid())
+        .bind(seq)
+        .bind(&run.summary.encoding)
+        .bind(&run.summary.decoded_by)
+        .bind(imported_by)
+        .bind(&run.summary.field_map)
+        .bind(report)
+        .bind(run_doc)
+        .bind(i32::try_from(crate::DOCUMENT_SCHEMA_VERSION).unwrap_or(i32::MAX))
+        .execute(&mut *tx)
+        .await?;
+        upsert_document(
+            &mut tx,
+            scope.org,
+            vessel,
+            "schedule_of_record",
+            &doc.label,
+            sor,
+            Some(run_id),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ScheduleRunSummary {
+            run_id,
+            seq: i64::from(seq),
+            served: true,
+            schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+            ..run.summary
+        })
+    }
+
+    async fn list_schedule_runs(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<ScheduleRunSummary>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let rows = sqlx::query(&format!(
+            "{RUN_SELECT} ORDER BY r.seq DESC, r.started_at DESC"
+        ))
+        .bind(vessel.as_uuid())
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.iter().map(run_summary).collect()
+    }
+
+    async fn schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: uuid::Uuid,
+    ) -> Result<Option<ScheduleRun>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let row = sqlx::query(&format!(
+            "{} AND r.run_id = $2",
+            RUN_SELECT.replacen("SELECT r.run_id,", "SELECT r.doc, r.run_id,", 1)
+        ))
+        .bind(vessel.as_uuid())
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let summary = run_summary(&row)?;
+        let report_json: serde_json::Value = row.get("report");
+        let report: ScheduleRunReport = serde_json::from_value(report_json)
+            .map_err(|e| StoreError::Backend(format!("ingest_run report: {e}")))?;
+        let doc = row
+            .get::<Option<serde_json::Value>, _>("doc")
+            .map(|d| sor_from_json(summary.label.clone(), &d))
+            .transpose()?;
+        Ok(Some(ScheduleRun {
+            summary,
+            report,
+            doc,
+        }))
+    }
+
+    async fn serve_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: uuid::Uuid,
+    ) -> Result<ScheduleRunSummary, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let row =
+            sqlx::query("SELECT label, doc FROM ingest_run WHERE vessel_id = $1 AND run_id = $2")
+                .bind(vessel.as_uuid())
+                .bind(run_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(StoreError::NotFound)?;
+        let label: Option<String> = row.get("label");
+        let doc: Option<serde_json::Value> = row.get("doc");
+        let Some(doc) = doc else {
+            return Err(StoreError::Backend(format!(
+                "run {run_id} carries no document and cannot be served"
+            )));
+        };
+        upsert_document(
+            &mut tx,
+            scope.org,
+            vessel,
+            "schedule_of_record",
+            &label.unwrap_or_default(),
+            doc,
+            Some(run_id),
+        )
+        .await?;
+        tx.commit().await?;
+        self.schedule_run(scope, vessel, run_id)
+            .await?
+            .map(|run| run.summary)
+            .ok_or(StoreError::NotFound)
+    }
+
+    async fn served_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ScheduleRunSummary>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let row = sqlx::query(&format!(
+            "{RUN_SELECT} AND r.run_id = (SELECT d.run_id FROM ingested_document d
+                                          WHERE d.vessel_id = $1 AND d.kind = 'schedule_of_record')"
+        ))
+        .bind(vessel.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row.as_ref().map(run_summary).transpose()
     }
 
     async fn clear_schedule_of_record(

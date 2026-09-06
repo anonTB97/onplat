@@ -137,9 +137,11 @@ Role menu → **Safety**. The front door is **Conflicts & Risk**.
 - Back on **Conflicts & Risk**, **acknowledge** the pump-room issue. Then
   **Decisions Ledger**: the acknowledgement is the newest entry, stamped on
   the wall clock, its **By** column reads *Demo Safety Officer (Y-1007)*,
-  the clearance from §2 is a few rows down under the same name, the rows
-  the demo booted with read *⚙ system:boot*, and the chain verify at the
-  top reads clean with the chain format beside the count. Every clearance,
+  the clearance from §2 is a few rows down under the same name, and the
+  chain verify at the top reads clean with the chain format beside the
+  count. (A row the binary wrote on its own account — a CLI load, say —
+  reads *⚙ system:…*; a row from before people were asserted reads
+  *— before format 2* and still verifies.) Every clearance,
   document commit, proposal and acknowledgement is in this one chain, and
   every row names who answered — the name a board of inquiry gets.
 

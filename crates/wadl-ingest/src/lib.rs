@@ -20,6 +20,8 @@
     )
 )]
 
+pub mod encoding;
+pub mod field_map;
 pub mod xer;
 
 use std::io::Read;
@@ -64,13 +66,45 @@ pub struct IngestedWorkOrder {
     pub source_verified: bool,
 }
 
-/// A rejected input row and why.
+/// A rejected input row and why — quarantined, in the XER door's words: the
+/// row is listed with its reason and the rest of the file is served.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Rejection {
     /// 1-based row number in the source.
     pub row: usize,
-    /// Why the row was rejected.
+    /// The section the row sits in (`TASK`, `TASKPRED`; the CSV ingest's
+    /// one table is `work_orders`).
+    pub table: String,
+    /// The row's own code (`task_code`, work-order code) when it carried one,
+    /// so a scheduler can find the row in P6 without the line number.
+    pub code: Option<String>,
+    /// The reason's class, one of a closed vocabulary the shell groups by:
+    /// `unparseable_date`, `backwards_window`, `unknown_status`, `no_code`,
+    /// `no_name`, `width`, `cross_project_logic`, `unknown_task_in_logic`,
+    /// `structure`, `no_provenance`.
+    pub class: String,
+    /// Why the row was rejected, in words.
     pub reason: String,
+}
+
+impl Rejection {
+    /// One rejection with every field named.
+    #[must_use]
+    pub fn new(
+        row: usize,
+        table: &str,
+        code: Option<&str>,
+        class: &str,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            row,
+            table: table.to_owned(),
+            code: code.map(str::to_owned),
+            class: class.to_owned(),
+            reason: reason.into(),
+        }
+    }
 }
 
 /// The outcome of an ingest run.
@@ -141,25 +175,34 @@ pub fn ingest_work_orders<R: Read>(reader: R) -> Result<IngestReport, IngestErro
         let raw = match record {
             Ok(raw) => raw,
             Err(err) => {
-                rejected.push(Rejection {
+                rejected.push(Rejection::new(
                     row,
-                    reason: format!("unparseable row: {err}"),
-                });
+                    "work_orders",
+                    None,
+                    "structure",
+                    format!("unparseable row: {err}"),
+                ));
                 continue;
             }
         };
         if raw.code.trim().is_empty() {
-            rejected.push(Rejection {
+            rejected.push(Rejection::new(
                 row,
-                reason: "missing work-order code".to_owned(),
-            });
+                "work_orders",
+                None,
+                "no_code",
+                "missing work-order code",
+            ));
             continue;
         }
         if raw.source_ref.trim().is_empty() {
-            rejected.push(Rejection {
+            rejected.push(Rejection::new(
                 row,
-                reason: "no source_ref — provenance required".to_owned(),
-            });
+                "work_orders",
+                Some(raw.code.trim()),
+                "no_provenance",
+                "no source_ref — provenance required",
+            ));
             continue;
         }
         accepted.push(IngestedWorkOrder {

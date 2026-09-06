@@ -86,10 +86,13 @@ pub fn parse_xer(input: &str) -> XerDocument {
             }
             Some("%F") => {
                 let Some(name) = &current else {
-                    doc.rejected.push(Rejection {
+                    doc.rejected.push(Rejection::new(
                         row,
-                        reason: "%F before any %T".to_owned(),
-                    });
+                        "",
+                        None,
+                        "structure",
+                        "%F before any %T",
+                    ));
                     continue;
                 };
                 if let Some(table) = doc.tables.get_mut(name) {
@@ -98,10 +101,13 @@ pub fn parse_xer(input: &str) -> XerDocument {
             }
             Some("%R") => {
                 let Some(name) = &current else {
-                    doc.rejected.push(Rejection {
+                    doc.rejected.push(Rejection::new(
                         row,
-                        reason: "%R before any %T".to_owned(),
-                    });
+                        "",
+                        None,
+                        "structure",
+                        "%R before any %T",
+                    ));
                     continue;
                 };
                 let Some(table) = doc.tables.get_mut(name) else {
@@ -111,24 +117,30 @@ pub fn parse_xer(input: &str) -> XerDocument {
                 // owned: a rejected row must not cost an allocation per cell.
                 let borrowed: Vec<&str> = cells.collect();
                 if borrowed.len() != table.fields.len() {
-                    doc.rejected.push(Rejection {
+                    doc.rejected.push(Rejection::new(
                         row,
-                        reason: format!(
+                        name,
+                        None,
+                        "width",
+                        format!(
                             "{name}: {} values for {} fields",
                             borrowed.len(),
                             table.fields.len()
                         ),
-                    });
+                    ));
                     continue;
                 }
                 cell_count += borrowed.len();
                 if cell_count > MAX_CELLS {
-                    doc.rejected.push(Rejection {
+                    doc.rejected.push(Rejection::new(
                         row,
-                        reason: format!(
+                        name,
+                        None,
+                        "structure",
+                        format!(
                             "document exceeds {MAX_CELLS} cells — not a schedule export this tool will hold in memory"
                         ),
-                    });
+                    ));
                     break;
                 }
                 table
@@ -498,7 +510,13 @@ pub fn ingest_xer_in(input: &str, source_label: &str, clock: &YardClock) -> XerI
                     }
                     report.activities.push(activity);
                 }
-                Err(reason) => report.rejected.push(Rejection { row: *line, reason }),
+                Err(reason) => report.rejected.push(Rejection::new(
+                    *line,
+                    "TASK",
+                    tasks.get(row, "task_code"),
+                    "row",
+                    reason,
+                )),
             }
         }
     }
@@ -507,7 +525,9 @@ pub fn ingest_xer_in(input: &str, source_label: &str, clock: &YardClock) -> XerI
         for (line, row) in &preds.rows {
             match extract_relationship(preds, row, &code_of_task) {
                 Ok(rel) => report.relationships.push(rel),
-                Err(reason) => report.rejected.push(Rejection { row: *line, reason }),
+                Err(reason) => report
+                    .rejected
+                    .push(Rejection::new(*line, "TASKPRED", None, "logic", reason)),
             }
         }
     }

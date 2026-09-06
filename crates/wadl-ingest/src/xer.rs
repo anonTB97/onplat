@@ -28,6 +28,9 @@ use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::ManHours;
 
+use crate::field_map::{
+    ActivityCodeTypeSeen, FieldMap, FieldSource, FieldsSeen, ProjectSeen, UdfSeen,
+};
 use crate::{Rejection, Reliability};
 
 /// One parsed XER section: its field names and its rows, verbatim.
@@ -223,35 +226,39 @@ pub struct XerActivity {
     pub code: String,
     /// Activity name.
     pub name: String,
-    /// The WI/WO number from the `wi_number` UDF; `None` = unmapped, a visible
-    /// state for the register.
+    /// The WI/WO number from the mapped work-item field; `None` = unmapped,
+    /// a visible state for the register.
     pub work_order_code: Option<String>,
-    /// The compartment: from the dedicated UDF, or parsed out of the task
-    /// name when the UDF is silent.
+    /// The compartment: from the mapped field, or parsed out of the task
+    /// name when the field is silent and the map allows it.
     pub compartment_no: Option<CompartmentNo>,
-    /// [`Reliability::High`] when the dedicated UDF carried it — the schedule
-    /// saying where. [`Reliability::Medium`] when a placard was parsed out of
-    /// the task's own name — this parser guessing where, graded as the guess
-    /// it is. [`Reliability::Low`] when the schedule did not say at all.
+    /// [`Reliability::High`] when the mapped UDF carried it — the schedule
+    /// saying where. [`Reliability::Medium`] when an activity code carried it
+    /// or a placard was parsed out of the task's own name — a convention or
+    /// this parser guessing, graded as such. [`Reliability::Low`] when the
+    /// schedule did not say at all.
     pub compartment_reliability: Reliability,
     /// The top-level WBS node this task sits under — `Z6`, `Z5`, `MSTN` in
     /// the sample. A structural HINT at zone grain, never a location: yards
     /// habitually cut the top of the WBS by zone, so an unlocated activity
     /// often still says which zone it belongs to through where it sits.
     pub wbs_area: Option<String>,
-    /// The assigned resource's short name — the trade, where resources are
-    /// modelled per trade.
+    /// The trade: the first labor resource's short name, or the mapped
+    /// field. Empty when the file says nothing.
     pub trade: String,
+    /// The work type from the mapped field, the vocabulary the rule table
+    /// binds to. `None` when the map carries no work type.
+    pub work_type: Option<String>,
     /// The window WADL works to: actuals override the CPM forward pass; the
     /// baseline is never consulted.
     pub planned: Option<Window>,
-    /// Budgeted man-hours, summed over the activity's resource assignments.
+    /// Budgeted man-hours, summed over the activity's LABOR assignments.
     pub budget_hours: ManHours,
     /// Earned man-hours, likewise.
     pub earned_hours: ManHours,
     /// Where the schedule says it stands.
     pub status: XerStatus,
-    /// `TT_Mile` — a key event, not work.
+    /// `TT_Mile` or `TT_FinMile` — a key event, not work.
     pub is_milestone: bool,
     /// Provenance: the export this row came from, and the task code within it.
     pub source_ref: String,
@@ -271,75 +278,223 @@ pub struct XerRelationship {
     pub lag_hours: i64,
 }
 
-/// The outcome of an XER ingest run.
+/// The outcome of an XER ingest run: what is served, what was quarantined
+/// with its reason, what was excluded and why, and the survey of the file.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct XerIngestReport {
-    /// The project short name, e.g. `CVN73-PIA26`.
+    /// The first served project's short name, e.g. `CVN73-PIA26`.
     pub project: Option<String>,
+    /// Every served project's short name, in file order.
+    pub projects_served: Vec<String>,
     /// Activities accepted, in file order.
     pub activities: Vec<XerActivity>,
     /// Relationships accepted, resolved to codes.
     pub relationships: Vec<XerRelationship>,
-    /// Every line that could not be honestly accepted, and why.
+    /// Every line that could not be honestly accepted, and why — the
+    /// quarantine. The rest of the file is served around it.
     pub rejected: Vec<Rejection>,
     /// Wall times the yard's clock skipped or repeated, accepted with the
     /// reading that was made — findings, not rejections.
     pub wall_clock_findings: Vec<String>,
+    /// What the map meant against this file: a field matched by label only,
+    /// several projects in the export, resources with no type. Never refuse.
+    pub findings: Vec<String>,
+    /// `TT_LOE` task codes — level of effort, not work; listed, not served.
+    pub excluded_loe: Vec<String>,
+    /// `TT_WBS` task codes — summary rows, not work; listed, not served.
+    pub excluded_wbs: Vec<String>,
+    /// `(task_code, proj_short_name)` for rows in projects the map does not
+    /// serve.
+    pub excluded_project: Vec<(String, String)>,
+    /// `TASKPRED` rows with both ends in projects the map does not serve —
+    /// dropped with their rows, neither served nor quarantined.
+    pub excluded_project_edges: usize,
+    /// `TASKRSRC` rows on material resources, not counted as man-hours.
+    pub material_skipped: usize,
+    /// `TASKRSRC` rows on equipment resources, not counted as man-hours.
+    pub equipment_skipped: usize,
+    /// `TASK` rows in the file, before any filter.
+    pub task_rows: usize,
+    /// The survey: which fields the file carries and how full they are.
+    pub fields_seen: FieldsSeen,
 }
 
-/// Resource assignments summed per task: (budget, earned, trade).
-fn resources_by_task(doc: &XerDocument) -> BTreeMap<String, (i64, i64, String)> {
-    let mut trade_of: BTreeMap<&str, &str> = BTreeMap::new();
-    if let Some(rsrc) = doc.table("RSRC") {
-        for (_, row) in &rsrc.rows {
-            if let (Some(id), Some(name)) =
-                (rsrc.get(row, "rsrc_id"), rsrc.get(row, "rsrc_short_name"))
-            {
-                trade_of.insert(id, name);
-            }
-        }
+impl XerIngestReport {
+    /// Whether the file carried a `TASK` section at all — the one absence
+    /// that makes it not a schedule export, refused whole at the door.
+    #[must_use]
+    pub fn has_task_section(&self) -> bool {
+        self.fields_seen.sections.contains_key("TASK")
     }
-    let mut out: BTreeMap<String, (i64, i64, String)> = BTreeMap::new();
-    if let Some(assignments) = doc.table("TASKRSRC") {
-        for (_, row) in &assignments.rows {
-            let Some(task) = assignments.get(row, "task_id") else {
-                continue;
-            };
-            let budget = assignments
-                .get(row, "target_qty")
-                .and_then(parse_qty)
-                .unwrap_or(0);
-            let earned = assignments
-                .get(row, "act_reg_qty")
-                .and_then(parse_qty)
-                .unwrap_or(0);
-            let trade = assignments
-                .get(row, "rsrc_id")
-                .and_then(|id| trade_of.get(id))
-                .copied()
-                .unwrap_or("");
-            let entry = out.entry(task.to_owned()).or_insert((0, 0, String::new()));
-            entry.0 += budget;
-            entry.1 += earned;
-            if entry.2.is_empty() {
-                trade.clone_into(&mut entry.2);
+}
+
+/// What a resource is, per `RSRC.rsrc_type`. Only labor is man-hours: a
+/// pallet of steel and a crane both carry `target_qty`, in tons and hours
+/// of hire, and summing them into a trade's budget is the quiet lie this
+/// distinction exists to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceKind {
+    Labor,
+    Material,
+    Equipment,
+    /// `rsrc_type` blank or absent: counted as labor, said so.
+    Untyped,
+}
+
+/// One `RSRC` row: its short name (the trade) and its kind.
+struct ResourceRow<'a> {
+    short_name: &'a str,
+    kind: ResourceKind,
+    type_name: Option<&'a str>,
+}
+
+/// The `RSRC` table by id, plus whether the file carries `rsrc_type` at all.
+fn resources<'a>(
+    doc: &'a XerDocument,
+    findings: &mut Vec<String>,
+) -> (BTreeMap<&'a str, ResourceRow<'a>>, bool) {
+    let mut out = BTreeMap::new();
+    let Some(rsrc) = doc.table("RSRC") else {
+        return (out, false);
+    };
+    let has_type = rsrc.fields.iter().any(|f| f == "rsrc_type");
+    for (_, row) in &rsrc.rows {
+        let Some(id) = rsrc.get(row, "rsrc_id") else {
+            continue;
+        };
+        let short_name = rsrc.get(row, "rsrc_short_name").unwrap_or("");
+        let type_name = rsrc.get(row, "rsrc_type");
+        let kind = match type_name {
+            Some("RT_Labor") => ResourceKind::Labor,
+            Some("RT_Mat") => ResourceKind::Material,
+            Some("RT_Equip") => ResourceKind::Equipment,
+            Some(other) => {
+                findings.push(format!(
+                    "resource {short_name}: rsrc_type {other:?} is not RT_Labor, RT_Mat or RT_Equip — counted as labor"
+                ));
+                ResourceKind::Untyped
             }
+            None if has_type => {
+                findings.push(format!(
+                    "resource {short_name}: no rsrc_type — its assignments are counted as labor"
+                ));
+                ResourceKind::Untyped
+            }
+            None => ResourceKind::Untyped,
+        };
+        out.insert(
+            id,
+            ResourceRow {
+                short_name,
+                kind,
+                type_name,
+            },
+        );
+    }
+    if !has_type && !rsrc.rows.is_empty() {
+        findings.push(
+            "RSRC carries no rsrc_type — every assignment is counted as labor man-hours".to_owned(),
+        );
+    }
+    (out, has_type)
+}
+
+/// Labor assignments summed per task: (budget, earned, trade); material and
+/// equipment rows counted aside; every assignment tallied by type for the
+/// survey.
+struct Assignments {
+    by_task: BTreeMap<String, (i64, i64, String)>,
+    material_skipped: usize,
+    equipment_skipped: usize,
+    by_type: BTreeMap<String, usize>,
+}
+
+fn assignments(doc: &XerDocument, resources: &BTreeMap<&str, ResourceRow<'_>>) -> Assignments {
+    let mut out = Assignments {
+        by_task: BTreeMap::new(),
+        material_skipped: 0,
+        equipment_skipped: 0,
+        by_type: ["RT_Labor", "RT_Mat", "RT_Equip"]
+            .into_iter()
+            .map(|k| (k.to_owned(), 0))
+            .collect(),
+    };
+    let Some(table) = doc.table("TASKRSRC") else {
+        return out;
+    };
+    for (_, row) in &table.rows {
+        let Some(task) = table.get(row, "task_id") else {
+            continue;
+        };
+        let resource = table.get(row, "rsrc_id").and_then(|id| resources.get(id));
+        let type_key = resource
+            .and_then(|r| r.type_name)
+            .unwrap_or("untyped")
+            .to_owned();
+        *out.by_type.entry(type_key).or_insert(0) += 1;
+        match resource.map(|r| r.kind) {
+            Some(ResourceKind::Material) => {
+                out.material_skipped += 1;
+                continue;
+            }
+            Some(ResourceKind::Equipment) => {
+                out.equipment_skipped += 1;
+                continue;
+            }
+            Some(ResourceKind::Labor | ResourceKind::Untyped) | None => {}
+        }
+        let budget = table
+            .get(row, "target_qty")
+            .and_then(parse_qty)
+            .unwrap_or(0);
+        let earned = table
+            .get(row, "act_reg_qty")
+            .and_then(parse_qty)
+            .unwrap_or(0);
+        let trade = resource.map_or("", |r| r.short_name);
+        let entry = out
+            .by_task
+            .entry(task.to_owned())
+            .or_insert((0, 0, String::new()));
+        entry.0 += budget;
+        entry.1 += earned;
+        if entry.2.is_empty() {
+            trade.clone_into(&mut entry.2);
         }
     }
     out
 }
 
-/// UDF values of one named type, keyed by task id.
-fn udf_by_task<'a>(doc: &'a XerDocument, type_name: &str) -> BTreeMap<&'a str, &'a str> {
-    let mut out = BTreeMap::new();
-    let (Some(types), Some(values)) = (doc.table("UDFTYPE"), doc.table("UDFVALUE")) else {
-        return out;
+/// A field name matched the way the map promises: trimmed, case-insensitive.
+fn same_field(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// The `UDFTYPE` row the map names — by `udf_type_name` first, then by
+/// `udf_type_label`; returns its id, its real name, and whether only the
+/// label matched.
+fn udf_type<'a>(doc: &'a XerDocument, wanted: &str) -> Option<(&'a str, &'a str, bool)> {
+    let types = doc.table("UDFTYPE")?;
+    let find = |field: &str| {
+        types.rows.iter().find_map(|(_, row)| {
+            let value = types.get(row, field)?;
+            same_field(value, wanted).then(|| {
+                (
+                    types.get(row, "udf_type_id").unwrap_or(""),
+                    types.get(row, "udf_type_name").unwrap_or(value),
+                )
+            })
+        })
     };
-    let Some(type_id) = types.rows.iter().find_map(|(_, row)| {
-        (types.get(row, "udf_type_name") == Some(type_name))
-            .then(|| types.get(row, "udf_type_id"))
-            .flatten()
-    }) else {
+    find("udf_type_name")
+        .map(|(id, name)| (id, name, false))
+        .or_else(|| find("udf_type_label").map(|(id, name)| (id, name, true)))
+}
+
+/// UDF values of one type id, keyed by task id.
+fn udf_values<'a>(doc: &'a XerDocument, type_id: &str) -> BTreeMap<&'a str, &'a str> {
+    let mut out = BTreeMap::new();
+    let Some(values) = doc.table("UDFVALUE") else {
         return out;
     };
     for (_, row) in &values.rows {
@@ -352,6 +507,96 @@ fn udf_by_task<'a>(doc: &'a XerDocument, type_name: &str) -> BTreeMap<&'a str, &
         }
     }
     out
+}
+
+/// Activity-code values of one code type, keyed by task id:
+/// `ACTVTYPE.actv_code_type` → its `ACTVCODE` rows' `short_name` via
+/// `TASKACTV`.
+fn activity_code_values<'a>(
+    doc: &'a XerDocument,
+    wanted: &str,
+) -> Option<BTreeMap<&'a str, &'a str>> {
+    let types = doc.table("ACTVTYPE")?;
+    let type_id = types.rows.iter().find_map(|(_, row)| {
+        same_field(types.get(row, "actv_code_type")?, wanted)
+            .then(|| types.get(row, "actv_code_type_id"))
+            .flatten()
+    })?;
+    let mut short_name: BTreeMap<&str, &str> = BTreeMap::new();
+    if let Some(codes) = doc.table("ACTVCODE") {
+        for (_, row) in &codes.rows {
+            if codes.get(row, "actv_code_type_id") == Some(type_id) {
+                if let (Some(id), Some(name)) =
+                    (codes.get(row, "actv_code_id"), codes.get(row, "short_name"))
+                {
+                    short_name.insert(id, name);
+                }
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    if let Some(links) = doc.table("TASKACTV") {
+        for (_, row) in &links.rows {
+            if let (Some(task), Some(code)) =
+                (links.get(row, "task_id"), links.get(row, "actv_code_id"))
+            {
+                if let Some(name) = short_name.get(code) {
+                    out.insert(task, *name);
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// One slot resolved against the file: the values by task id, and the
+/// grade a value from it earns.
+struct Slot<'a> {
+    values: BTreeMap<&'a str, &'a str>,
+    grade: Reliability,
+}
+
+impl Slot<'_> {
+    fn empty() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            grade: Reliability::Low,
+        }
+    }
+}
+
+/// Resolves one mapped slot. A label-only UDF match is a finding; a field
+/// the file does not carry has already been reported by
+/// [`FieldMap::findings_against`] and resolves empty.
+fn resolve_slot<'a>(
+    doc: &'a XerDocument,
+    slot: &str,
+    source: &FieldSource,
+    findings: &mut Vec<String>,
+) -> Slot<'a> {
+    match source {
+        FieldSource::Udf { name } => match udf_type(doc, name) {
+            Some((id, real_name, by_label)) => {
+                if by_label {
+                    findings.push(format!(
+                        "{slot}: no UDF named {name:?} — matched by label to UDF {real_name:?}"
+                    ));
+                }
+                Slot {
+                    values: udf_values(doc, id),
+                    grade: Reliability::High,
+                }
+            }
+            None => Slot::empty(),
+        },
+        FieldSource::ActivityCode { name } => {
+            activity_code_values(doc, name).map_or_else(Slot::empty, |values| Slot {
+                values,
+                grade: Reliability::Medium,
+            })
+        }
+        FieldSource::Resource | FieldSource::NotCarried => Slot::empty(),
+    }
 }
 
 /// Each WBS node's top-level area: the ancestor sitting directly under the
@@ -405,10 +650,10 @@ fn wbs_area_by_id(doc: &XerDocument) -> BTreeMap<String, String> {
 }
 
 /// The planned window: actuals override the CPM pass, field by field, per the
-/// dates section of `docs/p6-ingest-schema.md`. Returns an error string for a
-/// present-but-unparseable date, because silently dropping a malformed date
-/// would demote "the schedule said something broken" to "the schedule said
-/// nothing", and those need different people to fix them.
+/// dates section of `docs/p6-ingest-schema.md`. Returns the quarantine class
+/// and reason for a present-but-unparseable date, because silently dropping
+/// a malformed date would demote "the schedule said something broken" to
+/// "the schedule said nothing", and those need different people to fix them.
 fn planned_window(
     table: &XerTable,
     row: &[String],
@@ -416,13 +661,13 @@ fn planned_window(
     code: &str,
     ctx: &TaskContext<'_>,
     findings: &mut Vec<String>,
-) -> Result<Option<Window>, String> {
-    let mut when = |field: &str, what: &str| -> Result<Option<Timestamp>, String> {
+) -> Result<Option<Window>, (&'static str, String)> {
+    let mut when = |field: &str, what: &str| -> Result<Option<Timestamp>, (&'static str, String)> {
         match table.get(row, field) {
             None => Ok(None),
             Some(raw) => {
                 let (at, note) = parse_when(raw, ctx.clock)
-                    .ok_or_else(|| format!("unparseable {field}: {raw:?}"))?;
+                    .ok_or_else(|| ("unparseable_date", format!("unparseable {field}: {raw:?}")))?;
                 if let Some(note) = note {
                     findings.push(wall_clock_finding(
                         line, code, what, raw, note, ctx.clock, at,
@@ -448,141 +693,397 @@ fn planned_window(
             a,
             Timestamp::from_epoch_millis(b.epoch_millis() + 60_000),
         ))),
-        (Some(a), Some(b)) => Err(format!("window runs backwards: {a} → {b}")),
+        (Some(a), Some(b)) => Err((
+            "backwards_window",
+            format!("window runs backwards: {a} → {b}"),
+        )),
         // Undated is a real condition, not an error — the register shows it.
         _ => Ok(None),
     }
 }
 
-/// Ingests one XER export with its wall clock read as UTC — the CLI's
-/// evidence-table path, and any caller with no yard clock in hand. The
-/// served schedule goes through [`ingest_xer_in`] with the hull's clock.
+/// Ingests one XER export under today's default map with its wall clock read
+/// as UTC — the CLI's evidence-table path, and any caller with neither a
+/// map nor a clock in hand. The served schedule goes through
+/// [`ingest_xer_with`] with the hull's map and clock.
 #[must_use]
 pub fn ingest_xer(input: &str, source_label: &str) -> XerIngestReport {
-    ingest_xer_in(input, source_label, &YardClock::utc())
+    ingest_xer_with(input, source_label, &FieldMap::default(), &YardClock::utc())
 }
 
 /// The lookups one TASK row is resolved against, and the clock its wall
 /// times are read in.
 struct TaskContext<'a> {
     resources: BTreeMap<String, (i64, i64, String)>,
-    compartments: BTreeMap<&'a str, &'a str>,
-    wi_numbers: BTreeMap<&'a str, &'a str>,
+    compartment: Slot<'a>,
+    work_item: Slot<'a>,
+    work_type: Slot<'a>,
+    /// `None` when the trade comes from the labor resource.
+    trade: Option<Slot<'a>>,
+    placards_from_names: bool,
     areas: BTreeMap<String, String>,
     source_label: &'a str,
     clock: &'a YardClock,
 }
 
-/// Ingests one XER export, its wall clock read in `clock`. `source_label`
-/// names the file for provenance — every accepted activity carries it,
-/// because nothing enters without a source.
+/// The survey of a file: sections, projects, UDF types, activity code types,
+/// task types and resource types with their row counts. No schedule content.
+fn survey(doc: &XerDocument, assignments: &Assignments, has_rsrc_type: bool) -> FieldsSeen {
+    let mut seen = FieldsSeen {
+        has_rsrc_type,
+        resource_types: assignments.by_type.clone(),
+        ..FieldsSeen::default()
+    };
+    for (name, table) in &doc.tables {
+        seen.sections.insert(name.clone(), table.rows.len());
+    }
+    for kind in ["TT_Task", "TT_Mile", "TT_FinMile", "TT_LOE", "TT_WBS"] {
+        seen.task_types.insert(kind.to_owned(), 0);
+    }
+    let mut tasks_by_project: BTreeMap<&str, usize> = BTreeMap::new();
+    if let Some(tasks) = doc.table("TASK") {
+        for (_, row) in &tasks.rows {
+            let kind = tasks.get(row, "task_type").unwrap_or("(blank)");
+            *seen.task_types.entry(kind.to_owned()).or_insert(0) += 1;
+            if let Some(project) = tasks.get(row, "proj_id") {
+                *tasks_by_project.entry(project).or_insert(0) += 1;
+            }
+        }
+    }
+    if let Some(projects) = doc.table("PROJECT") {
+        for (_, row) in &projects.rows {
+            let id = projects.get(row, "proj_id").unwrap_or("");
+            seen.projects.push(ProjectSeen {
+                id: id.to_owned(),
+                short_name: projects
+                    .get(row, "proj_short_name")
+                    .unwrap_or(id)
+                    .to_owned(),
+                tasks: tasks_by_project.get(id).copied().unwrap_or(0),
+            });
+        }
+    }
+    let mut values_by_udf: BTreeMap<&str, usize> = BTreeMap::new();
+    if let Some(values) = doc.table("UDFVALUE") {
+        for (_, row) in &values.rows {
+            if let Some(id) = values.get(row, "udf_type_id") {
+                *values_by_udf.entry(id).or_insert(0) += 1;
+            }
+        }
+    }
+    if let Some(types) = doc.table("UDFTYPE") {
+        for (_, row) in &types.rows {
+            let id = types.get(row, "udf_type_id").unwrap_or("");
+            seen.udfs.push(UdfSeen {
+                name: types.get(row, "udf_type_name").unwrap_or(id).to_owned(),
+                label: types.get(row, "udf_type_label").map(str::to_owned),
+                table: types.get(row, "table_name").map(str::to_owned),
+                values: values_by_udf.get(id).copied().unwrap_or(0),
+            });
+        }
+    }
+    seen.activity_code_types = activity_code_types_seen(doc);
+    seen
+}
+
+/// Every `ACTVTYPE` row with the number of `TASKACTV` assignments of its type
+/// (via the link's own `actv_code_type_id`, or the code's when the link
+/// does not carry one).
+fn activity_code_types_seen(doc: &XerDocument) -> Vec<ActivityCodeTypeSeen> {
+    let Some(types) = doc.table("ACTVTYPE") else {
+        return Vec::new();
+    };
+    let mut type_of_code: BTreeMap<&str, &str> = BTreeMap::new();
+    if let Some(codes) = doc.table("ACTVCODE") {
+        for (_, row) in &codes.rows {
+            if let (Some(code), Some(kind)) = (
+                codes.get(row, "actv_code_id"),
+                codes.get(row, "actv_code_type_id"),
+            ) {
+                type_of_code.insert(code, kind);
+            }
+        }
+    }
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    if let Some(links) = doc.table("TASKACTV") {
+        for (_, row) in &links.rows {
+            let kind = links.get(row, "actv_code_type_id").or_else(|| {
+                links
+                    .get(row, "actv_code_id")
+                    .and_then(|c| type_of_code.get(c).copied())
+            });
+            if let Some(kind) = kind {
+                *counts.entry(kind).or_insert(0) += 1;
+            }
+        }
+    }
+    types
+        .rows
+        .iter()
+        .map(|(_, row)| {
+            let id = types.get(row, "actv_code_type_id").unwrap_or("");
+            ActivityCodeTypeSeen {
+                name: types.get(row, "actv_code_type").unwrap_or(id).to_owned(),
+                values: counts.get(id).copied().unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+/// Which projects the map serves: `(proj_id → short_name)` for the served
+/// set, and the short name of every project for the exclusion list.
+struct Projects<'a> {
+    all: BTreeMap<&'a str, &'a str>,
+    served: BTreeMap<&'a str, &'a str>,
+    /// Served short names in file order.
+    served_names: Vec<String>,
+}
+
+fn projects<'a>(doc: &'a XerDocument, map: &FieldMap, findings: &mut Vec<String>) -> Projects<'a> {
+    let mut out = Projects {
+        all: BTreeMap::new(),
+        served: BTreeMap::new(),
+        served_names: Vec::new(),
+    };
+    let Some(table) = doc.table("PROJECT") else {
+        return out;
+    };
+    for (_, row) in &table.rows {
+        let Some(id) = table.get(row, "proj_id") else {
+            continue;
+        };
+        let name = table.get(row, "proj_short_name").unwrap_or(id);
+        out.all.insert(id, name);
+        let served = map.projects.is_empty() || map.projects.iter().any(|p| same_field(p, name));
+        if served {
+            out.served.insert(id, name);
+            out.served_names.push(name.to_owned());
+        }
+    }
+    if map.projects.is_empty() && out.all.len() > 1 {
+        findings.push(format!(
+            "{} projects in this export ({}) — every one is served; name the hull's in the field map to serve one",
+            out.all.len(),
+            out.all.values().copied().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out
+}
+
+impl Projects<'_> {
+    /// Whether a task's project is served. A task whose project is not in
+    /// `PROJECT` at all is served when no filter is set — the file is the
+    /// authority on its own rows — and excluded when one is.
+    fn serves(&self, proj_id: Option<&str>, filtered: bool) -> bool {
+        match proj_id {
+            Some(id) => self.served.contains_key(id) || (!filtered && !self.all.contains_key(id)),
+            None => !filtered,
+        }
+    }
+
+    fn name_of(&self, proj_id: Option<&str>) -> String {
+        proj_id
+            .map_or("(no project)", |id| self.all.get(id).copied().unwrap_or(id))
+            .to_owned()
+    }
+}
+
+/// Why a TASK row that was neither served nor quarantined is absent — for
+/// the logic pass to say so when a relationship reaches it.
+#[derive(Debug, Clone, Copy)]
+enum Absent<'a> {
+    Loe,
+    Wbs,
+    Project(&'a str),
+    Quarantined,
+}
+
+/// Ingests one XER export through the hull's field map, its wall clock read
+/// in `clock`. `source_label` names the file for provenance — every accepted
+/// activity carries it, because nothing enters without a source.
+///
+/// Never refuses a file: a row that cannot be honestly accepted is
+/// quarantined with its line, class and reason, and the rest is served. The
+/// door decides whether what survived is worth serving.
 #[must_use]
-pub fn ingest_xer_in(input: &str, source_label: &str, clock: &YardClock) -> XerIngestReport {
+pub fn ingest_xer_with(
+    input: &str,
+    source_label: &str,
+    map: &FieldMap,
+    clock: &YardClock,
+) -> XerIngestReport {
     let doc = parse_xer(input);
     let mut report = XerIngestReport {
         rejected: doc.rejected.clone(),
         ..XerIngestReport::default()
     };
-    report.project = doc.table("PROJECT").and_then(|t| {
-        t.rows
-            .first()
-            .and_then(|(_, row)| t.get(row, "proj_short_name"))
-            .map(str::to_owned)
-    });
+    let (resource_rows, has_rsrc_type) = resources(&doc, &mut report.findings);
+    let assignments = assignments(&doc, &resource_rows);
+    report.fields_seen = survey(&doc, &assignments, has_rsrc_type);
+    report.material_skipped = assignments.material_skipped;
+    report.equipment_skipped = assignments.equipment_skipped;
+    report
+        .findings
+        .extend(map.findings_against(Some(&report.fields_seen)));
+    let projects = projects(&doc, map, &mut report.findings);
+    report.projects_served.clone_from(&projects.served_names);
+    report.project = projects.served_names.first().cloned();
 
     let ctx = TaskContext {
-        resources: resources_by_task(&doc),
-        compartments: udf_by_task(&doc, "compartment"),
-        wi_numbers: udf_by_task(&doc, "wi_number"),
+        resources: assignments.by_task,
+        compartment: resolve_slot(&doc, "compartment", &map.compartment, &mut report.findings),
+        work_item: resolve_slot(&doc, "work_item", &map.work_item, &mut report.findings),
+        work_type: resolve_slot(&doc, "work_type", &map.work_type, &mut report.findings),
+        trade: (map.trade != FieldSource::Resource)
+            .then(|| resolve_slot(&doc, "trade", &map.trade, &mut report.findings)),
+        placards_from_names: map.placards_from_names,
         areas: wbs_area_by_id(&doc),
         source_label,
         clock,
     };
 
     let mut code_of_task: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut absent: BTreeMap<&str, Absent<'_>> = BTreeMap::new();
+    let filtered = !map.projects.is_empty();
     if let Some(tasks) = doc.table("TASK") {
+        // The file's rows, not the parser's: a row the width check refused
+        // never reached `tasks.rows` but was a TASK row all the same.
+        report.task_rows =
+            tasks.rows.len() + doc.rejected.iter().filter(|r| r.table == "TASK").count();
         for (line, row) in &tasks.rows {
+            let task_id = tasks.get(row, "task_id").unwrap_or_default();
+            let code = tasks.get(row, "task_code");
+            let named = code.unwrap_or("(no code)").to_owned();
+            let proj_id = tasks.get(row, "proj_id");
+            if !projects.serves(proj_id, filtered) {
+                let project = projects.name_of(proj_id);
+                if let Some(id) = proj_id {
+                    absent.insert(
+                        task_id,
+                        Absent::Project(projects.all.get(id).copied().unwrap_or(id)),
+                    );
+                }
+                report.excluded_project.push((named, project));
+                continue;
+            }
+            match tasks.get(row, "task_type") {
+                Some("TT_LOE") => {
+                    absent.insert(task_id, Absent::Loe);
+                    report.excluded_loe.push(named);
+                    continue;
+                }
+                Some("TT_WBS") => {
+                    absent.insert(task_id, Absent::Wbs);
+                    report.excluded_wbs.push(named);
+                    continue;
+                }
+                _ => {}
+            }
             match extract_activity(tasks, row, *line, &ctx, &mut report.wall_clock_findings) {
                 Ok(activity) => {
-                    if let (Some(id), code) = (tasks.get(row, "task_id"), activity.code.clone()) {
-                        code_of_task.insert(id, tasks.get(row, "task_code").unwrap_or_default());
-                        let _ = code;
-                    }
+                    code_of_task.insert(task_id, code.unwrap_or_default());
                     report.activities.push(activity);
                 }
-                Err(reason) => report.rejected.push(Rejection::new(
-                    *line,
-                    "TASK",
-                    tasks.get(row, "task_code"),
-                    "row",
-                    reason,
-                )),
+                Err((class, reason)) => {
+                    absent.insert(task_id, Absent::Quarantined);
+                    report
+                        .rejected
+                        .push(Rejection::new(*line, "TASK", code, class, reason));
+                }
             }
         }
     }
 
     if let Some(preds) = doc.table("TASKPRED") {
+        let logic = LogicContext {
+            code_of_task: &code_of_task,
+            absent: &absent,
+            projects: &projects,
+        };
         for (line, row) in &preds.rows {
-            match extract_relationship(preds, row, &code_of_task) {
-                Ok(rel) => report.relationships.push(rel),
-                Err(reason) => report
-                    .rejected
-                    .push(Rejection::new(*line, "TASKPRED", None, "logic", reason)),
+            match extract_relationship(preds, row, &logic) {
+                Ok(Some(rel)) => report.relationships.push(rel),
+                Ok(None) => report.excluded_project_edges += 1,
+                Err((class, reason)) => {
+                    let succ = preds
+                        .get(row, "task_id")
+                        .and_then(|id| code_of_task.get(id).copied());
+                    report
+                        .rejected
+                        .push(Rejection::new(*line, "TASKPRED", succ, class, reason));
+                }
             }
         }
     }
+    report.rejected.sort_by_key(|r| r.row);
     report
 }
 
-/// One TASK row to an activity, or the reason it cannot be honestly accepted.
+/// One TASK row to an activity, or the class and reason it cannot be
+/// honestly accepted.
 fn extract_activity(
     tasks: &XerTable,
     row: &[String],
     line: usize,
     ctx: &TaskContext<'_>,
     findings: &mut Vec<String>,
-) -> Result<XerActivity, String> {
-    let code = tasks
-        .get(row, "task_code")
-        .ok_or("no task_code — nothing anonymous enters")?;
-    let name = tasks.get(row, "task_name").ok_or("no task_name")?;
+) -> Result<XerActivity, (&'static str, String)> {
+    let code = tasks.get(row, "task_code").ok_or((
+        "no_code",
+        "no task_code — nothing anonymous enters".to_owned(),
+    ))?;
+    let name = tasks
+        .get(row, "task_name")
+        .ok_or(("no_name", "no task_name".to_owned()))?;
     let status = match tasks.get(row, "status_code") {
         Some("TK_NotStart") => XerStatus::NotStarted,
         Some("TK_Active") => XerStatus::InProgress,
         Some("TK_Complete") => XerStatus::Complete,
-        other => return Err(format!("unknown status_code {other:?}")),
+        other => return Err(("unknown_status", format!("unknown status_code {other:?}"))),
     };
     let task_id = tasks.get(row, "task_id").unwrap_or_default();
-    let (budget, earned, trade) =
+    let (budget, earned, resource_trade) =
         ctx.resources
             .get(task_id)
             .cloned()
             .unwrap_or((0, 0, String::new()));
-    // Locating an activity, in order of trust: the dedicated UDF is the one
-    // authored home the crosswalk names; failing that, a placard parsed out of
-    // the activity's own NAME — schedulers write "... (3-160-2-Q)" constantly,
-    // and refusing to read it would unlocate half of a real export. The two
-    // paths are graded apart because they are different claims: the UDF is the
-    // schedule saying where, the name is this parser guessing where.
-    let (compartment, compartment_reliability) = match ctx.compartments.get(task_id).copied() {
-        Some(udf) => (Some(udf.to_owned()), Reliability::High),
-        None => match placard_in(name) {
+    // Locating an activity, in order of trust: the mapped field is the one
+    // authored home the map names (High for a UDF, Medium for an activity
+    // code — a convention, not a controlled field); failing that, a placard
+    // parsed out of the activity's own NAME when the map allows it —
+    // schedulers write "... (3-160-2-Q)" constantly, and refusing to read it
+    // would unlocate half of a real export. The paths are graded apart
+    // because they are different claims: the field is the schedule saying
+    // where, the name is this parser guessing where.
+    let (compartment, compartment_reliability) = match ctx.compartment.values.get(task_id).copied()
+    {
+        Some(field) => (Some(field.to_owned()), ctx.compartment.grade),
+        None => match ctx.placards_from_names.then(|| placard_in(name)).flatten() {
             Some(found) => (Some(found), Reliability::Medium),
             None => (None, Reliability::Low),
         },
     };
+    let trade = match &ctx.trade {
+        None => resource_trade,
+        Some(slot) => slot
+            .values
+            .get(task_id)
+            .map(|s| (*s).to_owned())
+            .unwrap_or_default(),
+    };
     Ok(XerActivity {
         code: code.to_owned(),
         name: name.to_owned(),
-        work_order_code: ctx.wi_numbers.get(task_id).map(|s| (*s).to_owned()),
+        work_order_code: ctx.work_item.values.get(task_id).map(|s| (*s).to_owned()),
         compartment_no: compartment.map(CompartmentNo::new),
         compartment_reliability,
         trade,
+        work_type: ctx.work_type.values.get(task_id).map(|s| (*s).to_owned()),
         planned: planned_window(tasks, row, line, code, ctx, findings)?,
         budget_hours: ManHours::new(budget),
         earned_hours: ManHours::new(earned),
         status,
-        is_milestone: tasks.get(row, "task_type") == Some("TT_Mile"),
+        is_milestone: matches!(tasks.get(row, "task_type"), Some("TT_Mile" | "TT_FinMile")),
         wbs_area: tasks
             .get(row, "wbs_id")
             .and_then(|id| ctx.areas.get(id))
@@ -603,29 +1104,98 @@ fn placard_in(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// One TASKPRED row to a relationship, ids resolved to codes.
+/// What the logic pass resolves task ids against.
+struct LogicContext<'a> {
+    code_of_task: &'a BTreeMap<&'a str, &'a str>,
+    absent: &'a BTreeMap<&'a str, Absent<'a>>,
+    projects: &'a Projects<'a>,
+}
+
+impl LogicContext<'_> {
+    fn in_unserved_project(&self, id: &str) -> bool {
+        matches!(self.absent.get(id), Some(Absent::Project(_)))
+    }
+
+    /// A task id to its served code, or the class and reason it is not one:
+    /// a row in an unserved project is `cross_project_logic` (the reason
+    /// names the project); a row excluded, quarantined or unknown is
+    /// `unknown_task_in_logic`.
+    fn resolve(
+        &self,
+        field: &str,
+        id: &str,
+        own_project: Option<&str>,
+        its_project: Option<&str>,
+    ) -> Result<String, (&'static str, String)> {
+        if let Some(code) = self.code_of_task.get(id) {
+            return Ok((*code).to_owned());
+        }
+        match self.absent.get(id) {
+            Some(Absent::Project(project)) => Err((
+                "cross_project_logic",
+                format!("{field} {id} is in project {project}, which is not served"),
+            )),
+            Some(Absent::Loe) => Err((
+                "unknown_task_in_logic",
+                format!("{field} {id} is a level-of-effort row, excluded from work"),
+            )),
+            Some(Absent::Wbs) => Err((
+                "unknown_task_in_logic",
+                format!("{field} {id} is a WBS summary row, excluded from work"),
+            )),
+            Some(Absent::Quarantined) => Err((
+                "unknown_task_in_logic",
+                format!("{field} {id} was quarantined"),
+            )),
+            None => match its_project {
+                Some(project) if own_project.is_some_and(|own| own != project) => Err((
+                    "cross_project_logic",
+                    format!(
+                        "{field} {id} is in project {}, which this export does not carry",
+                        self.projects.name_of(Some(project))
+                    ),
+                )),
+                _ => Err((
+                    "unknown_task_in_logic",
+                    format!("{field} {id} names no task in this export"),
+                )),
+            },
+        }
+    }
+}
+
+/// One TASKPRED row to a relationship, ids resolved to codes. `Ok(None)`
+/// when both ends sit in projects the map does not serve: logic wholly
+/// inside excluded work is excluded with it, not quarantined — nothing
+/// served is touched by it.
 fn extract_relationship(
     preds: &XerTable,
     row: &[String],
-    code_of_task: &BTreeMap<&str, &str>,
-) -> Result<XerRelationship, String> {
-    let resolve = |field: &str| -> Result<String, String> {
-        let id = preds.get(row, field).ok_or(format!("no {field}"))?;
-        code_of_task
-            .get(id)
-            .map(|c| (*c).to_owned())
-            .ok_or(format!("{field} {id} names no task in this export"))
+    logic: &LogicContext<'_>,
+) -> Result<Option<XerRelationship>, (&'static str, String)> {
+    let own_project = preds.get(row, "proj_id");
+    let pred_project = preds.get(row, "pred_proj_id");
+    let id = |field: &str| {
+        preds
+            .get(row, field)
+            .ok_or(("structure", format!("no {field}")))
     };
-    Ok(XerRelationship {
-        succ: resolve("task_id")?,
-        pred: resolve("pred_task_id")?,
+    let (succ_id, pred_id) = (id("task_id")?, id("pred_task_id")?);
+    if logic.in_unserved_project(succ_id) && logic.in_unserved_project(pred_id) {
+        return Ok(None);
+    }
+    let succ = logic.resolve("task_id", succ_id, own_project, own_project)?;
+    let pred = logic.resolve("pred_task_id", pred_id, own_project, pred_project)?;
+    Ok(Some(XerRelationship {
+        succ,
+        pred,
         kind: preds
             .get(row, "pred_type")
-            .ok_or("no pred_type")?
+            .ok_or(("structure", "no pred_type".to_owned()))?
             .to_owned(),
         lag_hours: preds
             .get(row, "lag_hr_cnt")
             .and_then(parse_qty)
             .unwrap_or(0),
-    })
+    }))
 }

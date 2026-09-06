@@ -1,0 +1,98 @@
+ERMHDR	19.12	2026-09-04	Project	admin	A.PLANNER	Shipyard Planning	USD
+%T	PROJECT
+%F	proj_id	proj_short_name	proj_name	plan_start_date	plan_end_date
+%R	4410	CVN73-PIA26	CVN-73 Planned Incremental Availability 2026	2026-07-27 06:00	2027-01-23 18:00
+%R	4411	CVN73-DSRA27	CVN-73 Docking Selected Restricted Availability 2027	2027-03-01 06:00	2027-09-30 18:00
+%T	PROJWBS
+%F	wbs_id	proj_id	parent_wbs_id	wbs_short_name	wbs_name
+%R	9000	4410		PIA26	CVN-73 PIA-26
+%R	9010	4410	9000	Z6	Zone 6 — Aft Machinery & Berthing
+%R	9020	4410	9000	Z5	Zone 5 — Hangar & Main Deck
+%R	9030	4410	9000	MSTN	Key Events
+%R	9100	4411		DSRA27	CVN-73 DSRA-27
+%T	RSRC
+%F	rsrc_id	rsrc_short_name	rsrc_name	rsrc_type
+%R	7001	SM-PRES	Preservation / Blast & Coat	RT_Labor
+%R	7002	SM-WELD	Structural Welding	RT_Labor
+%R	7003	SM-ELEC	Electrical	
+%R	7004	MAT-STL	Steel plate — staging pallet	RT_Mat
+%R	7005	EQ-CRANE	Portal crane No. 3	RT_Equip
+%T	UDFTYPE
+%F	udf_type_id	table_name	udf_type_name	udf_type_label	logical_data_type
+%R	601	TASK	COMPT	Location placard	FT_TEXT
+%R	602	TASK	WI	Work Item	FT_TEXT
+%R	603	TASK	WTYPE	Work Type	FT_TEXT
+%T	ACTVTYPE
+%F	actv_code_type_id	actv_code_type	actv_short_len
+%R	301	LOC	10
+%R	302	TRADE	10
+%T	ACTVCODE
+%F	actv_code_id	actv_code_type_id	short_name	actv_code_name
+%R	3101	301	3-185-0-L	Scullery
+%R	3201	302	SM-ELEC	Electrical
+%T	TASK
+%F	task_id	proj_id	wbs_id	task_code	task_name	task_type	status_code	early_start_date	early_end_date	act_start_date	act_end_date
+%R	1001	4410	9010	A1010	Reserve feed water tank preservation	TT_Task	TK_Active	2026-08-01 06:00	2026-08-14 16:00	2026-08-01 06:30	
+%R	1002	4410	9010	A1020	Sounding & vent piping modification	TT_Task	TK_NotStart	2026-08-15 06:00	2026-08-22 16:00		
+%R	1003	4410	9020	A2010	Hangar Bay 2 structural hot work	TT_Task	TK_Active	2026-08-17 06:00	2026-11-13 16:00	2026-08-18 06:00	
+%R	1004	4410	9020	A2020	Hangar bay staging & lay-down	TT_Task	TK_NotStart	2026-08-20 06:00	2026-09-05 16:00		
+%R	1005	4410	9010	A3010	Aft IC preservation & cableway closure	TT_Task	TK_NotStart	2026-08-12 06:00	2026-08-21 16:00		
+%R	1006	4410	9010	A3020	Switchboard No. 1 rip-out	TT_Task	TK_NotStart	2026-09-19 06:00	2026-10-23 16:00		
+%R	1007	4410	9010	A4010	HVAC trunk T1 — install & hang, Fr 172	TT_Task	TK_Complete	2026-07-29 06:00	2026-08-04 16:00	2026-07-29 06:00	2026-08-04 15:00
+%R	1008	4410	9020	A4040	HVAC branch B2 — scullery, crew café (3-185-0-L)	TT_Task	TK_Active	2026-08-09 06:00	2026-08-18 16:00	2026-08-09 06:00	
+%R	1009	4410	9030	M0300	KEY EVENT — Delivery	TT_FinMile	TK_NotStart	2027-01-23 18:00	2027-01-23 18:00		
+%R	1010	4410	9010	A4021	HVAC trunk T1 — Fr 160 hangers	TT_Task	TK_NotStart	2026-13-40 06:00	2026-08-13 16:00		
+%R	1011	4410	9010	A4022	HVAC trunk T1 — Fr 148 hangers	TT_Task	TK_NotStart	2026-08-14 06:00
+%R	1020	4410	9000	A9001	Project management — PIA26	TT_LOE	TK_Active	2026-07-27 06:00	2027-01-23 18:00	2026-07-27 06:00	
+%R	1021	4410	9000	A9002	Quality assurance — PIA26	TT_LOE	TK_Active	2026-07-27 06:00	2027-01-23 18:00	2026-07-27 06:00	
+%R	1022	4410	9000	A9003	Safety watch — PIA26	TT_LOE	TK_Active	2026-07-27 06:00	2027-01-23 18:00	2026-07-27 06:00	
+%R	1030	4410	9010	Z6-SUM	Zone 6 summary	TT_WBS	TK_Active	2026-07-29 06:00	2026-12-18 16:00	2026-07-29 06:00	
+%R	2001	4411	9100	D1010	Dock blocks survey	TT_Task	TK_NotStart	2027-03-01 06:00	2027-03-05 16:00		
+%R	2002	4411	9100	D1020	Keel block set	TT_Task	TK_NotStart	2027-03-06 06:00	2027-03-12 16:00		
+%T	TASKPRED
+%F	task_pred_id	task_id	pred_task_id	proj_id	pred_proj_id	pred_type	lag_hr_cnt
+%R	5001	1002	1001	4410	4410	PR_FS	0
+%R	5002	1006	1005	4410	4410	PR_FS	0
+%R	5003	1008	1007	4410	4410	PR_SS	24
+%R	5004	1009	1003	4410	4410	PR_FS	0
+%R	5005	2001	1009	4411	4410	PR_FS	0
+%R	5006	2002	2001	4411	4411	PR_FS	0
+%T	TASKRSRC
+%F	taskrsrc_id	task_id	rsrc_id	target_qty	act_reg_qty
+%R	6001	1001	7001	680	512
+%R	6002	1002	7001	240	0
+%R	6003	1003	7002	410	12
+%R	6004	1004	7001	40	0
+%R	6005	1004	7004	1200	0
+%R	6006	1004	7005	16	0
+%R	6007	1005	7003	340	0
+%R	6008	1006	7003	160	0
+%R	6009	1007	7001	620	620
+%R	6010	1008	7001	400	180
+%R	6011	2001	7002	80	0
+%T	UDFVALUE
+%F	udf_type_id	fk_id	proj_id	udf_text
+%R	601	1001	4410	4-110-2-W
+%R	601	1002	4410	4-110-2-W
+%R	601	1003	4410	1-136-0-Q
+%R	601	1004	4410	1-136-0-Q
+%R	601	1005	4410	4-141-0-C
+%R	601	1006	4410	4-102-2-E
+%R	601	1007	4410	3-172-0-M
+%R	601	1010	4410	3-160-2-Q
+%R	602	1001	4410	WI-3318
+%R	602	1002	4410	WI-3402
+%R	602	1003	4410	WI-4471
+%R	602	1004	4410	WI-4471
+%R	602	1005	4410	WI-3905
+%R	602	1006	4410	WI-1905
+%R	602	1007	4410	WI-2201
+%R	602	1008	4410	WI-2201
+%R	603	1001	4410	COATING
+%R	603	1003	4410	HOT WORK
+%R	603	1007	4410	HVAC
+%T	TASKACTV
+%F	task_id	actv_code_type_id	actv_code_id	proj_id
+%R	1008	301	3101	4410
+%R	1005	302	3201	4410
+%E

@@ -98,7 +98,12 @@ pub fn parse_xer_in(
     clock: &YardClock,
     parsed_in: &str,
 ) -> Result<ParsedSchedule, String> {
-    let report = wadl_ingest::xer::ingest_xer_in(input, label, clock);
+    let report = wadl_ingest::xer::ingest_xer_with(
+        input,
+        label,
+        &wadl_ingest::field_map::FieldMap::default(),
+        clock,
+    );
     if !report.rejected.is_empty() {
         return Err(report
             .rejected

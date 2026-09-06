@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   deckStates,
+  health,
   listIssues,
-  listVessels,
   timeframe,
   whoami,
   type AsOf,
   type DeckStateRow,
+  type Identity,
   type Issue,
   type Timeframe,
-  type VesselSummary,
   type WhoAmI,
 } from "./api";
 import {
@@ -17,6 +17,7 @@ import {
   loadRole,
   MARKING_H,
   ModuleRail,
+  PERSONAS,
   saveRole,
   StatusStrip,
   TopBar,
@@ -28,7 +29,14 @@ import {
 import DailyOps from "./DailyOps";
 import { FirstRun } from "./FirstRun";
 import { JobCard } from "./JobCard";
-import { DEMO_IDENTITY, PICKABLE_HULLS } from "./demo";
+import {
+  devIdentityFor,
+  hullChoicesFrom,
+  IdentityContext,
+  identityFromHealth,
+  identityView,
+  type WhoState,
+} from "./identity";
 import DeckExplorer from "./DeckExplorer";
 import DistributedPackages from "./DistributedPackages";
 import FieldGuide from "./FieldGuide";
@@ -95,10 +103,9 @@ function parseHash(): { vessel?: string; module?: string; asOf?: number; space?:
 const BOOT = parseHash();
 
 export default function App() {
-  const [vessels, setVessels] = useState<VesselSummary[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
   const [issues, setIssues] = useState<Issue[]>([]);
-  const [selected, setSelected] = useState<string>(BOOT.vessel ?? PICKABLE_HULLS[0]?.id ?? "");
+  const [selected, setSelected] = useState<string>(BOOT.vessel ?? "");
   // A URL names a screen; otherwise the role's front door is where the day
   // opens. Nobody lands on a deck plate because that is where the code starts.
   const [module, setModule] = useState<ModuleDef>(
@@ -138,10 +145,16 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [wall, setWall] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The server-resolved identity — org, assignments, and which trust mode
-  // admitted the request. Fetched once; null renders as "identity unknown"
-  // rather than guessing from the headers the shell itself sent.
+  // Who the shell is, in two steps. `/health` says which trust boundary is
+  // armed — on the dev shim the shell asserts the chosen role's demo person,
+  // behind the proxy it asserts nothing — and `/api/whoami` then says who the
+  // server resolved: person, roles, capabilities, hulls, markings. Every
+  // hull list and every greyed door is built from that answer; a failed
+  // answer renders "unavailable", never an empty list that reads as
+  // "no hulls" or "every door open".
+  const [identity, setIdentity] = useState<Identity | null>(null);
   const [who, setWho] = useState<WhoAmI | null>(null);
+  const [whoState, setWhoState] = useState<WhoState>("loading");
   // The job card: one work order's whole story, opened from any board where
   // its code appears. App-owned so every surface opens the SAME card.
   const [jobCode, setJobCode] = useState<string | null>(null);
@@ -155,31 +168,75 @@ export default function App() {
   // re-render its times). Passed down with the frame.
   const [clockEpoch, setClockEpoch] = useState(0);
 
-  useEffect(() => {
-    listVessels(DEMO_IDENTITY)
-      .then(setVessels)
-      .catch((e: unknown) => setError(String(e)));
-  }, []);
-
+  // Boot: the trust mode first. Nothing is asserted until the server has
+  // said whether it is the shim that would trust it.
   useEffect(() => {
     let stale = false;
-    whoami(DEMO_IDENTITY)
-      .then((w) => {
-        if (!stale) setWho(w);
+    health()
+      .then((h) => {
+        if (!stale) setIdentity(identityFromHealth(h.identity_mode, INITIAL_ROLE.code));
       })
-      .catch(() => {
-        if (!stale) setWho(null);
+      .catch((e: unknown) => {
+        if (stale) return;
+        setError(String(e));
+        setWhoState("failed");
       });
     return () => {
       stale = true;
     };
   }, []);
 
+  // Then who the server says we are, re-read whenever what we assert changes
+  // (a role switch in DEMO MODE rebuilds the identity).
+  useEffect(() => {
+    if (!identity) return undefined;
+    let stale = false;
+    setWhoState("loading");
+    whoami(identity)
+      .then((w) => {
+        if (stale) return;
+        setWho(w);
+        setWhoState("ok");
+      })
+      .catch(() => {
+        if (stale) return;
+        setWho(null);
+        setWhoState("failed");
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity]);
+
+  // Behind the proxy the roles are the directory's, not a menu: the front
+  // door follows the first asserted role that has one.
+  useEffect(() => {
+    if (!who || identity?.mode !== "proxy") return;
+    if (who.roles.includes(persona.code)) return;
+    const asserted = PERSONAS.find((p) => who.roles.includes(p.code));
+    if (asserted) {
+      setPersona(asserted);
+      setAltitude(asserted.altitude);
+      setHorizon(asserted.horizon);
+    }
+  }, [who, identity, persona.code]);
+
+  // The vessel list is `whoami`'s: the hulls this scope is served.
+  const vessels = useMemo(() => who?.hulls ?? [], [who]);
+
+  // No hull in the URL: the first the server serves. Never a constant — a
+  // constant hull id is a guess about the deployment.
+  useEffect(() => {
+    if (selected || vessels.length === 0) return;
+    const first = vessels[0];
+    if (first) setSelected(first.vessel_id);
+  }, [selected, vessels]);
+
   // The hull's spaces, held at this level so the top bar can search and alert on
   // them. The Deck Explorer fetches its own — one extra read of a small endpoint
   // is a better trade than threading its state up through the chrome.
   useEffect(() => {
-    if (!selected) return undefined;
+    if (!selected || !identity) return undefined;
     // Guarded against reordering: with the time control playing, asOf changes
     // every tick — a slow response for one instant landing after a faster
     // later one would leave every consumer of `rows` at the wrong instant.
@@ -187,8 +244,8 @@ export default function App() {
     // Both reads succeed or the pair is marked failed: a bell that counted
     // issues over spaces it could not read would be half an answer wearing
     // the confidence of a whole one.
-    const rowsRead = deckStates(DEMO_IDENTITY, selected, asOf);
-    const issuesRead = listIssues(DEMO_IDENTITY, selected, asOf);
+    const rowsRead = deckStates(identity, selected, asOf);
+    const issuesRead = listIssues(identity, selected, asOf);
     // The register lands as soon as it is read — the lanes, the plates and
     // the search all place work by it — while the verdict's confidence waits
     // for the pair. On a carrier-sized hull the issues read is the slow one.
@@ -215,7 +272,7 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [selected, asOf, dataEpoch]);
+  }, [identity, selected, asOf, dataEpoch]);
 
   // The hull's time frame. Re-read on hull change and never cached across hulls:
   // each availability has its own bounds, and scrubbing one hull's window over
@@ -226,12 +283,12 @@ export default function App() {
   // Sources must reach every other screen in the same refresh.
   useEffect(() => {
     setJobCode(null);
-    if (!selected) {
+    if (!selected || !identity) {
       setFrame(null);
       return undefined;
     }
     let stale = false;
-    timeframe(DEMO_IDENTITY, selected)
+    timeframe(identity, selected)
       .then((f) => {
         if (stale) return;
         setYardClock(f.yard_clock);
@@ -247,22 +304,19 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [selected, dataEpoch]);
+  }, [identity, selected, dataEpoch]);
 
   // A module that needs a hull is not rendered until there is one. Rendering it
   // with an empty id fired six requests at `/api/vessels//…` on every load and
   // got six 400s back.
   const needsHull = module.id !== "portfolio" && module.id !== "placeholder";
 
-  // Every hull the shell can be pointed at, whether or not the API will serve it.
+  // Every hull the shell can be pointed at: what `whoami` served, plus — in
+  // DEMO MODE only — the two unassigned demo hulls, so the refusal stays
+  // one click away.
   const hulls: HullChoice[] = useMemo(
-    () =>
-      PICKABLE_HULLS.map((h) => ({
-        id: h.id,
-        label: h.label,
-        vessel: vessels.find((v) => v.vessel_id === h.id),
-      })),
-    [vessels],
+    () => hullChoicesFrom(who, identity?.mode ?? "proxy"),
+    [who, identity],
   );
 
   const current = useMemo(
@@ -271,12 +325,16 @@ export default function App() {
   );
   // The context names a hull this surface has no data for: say so, rather than
   // silently rendering the previous hull.
-  // Only "out of scope" once the vessel list has actually arrived — before that
-  // we do not know, and flashing a refusal during load would be a lie.
-  const outOfScope = vessels.length > 0 && Boolean(selected) && !current;
+  // Only "out of scope" once `whoami` has actually answered — before that we
+  // do not know, and flashing a refusal during load would be a lie.
+  const outOfScope = whoState === "ok" && Boolean(selected) && !current;
   const hullLabel = current
     ? `${current.hull_no} ${current.availability_code}`
-    : (PICKABLE_HULLS.find((h) => h.id === selected)?.label ?? "— no hull");
+    : (hulls.find((h) => h.id === selected)?.label.split(" · not assigned")[0] ?? "— no hull");
+
+  /** The identity every screen reads under, once the server has answered. */
+  const idn: Identity | null = whoState === "ok" ? identity : null;
+  const view = useMemo(() => identityView(identity, who, whoState), [identity, who, whoState]);
 
   const projecting = frame !== null && isProjection(asOf, frame.now, horizon);
 
@@ -321,6 +379,7 @@ export default function App() {
   };
 
   return (
+    <IdentityContext.Provider value={view}>
     <div
       style={{
         minHeight: "100vh",
@@ -331,7 +390,7 @@ export default function App() {
         padding: `${MARKING_H}px 0`,
       }}
     >
-      <ClassificationBanner edge="top" />
+      <ClassificationBanner edge="top" markings={who?.markings ?? null} />
 
       <TopBar
         onCollapse={() => setCollapsed(!collapsed)}
@@ -340,10 +399,16 @@ export default function App() {
         onSelectVessel={pickHull}
         hullLabel={hullLabel}
         who={who}
+        whoState={whoState}
+        identity={identity}
         persona={persona}
         onPersona={(p) => {
           setPersona(p);
           saveRole(p);
+          // In DEMO MODE the role is also who the server thinks you are:
+          // the identity is rebuilt and `whoami` re-read, so what you may
+          // do changes with the switch. Behind the proxy nothing is sent.
+          if (identity?.mode === "dev") setIdentity(devIdentityFor(p.code));
           // A role is a front door: it decides where the reader starts in all
           // three dimensions — the screen, the height the Deck Explorer opens
           // at, and the time resolution — so nobody navigates to their own
@@ -368,9 +433,9 @@ export default function App() {
       {/* Time applies to every module, so the control sits in the chrome rather
           than inside one screen. Rendered only once a hull is picked: its bounds
           are that hull's availability. */}
-      {jobCode && selected && (
+      {idn && jobCode && selected && (
         <JobCard
-          identity={DEMO_IDENTITY}
+          identity={idn}
           vesselId={selected}
           code={jobCode}
           asOf={asOf}
@@ -476,11 +541,24 @@ export default function App() {
             </p>
           )}
 
-          {!error && needsHull && !selected && (
-            <p style={{ color: C.dim, fontSize: 12.5 }}>Pick a hull to begin.</p>
+          {!error && whoState === "loading" && (
+            <p style={{ color: C.dim, fontSize: 12.5 }}>Resolving who you are — /health, then /api/whoami…</p>
           )}
 
-          {!error && selected && module.built && module.id !== "guide" && (
+          {!error && whoState === "failed" && (
+            <p style={{ color: C.danger, fontSize: 12.5 }}>
+              Identity unavailable — /api/whoami did not answer. No hull list and no
+              door is shown until it does: an empty list here would read as clearance.
+            </p>
+          )}
+
+          {!error && whoState === "ok" && needsHull && !selected && (
+            <p style={{ color: C.dim, fontSize: 12.5 }}>
+              {vessels.length === 0 ? "No hull is assigned to you — the server served none." : "Pick a hull to begin."}
+            </p>
+          )}
+
+          {idn && selected && module.built && module.id !== "guide" && (
             <FirstRun
               roleName={persona.name}
               opens={persona.opens}
@@ -489,7 +567,7 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "deckExplorer" && returnTo && (
+          {idn && selected && module.id === "deckExplorer" && returnTo && (
             <button
               onClick={() => {
                 const back = returnTo;
@@ -506,9 +584,9 @@ export default function App() {
               ← Back to {returnTo.label}
             </button>
           )}
-          {!error && selected && module.id === "deckExplorer" && (
+          {idn && selected && module.id === "deckExplorer" && (
             <DeckExplorer
-              identity={DEMO_IDENTITY}
+              identity={idn}
               vesselId={selected}
               hullLabel={hullLabel}
               altitude={altitude}
@@ -525,9 +603,9 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "workOrders" && (
+          {idn && selected && module.id === "workOrders" && (
             <WorkOrders
-              identity={DEMO_IDENTITY}
+              identity={idn}
               onOpenJob={setJobCode}
               vesselId={selected}
               hullLabel={hullLabel}
@@ -537,9 +615,9 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "dailyOps" && (
+          {idn && selected && module.id === "dailyOps" && (
             <DailyOps
-              identity={DEMO_IDENTITY}
+              identity={idn}
               onOpenJob={setJobCode}
               vesselId={selected}
               hullLabel={hullLabel}
@@ -551,9 +629,9 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "sequenceBoard" && (
+          {idn && selected && module.id === "sequenceBoard" && (
             <SequenceBoard
-              identity={DEMO_IDENTITY}
+              identity={idn}
               onOpenJob={setJobCode}
               vesselId={selected}
               hullLabel={hullLabel}
@@ -565,9 +643,9 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "leverage" && (
+          {idn && selected && module.id === "leverage" && (
             <LeverageBoard
-              identity={DEMO_IDENTITY}
+              identity={idn}
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
@@ -575,9 +653,9 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "distPackages" && (
+          {idn && selected && module.id === "distPackages" && (
             <DistributedPackages
-              identity={DEMO_IDENTITY}
+              identity={idn}
               now={frame?.now ?? null}
               vesselId={selected}
               hullLabel={hullLabel}
@@ -587,18 +665,18 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "ledger" && (
+          {idn && selected && module.id === "ledger" && (
             <LedgerBoard
-              identity={DEMO_IDENTITY}
+              identity={idn}
               vesselId={selected}
               hullLabel={hullLabel}
               onOpenSpace={jump}
             />
           )}
 
-          {!error && selected && module.id === "reports" && (
+          {idn && selected && module.id === "reports" && (
             <Reports
-              identity={DEMO_IDENTITY}
+              identity={idn}
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
@@ -611,9 +689,9 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "cascade" && (
+          {idn && selected && module.id === "cascade" && (
             <CascadeBoard
-              identity={DEMO_IDENTITY}
+              identity={idn}
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
@@ -631,9 +709,9 @@ export default function App() {
             />
           )}
 
-          {!error && selected && module.id === "sources" && (
+          {idn && selected && module.id === "sources" && (
             <SourcesBoard
-              identity={DEMO_IDENTITY}
+              identity={idn}
               vesselId={selected}
               hullLabel={hullLabel}
               asOf={asOf}
@@ -688,8 +766,9 @@ export default function App() {
         </main>
       </div>
 
-      <ClassificationBanner edge="bottom" />
+      <ClassificationBanner edge="bottom" markings={who?.markings ?? null} />
     </div>
+    </IdentityContext.Provider>
   );
 }
 

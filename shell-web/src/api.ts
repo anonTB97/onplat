@@ -1,9 +1,14 @@
-// Thin API client. Identity is a milestone-1 header shim (x-org-id +
-// x-assigned-vessels), matching wadl-api's auth extractor; a real session
-// replaces it later. No external hosts — same-origin only.
+// Thin API client. Identity is whatever `identity.ts` resolved from `/health`:
+// the dev shim's five headers in DEMO MODE, nothing behind the yard's proxy
+// (`docs/identity-proxy-contract.md`). Every write surfaces the server's
+// refusal as its sentence — a 403 is the yard's words about who may, never a
+// bare status. No external hosts — same-origin only.
 
 import type { YardClockInfo } from "./clock";
+import { identityHeaders, problemSentence, type Identity, type ProblemBody } from "./identity";
 import type { YardClock } from "./yardClock";
+
+export type { Identity } from "./identity";
 
 /** A half-open interval, `[start, end)`. Epoch milliseconds, as the API sends. */
 export interface Window {
@@ -54,16 +59,52 @@ function withAsOf(path: string, asOf: AsOf): string {
   return asOf === null ? path : `${path}${path.includes("?") ? "&" : "?"}as_of=${asOf}`;
 }
 
-export interface Identity {
-  org: string;
-  assignedVessels: string[];
+function headers(id: Identity): HeadersInit {
+  return identityHeaders(id);
 }
 
-function headers(id: Identity): HeadersInit {
-  return {
-    "x-org-id": id.org,
-    "x-assigned-vessels": id.assignedVessels.join(","),
-  };
+/**
+ * A refused write, as the server's sentence. `message` is the problem's
+ * `detail` — for a 403, "Foreman may not record a clearance — clear_hazard
+ * is held by Ship Super and Safety" — and `String(err)` is the same sentence,
+ * so no screen has to know this class to show the words.
+ */
+export class ApiRefusal extends Error {
+  readonly status: number;
+  /** The capability a 403 named, if it did. */
+  readonly capability: string | undefined;
+  /** The caller's role codes as the 403 saw them. */
+  readonly roles: string[];
+  constructor(status: number, message: string, problem: ProblemBody | null) {
+    super(message);
+    this.name = "ApiRefusal";
+    this.status = status;
+    this.capability = problem?.capability;
+    this.roles = problem?.roles ?? [];
+  }
+  override toString(): string {
+    return this.message;
+  }
+}
+
+/**
+ * A write's refusal as the sentence the server wrote, not the JSON it came
+ * in. A `problem+json` body's `detail` is the sentence (a 403's names the
+ * role and who holds the capability); a door that answered with reasons but
+ * no `detail` keeps its text; a bare status names the door.
+ */
+async function doorRefusal(res: Response, door: string): Promise<ApiRefusal> {
+  const text = await res.text().catch(() => "");
+  let problem: ProblemBody | null = null;
+  try {
+    problem = JSON.parse(text) as ProblemBody;
+  } catch {
+    problem = null;
+  }
+  const fallback = text && res.status !== 403
+    ? `${door} → ${res.status}: ${text.slice(0, 600)}`
+    : `${door} → ${res.status}`;
+  return new ApiRefusal(res.status, problemSentence(problem, fallback), problem);
 }
 
 export async function listVessels(id: Identity): Promise<VesselSummary[]> {
@@ -72,17 +113,32 @@ export async function listVessels(id: Identity): Promise<VesselSummary[]> {
   return (await res.json()) as VesselSummary[];
 }
 
+/** `/health`, read before anything is asserted: which trust boundary is armed. */
+export async function health(): Promise<{ identity_mode: string; status: string }> {
+  const res = await fetch("/health");
+  if (!res.ok) throw new Error(`GET /health → ${res.status}`);
+  return (await res.json()) as { identity_mode: string; status: string };
+}
+
 /**
  * The caller's identity as the SERVER resolved it — not an echo of the headers
  * the shell sent. `identity_mode` names the trust boundary that admitted the
- * request (`dev-headers` or `proxy-asserted`), which is how the shell can tell
- * the operator whether they are on the development shim or behind the
- * accredited proxy.
+ * request (`dev-headers` or `proxy-asserted`); `person` is who the ledger
+ * will name; `capabilities` is what the role matrix grants, and `hulls` is
+ * the list every picker is built from. The matrix itself rides along so a
+ * refusal can be worded here exactly as the server would word it.
  */
 export interface WhoAmI {
   org: string;
   assigned_vessels: string[];
   identity_mode: string;
+  person: { id: string; name: string; source: string };
+  roles: string[];
+  capabilities: string[];
+  hulls: VesselSummary[];
+  role_matrix: Record<string, string[]>;
+  warnings: string[];
+  markings: string[];
   decision_support_only: boolean;
 }
 
@@ -460,10 +516,7 @@ export async function raiseHazard(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const problem = (await res.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(problem?.detail ?? `raise hazard → ${res.status}`);
-  }
+  if (!res.ok) throw await doorRefusal(res, "raise hazard");
   return (await res.json()) as { hazard: LiveHazard; recorded: unknown };
 }
 
@@ -510,10 +563,7 @@ export async function clearHazard(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify(input),
   });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(body?.detail ?? `clearance → ${res.status}`);
-  }
+  if (!res.ok) throw await doorRefusal(res, "clearance");
   return (await res.json()) as { cleared: LiveHazard[] };
 }
 
@@ -639,7 +689,7 @@ export async function recordDecision(
       body: JSON.stringify(body),
     },
   );
-  if (!res.ok) throw new Error(`decision → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "decision");
   return (await res.json()) as AuditRecord;
 }
 
@@ -778,7 +828,7 @@ export async function acknowledgeIssue(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ key, note }),
   });
-  if (!res.ok) throw new Error(`acknowledge → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "acknowledge");
 }
 
 export async function listIssues(
@@ -1001,7 +1051,7 @@ export async function importSchedule(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, xer }),
   });
-  if (!res.ok) throw new Error(`import → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "import");
   return (await res.json()) as { label: string; activities: number; edges: number; delta: ScheduleDelta };
 }
 
@@ -1074,7 +1124,7 @@ export async function previewSchedule(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, xer }),
   });
-  if (!res.ok) throw new Error(`preview → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "preview");
   return (await res.json()) as ImportPreview;
 }
 
@@ -1084,7 +1134,7 @@ export async function revertSchedule(id: Identity, vesselId: string): Promise<vo
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "revert");
 }
 
 export async function listActivities(
@@ -1113,6 +1163,14 @@ export interface AuditEntry {
   occurred_at_ms: number;
   entry_hash: string;
   prev_hash: string | null;
+  /** The person who acted, as the identity hop asserted them; null on rows
+   *  written before people were asserted (chain format 1). */
+  actor_id: string | null;
+  /** That person's display name at the time — hashed with the id from
+   *  format 2 on, so a later rename does not rewrite history. */
+  actor_name: string | null;
+  /** 1 before people were asserted; 2 from the row that first named one. */
+  chain_version: number;
 }
 
 /** The ledger with its chain re-verified server-side on this very read. */
@@ -1230,7 +1288,7 @@ export async function importZoneChart(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, bounds }),
   });
-  if (!res.ok) throw new Error(`zone chart → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "zone chart");
   return (await res.json()) as { stored: boolean; label: string; zones: number; audit: ZoneAudit };
 }
 
@@ -1239,7 +1297,7 @@ export async function revertZoneChart(id: Identity, vesselId: string): Promise<v
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`zones revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "zones revert");
 }
 
 /* -------------------------------------------------------------- budget book */
@@ -1276,7 +1334,7 @@ export async function importBudgetBook(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, items }),
   });
-  if (!res.ok) throw new Error(`budget book → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "budget book");
   return (await res.json()) as never;
 }
 
@@ -1285,7 +1343,7 @@ export async function revertBudgetBook(id: Identity, vesselId: string): Promise<
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`budget book revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "budget book revert");
 }
 
 /** One line of the manning book: people a trade has, per half-shift. */
@@ -1331,7 +1389,7 @@ export async function importManningBook(
       body: JSON.stringify({ label, crews }),
     },
   );
-  if (!res.ok) throw new Error(`manning book → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "manning book");
   return (await res.json()) as never;
 }
 
@@ -1340,7 +1398,7 @@ export async function revertManningBook(id: Identity, vesselId: string): Promise
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`manning book revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "manning book revert");
 }
 
 /* ------------------------------------------------------------ the yard clock */
@@ -1397,7 +1455,7 @@ export async function revertYardClock(id: Identity, vesselId: string): Promise<v
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`yard clock revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "yard clock revert");
 }
 
 /** One surveyed space of a geometry register (docs/geometry-accuracy.md). */
@@ -1457,7 +1515,7 @@ export async function importGeometry(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, spaces, decks }),
   });
-  if (!res.ok) throw new Error(`geometry → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "geometry");
   return (await res.json()) as never;
 }
 
@@ -1466,16 +1524,10 @@ export async function revertGeometry(id: Identity, vesselId: string): Promise<vo
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`geometry revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "geometry revert");
 }
 
 /* ------------------------------------------ the ship, through the product */
-
-/** A door's refusal as the sentence the server wrote, not the JSON it came in. */
-async function doorRefusal(res: Response, door: string): Promise<Error> {
-  const problem = (await res.json().catch(() => null)) as { detail?: string } | null;
-  return new Error(problem?.detail ?? `${door} → ${res.status}`);
-}
 
 /** One deck of a compartment register, ordered downward by `ordinal`. */
 export interface RegisterDeck {
@@ -1551,7 +1603,7 @@ export async function revertRegister(id: Identity, vesselId: string): Promise<vo
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`register revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "register revert");
 }
 
 /** One coupling: a physical path a hazard can travel between two spaces. */
@@ -1623,7 +1675,7 @@ export async function revertCouplings(id: Identity, vesselId: string): Promise<v
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`couplings revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "couplings revert");
 }
 
 /** One line of a hazard log — the day's tag-out or permit list. */

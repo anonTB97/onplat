@@ -9,7 +9,8 @@
 // screenshot in the wrong hands or a decision taken against the wrong hull.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DeckStateRow, Issue, VesselSummary, WhoAmI } from "./api";
+import type { DeckStateRow, Identity, Issue, VesselSummary, WhoAmI } from "./api";
+import { deedsOf, ROLE_WORDS, type RoleCode, type WhoState } from "./identity";
 import { claim, fixSpace, KIND } from "./IssuesBoard";
 import type { Horizon } from "./TimeControl";
 import {
@@ -33,19 +34,16 @@ const LINE = C.line;
  * banner that scrolls off the top is a banner that is absent from the screenshot
  * somebody actually takes.
  *
- * Set MARKINGS to the deploying organisation's own handling caveats — these are
- * the prototype's, and they are a statement about this build: the deck plates are
- * a public US Navy document and every number in the demo is notional.
+ * The markings are the deployment's (`WADL_MARKINGS`), served on
+ * `/api/whoami` — never a string constant in the shell, which would wear
+ * the prototype's caveats on a yard's data. Until they arrive, or if the
+ * server does not answer, the band says so in amber: a screenshot with no
+ * markings received is a screenshot not to take.
  */
-const MARKINGS = [
-  "BigBear.ai Proprietary",
-  "Competition Sensitive",
-  "All Represented Information is Open Sourced",
-];
-
 export const MARKING_H = 18;
 
-export function ClassificationBanner({ edge }: { edge: "top" | "bottom" }) {
+export function ClassificationBanner({ edge, markings }: { edge: "top" | "bottom"; markings: string[] | null }) {
+  const missing = markings === null || markings.length === 0;
   return (
     <div
       style={{
@@ -55,9 +53,9 @@ export function ClassificationBanner({ edge }: { edge: "top" | "bottom" }) {
         [edge]: 0,
         height: MARKING_H,
         zIndex: 50,
-        background: "#191a1f",
-        borderTop: edge === "bottom" ? `1px solid ${LINE}` : undefined,
-        borderBottom: edge === "top" ? `1px solid ${LINE}` : undefined,
+        background: missing ? "rgba(245,158,11,0.16)" : "#191a1f",
+        borderTop: edge === "bottom" ? `1px solid ${missing ? "rgba(245,158,11,0.5)" : LINE}` : undefined,
+        borderBottom: edge === "top" ? `1px solid ${missing ? "rgba(245,158,11,0.5)" : LINE}` : undefined,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -65,17 +63,21 @@ export function ClassificationBanner({ edge }: { edge: "top" | "bottom" }) {
         fontSize: 9.5,
         letterSpacing: 0.8,
         textTransform: "uppercase",
-        color: "#8b93a3",
+        color: missing ? C.warn : "#8b93a3",
         fontWeight: 600,
         pointerEvents: "none",
       }}
     >
-      {MARKINGS.map((m, i) => (
-        <span key={m} style={{ display: "flex", gap: 8 }}>
-          {i > 0 && <span style={{ color: C.faint }}>|</span>}
-          {m}
-        </span>
-      ))}
+      {missing ? (
+        <span>HANDLING MARKINGS NOT RECEIVED — DO NOT SCREENSHOT</span>
+      ) : (
+        markings.map((m, i) => (
+          <span key={m} style={{ display: "flex", gap: 8 }}>
+            {i > 0 && <span style={{ color: C.faint }}>|</span>}
+            {m}
+          </span>
+        ))
+      )}
     </div>
   );
 }
@@ -94,6 +96,8 @@ export type Altitude = "ship" | "zone" | "compartment";
 
 export interface Persona {
   name: string;
+  /** The role code the proxy asserts and the dev shim sends — `roles.rs`. */
+  code: RoleCode;
   focus: string;
   /** The height the Deck Explorer opens at — hull, zone or compartment. */
   altitude: Altitude;
@@ -125,13 +129,13 @@ export interface Persona {
  * that role gets there.
  */
 export const PERSONAS: Persona[] = [
-  { name: "Foreman", focus: "My crew's shift", altitude: "compartment", horizon: "day", landing: "dailyOps", opens: "the shift board" },
-  { name: "Zone Manager", focus: "My zone's week", altitude: "zone", horizon: "week", landing: "deckExplorer", opens: "the zone board" },
-  { name: "Production Super", focus: "Every trade, this shift", altitude: "zone", horizon: "day", landing: "dailyOps", opens: "the shift board" },
-  { name: "Planner", focus: "The register and its conflicts", altitude: "compartment", horizon: "week", landing: "sequenceBoard", opens: "the activity register" },
-  { name: "Ship Super", focus: "The hull, worst first", altitude: "ship", horizon: "month", landing: "deckExplorer", opens: "the ship board" },
-  { name: "Safety", focus: "Field conditions and who clears them", altitude: "compartment", horizon: "day", landing: "leverage", opens: "conflicts and actions" },
-  { name: "Project Manager", focus: "Availability health", altitude: "ship", horizon: "availability", landing: "deckExplorer", opens: "the ship board" },
+  { name: "Foreman", code: "foreman", focus: "My crew's shift", altitude: "compartment", horizon: "day", landing: "dailyOps", opens: "the shift board" },
+  { name: "Zone Manager", code: "zone_manager", focus: "My zone's week", altitude: "zone", horizon: "week", landing: "deckExplorer", opens: "the zone board" },
+  { name: "Production Super", code: "production_super", focus: "Every trade, this shift", altitude: "zone", horizon: "day", landing: "dailyOps", opens: "the shift board" },
+  { name: "Planner", code: "planner", focus: "The register and its conflicts", altitude: "compartment", horizon: "week", landing: "sequenceBoard", opens: "the activity register" },
+  { name: "Ship Super", code: "ship_super", focus: "The hull, worst first", altitude: "ship", horizon: "month", landing: "deckExplorer", opens: "the ship board" },
+  { name: "Safety", code: "safety", focus: "Field conditions and who clears them", altitude: "compartment", horizon: "day", landing: "leverage", opens: "conflicts and actions" },
+  { name: "Project Manager", code: "project_manager", focus: "Availability health", altitude: "ship", horizon: "availability", landing: "deckExplorer", opens: "the ship board" },
 ];
 
 const ROLE_KEY = "wadl.role.v1";
@@ -266,6 +270,8 @@ export function TopBar({
   onOpenIssues,
   outOfScope,
   who,
+  whoState,
+  identity,
   verdictsOk,
   legendOpen,
   onLegendOpened,
@@ -286,6 +292,10 @@ export function TopBar({
   outOfScope: boolean;
   /** Server-resolved identity; null while loading or if the read failed. */
   who: WhoAmI | null;
+  /** Whether `who` is an answer, still coming, or a failure. */
+  whoState: WhoState;
+  /** What the shell asserts — the dev shim's demo person, or nothing. */
+  identity: Identity | null;
   /** Whether the verdict read behind `rows` and `issues` succeeded; null while loading. */
   verdictsOk: boolean | null;
   /** Opens the legend from outside the bar (the first-run cards use it). */
@@ -528,8 +538,12 @@ export function TopBar({
           <div style={menuPanel}>
             <div style={menuHead}>Portfolio — availabilities</div>
             {hulls.length === 0 && (
-              <p style={{ fontSize: 11.5, color: DIM, padding: "9px 12px", margin: 0 }}>
-                No hulls configured for this surface.
+              <p style={{ fontSize: 11.5, color: whoState === "ok" ? DIM : C.warn, padding: "9px 12px", margin: 0 }}>
+                {whoState === "ok"
+                  ? "No hull is assigned to you — the server served none."
+                  : whoState === "failed"
+                    ? "Hull list unavailable — /api/whoami did not answer."
+                    : "Reading your hulls from /api/whoami…"}
               </p>
             )}
             {hulls.map((h) => {
@@ -571,29 +585,39 @@ export function TopBar({
         )}
       </div>
 
-      {/* persona — sets the altitude the Deck Explorer opens at */}
+      {/* who you are — the person the server resolved, and the role. In DEMO
+          MODE the role is a switch that changes what you may do; behind the
+          proxy it is what the directory asserted, shown read-only. */}
       <div style={{ position: "relative" }}>
         <button
-          title="Your job sets where screens open — altitude and time horizon — nothing else changes" onClick={() => setMenu(menu === "persona" ? null : "persona")} style={clusterBtn} aria-expanded={menu === "persona"}>
+          title={
+            identity?.mode === "dev"
+              ? "DEMO MODE — the dev shim is not a login. Switching role changes who the ledger names and which doors you may open."
+              : "Who the yard's proxy says you are, and the roles it asserted. Your role sets where screens open."
+          }
+          onClick={() => setMenu(menu === "persona" ? null : "persona")}
+          style={clusterBtn}
+          aria-expanded={menu === "persona"}
+        >
           <span style={{ width: 26, height: 26, borderRadius: 13, background: C.raised, color: C.accent, fontSize: 10.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            {initialsOf(persona.name)}
+            {initialsOf(who?.person.name ?? persona.name)}
           </span>
           <span style={{ textAlign: "left" }}>
             <span style={{ display: "block", fontSize: 8.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM }}>
-              Role
+              {who ? "Signed in" : "Role"}
             </span>
             <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
-              {persona.name}
-              {/* The trust boundary, worn on the sleeve: development identity
-                  is amber and says so, so a screenshot can never pass a shim
+              {who ? `${who.person.name} · ${rolesLine(who, persona)}` : persona.name}
+              {/* The trust boundary, worn on the sleeve: the dev shim is amber
+                  and says DEMO MODE, so a screenshot can never pass a shim
                   session off as an authenticated one. Proxy mode shows nothing
                   here — authenticated is the unremarkable state. */}
               {who?.identity_mode === "dev-headers" && (
                 <span
-                  title="Development identity shim — headers trusted as given. In production this session would come through the CAC-authenticated proxy."
+                  title="DEMO MODE — dev identity shim: the server trusts the headers the shell sends. In production this session would come through the CAC-authenticated proxy and the shell would send nothing."
                   style={{ fontSize: 8, fontWeight: 700, letterSpacing: 0.6, padding: "1.5px 5px", borderRadius: 3, color: C.warn, background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.5)" }}
                 >
-                  DEV ID
+                  DEMO MODE · dev identity
                 </span>
               )}
             </span>
@@ -601,58 +625,71 @@ export function TopBar({
           <Chevron />
         </button>
         {menu === "persona" && (
-          <div style={menuPanel}>
-            {/* Who the SERVER says you are — the resolved scope every query
-                actually runs under, not an echo of what the shell sent. */}
+          <div style={{ ...menuPanel, minWidth: 360 }}>
+            {/* Who the SERVER says you are — the resolved person every ledger
+                row will name and the doors it grants, not an echo of what the
+                shell sent. */}
             <div style={{ padding: "9px 12px", borderBottom: `1px solid ${LINE}` }}>
               <div style={{ fontSize: 9.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM, marginBottom: 4 }}>
                 Signed in — as the server resolves it
               </div>
               {who ? (
                 <>
-                  <div style={{ fontSize: 11, color: C.bright }}>
-                    org <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>…{who.org.slice(-12)}</span>
+                  <div style={{ fontSize: 11.5, color: C.bright }}>
+                    <b>{who.person.name}</b>{" "}
+                    <span style={{ fontFamily: "monospace", fontSize: 10.5, color: DIM }}>({who.person.id})</span>
                     {" · "}
-                    {who.assigned_vessels.length} hull{who.assigned_vessels.length === 1 ? "" : "s"} assigned
+                    <span style={{ color: who.identity_mode === "dev-headers" ? C.warn : C.ok }}>{sourceLine(who)}</span>
                   </div>
-                  <div style={{ fontSize: 10.5, marginTop: 3, color: who.identity_mode === "dev-headers" ? C.warn : C.ok }}>
-                    {who.identity_mode === "dev-headers"
-                      ? "dev header shim — identity trusted as given (development only)"
-                      : `identity ${who.identity_mode.replace(/-/g, " ")} by the authenticated proxy`}
+                  <div style={{ fontSize: 11, color: C.bright, marginTop: 3 }}>
+                    roles: {who.roles.length > 0 ? who.roles.map(roleWord).join(", ") : <span style={{ color: C.warn }}>none asserted — every door open (demo)</span>}
                   </div>
+                  <div style={{ fontSize: 11, color: C.bright, marginTop: 3 }}>
+                    may: {deedsOf(who).length > 0 ? deedsOf(who).join(" · ") : <span style={{ color: DIM }}>read only</span>}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: DIM, marginTop: 3 }}>
+                    org <span style={{ fontFamily: "monospace" }}>…{who.org.slice(-12)}</span>
+                    {" · "}
+                    {who.hulls.length} hull{who.hulls.length === 1 ? "" : "s"} served
+                  </div>
+                  {who.warnings.map((w) => (
+                    <div key={w} style={{ fontSize: 10.5, color: C.warn, marginTop: 3 }}>⚠ {w}</div>
+                  ))}
                 </>
               ) : (
-                <div style={{ fontSize: 11, color: DIM }}>identity unavailable — /api/whoami did not answer</div>
+                <div style={{ fontSize: 11, color: whoState === "failed" ? C.danger : DIM }}>
+                  {whoState === "failed"
+                    ? "identity unavailable — /api/whoami did not answer"
+                    : "resolving — /api/whoami…"}
+                </div>
               )}
             </div>
-            <div style={menuHead}>Switch role — sets where your day opens</div>
-            {PERSONAS.map((p) => (
-              <button
-                key={p.name}
-                onClick={() => {
-                  onPersona(p);
-                  setMenu(null);
-                }}
-                style={{
-                  display: "flex", gap: 9, alignItems: "center", width: "100%", textAlign: "left",
-                  padding: "7px 12px",
-                  background: p.name === persona.name ? C.raised : "transparent",
-                  border: "none", borderBottom: `1px solid ${LINE}`,
-                  borderLeft: `3px solid ${p.name === persona.name ? C.accent : "transparent"}`,
-                  cursor: "pointer", font: "inherit", color: C.text,
-                }}
-              >
-                <span style={{ width: 24, height: 24, borderRadius: 12, background: C.well, color: p.name === persona.name ? C.accent : DIM, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
-                  {initialsOf(p.name)}
-                </span>
-                <span>
-                  <span style={{ display: "block", fontSize: 12, fontWeight: 600 }}>{p.name}</span>
-                  <span style={{ display: "block", fontSize: 10.5, color: DIM }}>
-                    {p.focus} · opens {p.opens}
-                  </span>
-                </span>
-              </button>
-            ))}
+            {identity?.mode === "proxy" ? (
+              <>
+                <div style={menuHead}>Your roles — as the yard's directory asserts them</div>
+                {PERSONAS.filter((p) => who?.roles.includes(p.code)).map((p) => (
+                  <RoleRow key={p.name} p={p} active={p.name === persona.name} onPick={() => { onPersona(p); setMenu(null); }} />
+                ))}
+                {who && who.roles.filter((r) => !PERSONAS.some((p) => p.code === r)).map((r) => (
+                  <div key={r} style={{ padding: "7px 12px", fontSize: 11.5, color: DIM, borderBottom: `1px solid ${LINE}` }}>
+                    {roleWord(r)} — no front door of its own
+                  </div>
+                ))}
+                <div style={{ padding: "7px 12px", fontSize: 10.5, color: DIM }}>
+                  roles come from the yard&apos;s directory — ask the proxy owner to change them
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={menuHead}>Switch role — who you act as, and where your day opens</div>
+                {PERSONAS.map((p) => (
+                  <RoleRow key={p.name} p={p} active={p.name === persona.name} onPick={() => { onPersona(p); setMenu(null); }} />
+                ))}
+                <div style={{ padding: "7px 12px", fontSize: 10.5, color: C.warn }}>
+                  demo mode — the shim is not a login; switching role changes what you may do and who the ledger names
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -735,6 +772,55 @@ export function TopBar({
         )}
       </div>
     </header>
+  );
+}
+
+/** A role's yard word, or the code itself for one this build does not know. */
+const roleWord = (code: string): string => (ROLE_WORDS as Record<string, string>)[code] ?? code;
+
+/** The roles on the button: the server's, or in demo mode the chosen one. */
+function rolesLine(who: WhoAmI, persona: Persona): string {
+  if (who.roles.length > 0) return who.roles.map(roleWord).join(", ");
+  return who.identity_mode === "dev-headers" ? `${persona.name} (no roles — every door)` : "no role";
+}
+
+/** Where the person came from, in one clause. */
+function sourceLine(who: WhoAmI): string {
+  switch (who.person.source) {
+    case "proxy":
+      return "asserted by the yard's proxy";
+    case "dev-shim":
+      return "DEMO MODE — a demo person the shell asserted; not a login";
+    case "dev-shim-anonymous":
+      return "DEMO MODE — no person asserted; the shim's anonymous default";
+    default:
+      return `source ${who.person.source}`;
+  }
+}
+
+function RoleRow({ p, active, onPick }: { p: Persona; active: boolean; onPick: () => void }) {
+  return (
+    <button
+      onClick={onPick}
+      style={{
+        display: "flex", gap: 9, alignItems: "center", width: "100%", textAlign: "left",
+        padding: "7px 12px",
+        background: active ? C.raised : "transparent",
+        border: "none", borderBottom: `1px solid ${LINE}`,
+        borderLeft: `3px solid ${active ? C.accent : "transparent"}`,
+        cursor: "pointer", font: "inherit", color: C.text,
+      }}
+    >
+      <span style={{ width: 24, height: 24, borderRadius: 12, background: C.well, color: active ? C.accent : DIM, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+        {initialsOf(p.name)}
+      </span>
+      <span>
+        <span style={{ display: "block", fontSize: 12, fontWeight: 600 }}>{p.name}</span>
+        <span style={{ display: "block", fontSize: 10.5, color: DIM }}>
+          {p.focus} · opens {p.opens}
+        </span>
+      </span>
+    </button>
   );
 }
 

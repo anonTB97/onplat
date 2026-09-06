@@ -43,6 +43,10 @@ export interface Timeframe {
    *  board renders in the yard's clock from its first paint. Optional only
    *  for an API older than the clock. */
   yard_clock?: YardClockInfo;
+  /** The run the served schedule of record came from — label, when, by
+   *  whom — for the breadcrumb. `null` for the generated register; absent
+   *  only on an API older than the run history. */
+  schedule_run?: ScheduleRunSummary | null;
 }
 
 /**
@@ -715,6 +719,9 @@ export interface Activity {
   /** The schedule's top-level WBS bucket — a zone hint at best, never a location. */
   wbs_area: string | null;
   trade: string;
+  /** The work type the field map read for this row — what the rule table
+   *  binds to. null when the map names no field for it. */
+  work_type?: string | null;
   planned: Window | null;
   budget_hours: number;
   earned_hours: number;
@@ -1021,6 +1028,8 @@ export interface ActivityRegister {
   as_of: number;
   /** null = the generated demo register; a label = the ingested export it came from. */
   schedule_source: string | null;
+  /** The run the served register came from; null for the generated one. */
+  schedule_run?: ScheduleRunSummary | null;
   reconciliation: {
     /** What the hours answer to: an ingested budget book's label, or null =
      *  the seeded work items. "Reconciles" is only as strong as this. */
@@ -1038,21 +1047,169 @@ export interface ActivityRegister {
   activities: Activity[];
 }
 
-/** Imports a P6 XER export as the hull's schedule of record. All-or-nothing:
- *  one rejected line refuses the whole file, with the reasons in the error. */
+/* ------------------------------------------------- the P6 field map and runs */
+
+/** The encodings the door reads — which branch the browser's decoder took. */
+export type XerEncoding = "utf-8" | "windows-1252";
+
+/**
+ * Where one slot of the field map reads from: a UDF by name or label, an
+ * activity code type, the first labor resource (trade only), or nothing.
+ */
+export type FieldSource =
+  | { source: "udf"; name: string }
+  | { source: "activity_code"; name: string }
+  | { source: "resource" }
+  | { source: "none" };
+
+/** The four slots, in card order. */
+export const FIELD_SLOTS = ["compartment", "work_item", "work_type", "trade"] as const;
+export type FieldSlot = (typeof FIELD_SLOTS)[number];
+
+/**
+ * The yard's export conventions as data — which XER field carries the
+ * compartment, the work item, the work type and the trade; which projects
+ * to serve; whether to read placards out of task names when the compartment
+ * field is silent. One per hull; the default is today's convention.
+ */
+export interface FieldMap {
+  compartment: FieldSource;
+  work_item: FieldSource;
+  work_type: FieldSource;
+  trade: FieldSource;
+  /** `proj_short_name`s to serve; empty = every project in the file. */
+  projects: string[];
+  placards_from_names: boolean;
+}
+
+/** Today's convention, exactly — what a hull with no map on file imports through. */
+export const DEFAULT_FIELD_MAP: FieldMap = {
+  compartment: { source: "udf", name: "compartment" },
+  work_item: { source: "udf", name: "wi_number" },
+  work_type: { source: "none" },
+  trade: { source: "resource" },
+  projects: [],
+  placards_from_names: true,
+};
+
+/**
+ * The survey of an export: which fields it carries and how full they are —
+ * no schedule content. The field-map selects are built from it.
+ */
+export interface FieldsSeen {
+  projects: { id: string; short_name: string; tasks: number }[];
+  udfs: { name: string; label: string | null; table: string | null; values: number }[];
+  activity_code_types: { name: string; values: number }[];
+  resource_types: Record<string, number>;
+  has_rsrc_type: boolean;
+  task_types: Record<string, number>;
+  sections: Record<string, number>;
+}
+
+/** Who a run was imported by, and through which door. */
+export interface ImportedBy {
+  org: string;
+  /** The person the identity hop asserted; null when the binary acted alone. */
+  person: string | null;
+  /** `door`, `boot` or `cli`. */
+  via: string;
+}
+
+/** What one import counted. */
+export interface RunCounts {
+  task_rows: number;
+  served: number;
+  work: number;
+  key_events: number;
+  quarantined: number;
+  excluded_loe: number;
+  excluded_wbs: number;
+  excluded_project: number;
+  edges: number;
+  edges_quarantined: number;
+  material_skipped: number;
+  equipment_skipped: number;
+}
+
+/** One row the import could not honestly accept, and why. */
+export interface QuarantinedRow {
+  /** 1-based line in the export. */
+  line: number;
+  /** `TASK`, `TASKPRED`. */
+  table: string;
+  code: string | null;
+  /** `unparseable_date`, `width`, `cross_project_logic`… */
+  class: string;
+  reason: string;
+}
+
+/** A schedule run as the list and the breadcrumb read it — everything but its rows. */
+export interface ScheduleRunSummary {
+  run_id: string;
+  /** 1, 2, 3… per hull. */
+  seq: number;
+  label: string;
+  imported_at_ms: number;
+  imported_by: ImportedBy;
+  encoding: string;
+  /** `browser`, `server` or `caller`. */
+  decoded_by: string;
+  projects_served: string[];
+  counts: RunCounts;
+  field_map: FieldMap;
+  /** Whether this run's rows are the ones served now. */
+  served: boolean;
+  schema_version: number;
+}
+
+/** What one run found and set aside — the detail behind the counts. */
+export interface ScheduleRunReport {
+  quarantine: QuarantinedRow[];
+  excluded_loe: string[];
+  excluded_wbs: string[];
+  excluded_project: [string, string][];
+  fields_seen: FieldsSeen;
+  findings: string[];
+}
+
+/** What a run as it would be recorded says about itself, on the preview. */
+export interface RunPreview {
+  encoding: string;
+  decoded_by: string;
+  projects_served: string[];
+  counts: RunCounts;
+  field_map: FieldMap;
+  /** `inline` (the body carried one), `document` (the stored map), `default`. */
+  field_map_source: "inline" | "document" | "default";
+}
+
+/** What the door needs beside the text: which decoder branch the browser
+ *  took, and the map to read the file through instead of the stored one. */
+export interface ScheduleDoorOptions {
+  encoding: XerEncoding;
+  fieldMap?: FieldMap;
+}
+
+/**
+ * Imports a P6 XER export as the hull's schedule of record. Rows the parser
+ * cannot honestly accept are quarantined with their reasons and served in
+ * the response; the file is refused whole (422, the reasons in the error)
+ * only when no activity survives. Every commit is a run.
+ */
 export async function importSchedule(
   id: Identity,
   vesselId: string,
   label: string,
   xer: string,
-): Promise<{ label: string; activities: number; edges: number; delta: ScheduleDelta }> {
+  opts: ScheduleDoorOptions,
+): Promise<ImportPreview & { run_id: string; seq: number }> {
   const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record`, {
     method: "POST",
     headers: { ...headers(id), "content-type": "application/json" },
-    body: JSON.stringify({ label, xer }),
+    body: JSON.stringify({ label, xer, encoding: opts.encoding, field_map: opts.fieldMap }),
   });
   if (!res.ok) throw await doorRefusal(res, "import");
-  return (await res.json()) as { label: string; activities: number; edges: number; delta: ScheduleDelta };
+  return (await res.json()) as ImportPreview & { run_id: string; seq: number };
 }
 
 /**
@@ -1110,6 +1267,20 @@ export interface ImportPreview {
   reconciliation: { mismatches: ReconciliationMismatch[]; unmapped_budget_hours: number };
   mapping: MappingReport;
   delta: ScheduleDelta;
+  /** The run as it would be recorded. */
+  run: RunPreview;
+  /** The survey of the file's own fields — the selects are built from it. */
+  fields_seen: FieldsSeen;
+  /** Every row set aside, with its line and reason. */
+  quarantine: QuarantinedRow[];
+  /** Rows excluded and listed, not lost: level-of-effort, WBS summaries,
+   *  and `[code, project]` for projects the map does not serve. */
+  exclusions: { loe: string[]; wbs: string[]; project: [string, string][] };
+  /** The map's and the clock's findings — none of which refused. */
+  findings: string[];
+  /** The clock the export's wall clock was read in. */
+  clock?: { zone: string; label: string | null };
+  wall_clock_findings?: string[];
 }
 
 /** Dry-runs an import: everything the import would say, nothing it would do. */
@@ -1118,23 +1289,121 @@ export async function previewSchedule(
   vesselId: string,
   label: string,
   xer: string,
+  opts: ScheduleDoorOptions,
 ): Promise<ImportPreview> {
   const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record?dry_run=true`, {
     method: "POST",
     headers: { ...headers(id), "content-type": "application/json" },
-    body: JSON.stringify({ label, xer }),
+    body: JSON.stringify({ label, xer, encoding: opts.encoding, field_map: opts.fieldMap }),
   });
   if (!res.ok) throw await doorRefusal(res, "preview");
   return (await res.json()) as ImportPreview;
 }
 
-/** Reverts to the generated register, discarding the ingested schedule. */
+/** Reverts to the generated register, discarding the ingested schedule.
+ *  The runs stay: history is history, and any of them can be served again. */
 export async function revertSchedule(id: Identity, vesselId: string): Promise<void> {
   const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record/revert`, {
     method: "POST",
     headers: headers(id),
   });
   if (!res.ok) throw await doorRefusal(res, "revert");
+}
+
+/** The field map in effect, where it came from, and the served run's survey. */
+export interface FieldMapInfo {
+  source: "document" | "default";
+  label: string | null;
+  map: FieldMap;
+  /** null when no run is served (the generated register). */
+  fields_seen: FieldsSeen | null;
+}
+
+export async function getFieldMap(id: Identity, vesselId: string): Promise<FieldMapInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/field-map`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`field map → ${res.status}`);
+  return (await res.json()) as FieldMapInfo;
+}
+
+/** Stores the hull's field map — refused whole with every reason (422);
+ *  findings against the served run's survey warn without refusing. */
+export async function importFieldMap(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  map: FieldMap,
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; map: FieldMap; findings: string[] }> {
+  const res = await fetch(`/api/vessels/${vesselId}/field-map${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, map }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "field map");
+  return (await res.json()) as never;
+}
+
+/** Back to today's convention — the next import reads the default names. */
+export async function revertFieldMap(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/field-map/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "field map revert");
+}
+
+/** Every import, newest first, with the served one pointed to. */
+export async function listScheduleRuns(
+  id: Identity,
+  vesselId: string,
+): Promise<{ served: string | null; runs: ScheduleRunSummary[] }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-runs`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`schedule runs → ${res.status}`);
+  return (await res.json()) as never;
+}
+
+/** One run's summary and report, without its rows. */
+export async function scheduleRunDetail(
+  id: Identity,
+  vesselId: string,
+  runId: string,
+): Promise<{ summary: ScheduleRunSummary; report: ScheduleRunReport }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-runs/detail?run=${encodeURIComponent(runId)}`, {
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "run detail");
+  return (await res.json()) as never;
+}
+
+/** What `run` changes against `against` (the served run when omitted), in
+ *  the door's delta shape, under today's hazards. */
+export async function diffScheduleRuns(
+  id: Identity,
+  vesselId: string,
+  runId: string,
+  against?: string,
+): Promise<{ run: ScheduleRunSummary; against: ScheduleRunSummary; delta: ScheduleDelta }> {
+  const q = `run=${encodeURIComponent(runId)}${against ? `&against=${encodeURIComponent(against)}` : ""}`;
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-runs/diff?${q}`, { headers: headers(id) });
+  if (!res.ok) throw await doorRefusal(res, "run diff");
+  return (await res.json()) as never;
+}
+
+/** A prior run's rows become the served schedule of record — a revert to an
+ *  earlier import, ledgered `SCHEDULE_REPLACED` naming both runs. 409 when
+ *  the store no longer holds the run's rows. */
+export async function serveScheduleRun(
+  id: Identity,
+  vesselId: string,
+  runId: string,
+): Promise<{ served: ScheduleRunSummary; delta: ScheduleDelta }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-runs/serve`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ run_id: runId }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "serve run");
+  return (await res.json()) as never;
 }
 
 export async function listActivities(

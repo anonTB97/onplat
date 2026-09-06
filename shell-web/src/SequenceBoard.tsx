@@ -30,6 +30,7 @@ import {
   type DeckStateRow,
   type Identity,
   type ImportPreview,
+  type XerEncoding,
   type ReconciliationMismatch,
   type ScheduleEdge,
   type Window,
@@ -44,7 +45,7 @@ import { ZoneLanes } from "./ZoneLanes";
 import { ProposalsPanel } from "./Proposals";
 import { tdStyle, thStyle, chipStyle, commitBtnStyle, C, errText, mh, msgColor } from "./theme";
 import { DiscardButton } from "./DiscardButton";
-import { deltaSummary } from "./ingest";
+import { decodeXerFile, deltaSummary, quarantineSummary } from "./ingest";
 
 type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
 
@@ -176,7 +177,7 @@ export default function SequenceBoard({
   const [proposals, setProposals] = useState<ProposalList | null>(null);
   const [proposalNonce, setProposalNonce] = useState(0);
   const [importMsg, setImportMsg] = useState<string | null>(null);
-  const [pending, setPending] = useState<{ label: string; xer: string; preview: ImportPreview } | null>(null);
+  const [pending, setPending] = useState<{ label: string; xer: string; encoding: XerEncoding; preview: ImportPreview } | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [source, setSource] = useState<string | null>(null);
   const [mismatches, setMismatches] = useState<ReconciliationMismatch[]>([]);
@@ -521,7 +522,7 @@ export default function SequenceBoard({
           {importMsg && (
             <span style={{ fontSize: 11, color: msgColor(importMsg) }}>{importMsg}</span>
           )}
-          <label style={{ ...chip(false), display: "inline-flex", alignItems: "center", gap: 5 }} title="Import a Primavera P6 XER export as this hull's schedule of record. All-or-nothing: one rejected line refuses the file.">
+          <label style={{ ...chip(false), display: "inline-flex", alignItems: "center", gap: 5 }} title="Import a Primavera P6 XER export as this hull's schedule of record, read through the hull's field map. Rows the parser cannot honestly accept are quarantined with their reasons, not silently dropped; the full door — field map, quarantine, run history — is on Data Sources.">
             ⭱ Import XER
             <input
               type="file"
@@ -532,10 +533,10 @@ export default function SequenceBoard({
                 e.target.value = "";
                 if (!file) return;
                 setImportMsg(`⏳ reading ${file.name}…`);
-                void file.text().then((xer) =>
-                  previewSchedule(identity, vesselId, file.name, xer)
+                void decodeXerFile(file).then(({ xer, encoding }) =>
+                  previewSchedule(identity, vesselId, file.name, xer, { encoding })
                     .then((r) => {
-                      setPending({ label: file.name, xer, preview: r });
+                      setPending({ label: file.name, xer, encoding, preview: r });
                       setImportMsg(null);
                     })
                     .catch((err: unknown) => setImportMsg(errText(err))),
@@ -615,8 +616,14 @@ export default function SequenceBoard({
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <b style={{ fontSize: 12.5 }}>{pending.label}</b>
               <span style={{ fontSize: 11.5, color: C.dim }}>
-                {p.activities} activities · {p.edges} edges · {m.milestones} key events — previewed,
-                nothing stored.{" "}
+                {p.activities} activities · {p.edges} edges · {m.milestones} key events · {p.run.encoding}
+                {" "}— previewed, nothing stored.{" "}
+                <span
+                  style={{ color: p.quarantine.length > 0 ? C.danger : C.ok }}
+                  title="Rows the parser could not honestly accept are set aside with their line and reason, and the rest is served. The full list, the field map and the run history are on the Data Sources card."
+                >
+                  {quarantineSummary(p.quarantine)}.
+                </span>{" "}
                 <span style={{ color: p.delta.newly_refused.count > 0 ? C.warn : C.ok }}>
                   {deltaSummary(p.delta)}.
                 </span>{" "}
@@ -633,9 +640,9 @@ export default function SequenceBoard({
                     setPending(null);
                     if (!staged) return;
                     setImportMsg(`⏳ ingesting ${staged.label}…`);
-                    void importSchedule(identity, vesselId, staged.label, staged.xer)
+                    void importSchedule(identity, vesselId, staged.label, staged.xer, { encoding: staged.encoding })
                       .then((r) => {
-                        setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);
+                        setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges · run #${r.seq} · ${quarantineSummary(r.quarantine)}`);
                         setReloadNonce((n) => n + 1);
                       })
                       .catch((err: unknown) => setImportMsg(errText(err)));
@@ -965,7 +972,17 @@ export default function SequenceBoard({
                     </span>
                   )}
                 </td>
-                <td style={{ ...td, color: C.dim }}>{a.trade}</td>
+                <td style={{ ...td, color: C.dim }}>
+                  {a.trade}
+                  {a.work_type && (
+                    <span
+                      style={{ marginLeft: 6, fontSize: 9.5, color: C.subtle, fontFamily: "monospace" }}
+                      title="The work type the field map read for this row — from the schedule of record, what the rule table binds to."
+                    >
+                      {a.work_type}
+                    </span>
+                  )}
+                </td>
                 <td style={{ ...td, fontFamily: "monospace", fontSize: 10.5, whiteSpace: "nowrap", color: C.dim }}>
                   {fmtWindow(a.planned)}
                   {a.in_window && !a.is_milestone && (

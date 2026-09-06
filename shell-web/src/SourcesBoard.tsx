@@ -57,6 +57,7 @@ import { DiscardButton } from "./DiscardButton";
 import { holdersOf, ROLE_WORDS, useIdentity, type Capability } from "./identity";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
 import {
+  decodeXerFile,
   fmtBytes,
   parseBudgetCsv,
   parseCouplingCsv,
@@ -135,10 +136,9 @@ export default function SourcesBoard({
   const stageSchedule = (file: File) => {
     setMsg(null);
     setBusy(`reading ${file.name} (${fmtBytes(file.size)})…`);
-    file
-      .text()
-      .then((xer) =>
-        previewSchedule(identity, vesselId, file.name, xer).then((p) => {
+    decodeXerFile(file)
+      .then(({ xer, encoding }) =>
+        previewSchedule(identity, vesselId, file.name, xer, { encoding }).then((p) => {
         setBusy(null);
         const m = p.mapping;
         setStaged({
@@ -156,7 +156,7 @@ export default function SourcesBoard({
               : " · hours reconcile") +
             ` — ${deltaSummary(p.delta)}`,
           commit: () =>
-            importSchedule(identity, vesselId, file.name, xer).then(
+            importSchedule(identity, vesselId, file.name, xer, { encoding }).then(
               (r) => `✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`,
             ),
         });

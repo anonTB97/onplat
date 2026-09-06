@@ -5,7 +5,34 @@
 // the refusals are pinned here alongside the shapes.
 
 import { describe, expect, it } from "vitest";
-import { hazardKindFromLog, parseCouplingCsv, parseHazardLogCsv, parseRegisterCsv } from "./ingest";
+import { deltaSummary, hazardKindFromLog, parseCouplingCsv, parseHazardLogCsv, parseRegisterCsv } from "./ingest";
+
+describe("deltaSummary", () => {
+  const base = {
+    baseline: "CVN73-PIA26-full.xer",
+    added: 0, removed: 0, retimed: 0, rehoused: 0,
+    newly_refused: { count: 0, examples: [] },
+    newly_clear: { count: 0 },
+  };
+
+  it("reads a re-import — and a run-to-run diff, which is the same shape — in one sentence", () => {
+    expect(deltaSummary(base)).toBe("vs CVN73-PIA26-full.xer: no rows changed — no work moved into a refusal");
+    expect(
+      deltaSummary({
+        ...base,
+        added: 8, removed: 5697, retimed: 0, rehoused: 1,
+        newly_refused: { count: 4, examples: [{ code: "A2010", space: "1-136-0-Q", rule: "R04" }] },
+        newly_clear: { count: 2 },
+      }),
+    ).toBe("vs CVN73-PIA26-full.xer: +8 new · −5697 gone · 1 moved space — ⚠ 4 newly NOT executable (A2010 in 1-136-0-Q by R04, …) · 2 refusals cleared");
+  });
+
+  it("closes the loop on proposals when the board has any open", () => {
+    expect(deltaSummary({ ...base, retimed: 2, proposals: { open: 2, reflected: ["A51350"], still_open: ["A51360"] } })).toBe(
+      "vs CVN73-PIA26-full.xer: 2 retimed — no work moved into a refusal · proposals: 1 of 2 reflected (A51350), 1 still open",
+    );
+  });
+});
 
 describe("parseRegisterCsv", () => {
   it("carries decks and spaces, with the optional frame and side when present", () => {

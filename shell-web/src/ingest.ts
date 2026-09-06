@@ -13,13 +13,23 @@ import {
   type BudgetItem,
   type CouplingRow,
   type DeckBand,
+  type FieldMap,
+  type FieldSlot,
+  type FieldSource,
+  type FieldsSeen,
   type HazardLogRow,
+  type ImportedBy,
   type ManningCrew,
+  type QuarantinedRow,
   type RegisterDeck,
   type RegisterSpace,
+  type ScheduleRunSummary,
   type SpaceGeometry,
+  type XerEncoding,
   type ZoneBound,
 } from "./api";
+import { fmtDayTime } from "./clock";
+import { DEMO_PEOPLE } from "./demo";
 
 /**
  * CSV: `zone,lo_frame,hi_frame[,top_deck,bottom_deck]` — the yard's zone
@@ -222,6 +232,204 @@ export function parseHazardLogCsv(text: string): HazardLogRow[] {
     rows.push({ compartment, kind, label, ...(since !== null ? { since_ms: since } : {}) });
   }
   return rows;
+}
+
+/* ------------------------------------------------------- the XER's bytes */
+
+/**
+ * An export's bytes as text, and which decoder branch was taken. Valid
+ * UTF-8 passes through (a leading byte-order mark stripped); anything else
+ * is Windows-1252 — P6's default on Windows, and an encoding every byte
+ * sequence is valid in. The server has the same two branches
+ * (`wadl_ingest::encoding::decode_xer`) for the boot loader and the CLI;
+ * the door's body carries `encoding` so the run says which decoder read the
+ * file, and one shared literal (bytes `93 94 E9 96 80` → `“ ” é – €`) pins
+ * both. `TextDecoder("windows-1252")` is built into every browser and Node.
+ */
+export function decodeXerBytes(bytes: ArrayBuffer | Uint8Array): { xer: string; encoding: XerEncoding } {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  try {
+    const xer = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(view);
+    return { xer, encoding: "utf-8" };
+  } catch {
+    return { xer: new TextDecoder("windows-1252").decode(view), encoding: "windows-1252" };
+  }
+}
+
+/** The picked file, decoded in the browser, with the branch reported. */
+export async function decodeXerFile(file: File): Promise<{ xer: string; encoding: XerEncoding }> {
+  return decodeXerBytes(await file.arrayBuffer());
+}
+
+/* ---------------------------------------------------------- the field map */
+
+/** One source in yard words: `UDF "COMPT"`, `activity code "LOC"`, `resource`, `not carried`. */
+export function fieldSourceWords(s: FieldSource): string {
+  switch (s.source) {
+    case "udf": return `UDF "${s.name}"`;
+    case "activity_code": return `activity code "${s.name}"`;
+    case "resource": return "resource";
+    case "none": return "not carried";
+  }
+}
+
+/** The map in one line — the same words the server's `FieldMap::summary` uses. */
+export function fieldMapSummary(m: FieldMap): string {
+  return (
+    `compartment ← ${fieldSourceWords(m.compartment)} · work item ← ${fieldSourceWords(m.work_item)}` +
+    ` · work type ← ${fieldSourceWords(m.work_type)} · trade ← ${fieldSourceWords(m.trade)}` +
+    ` · projects: ${m.projects.length === 0 ? "all" : m.projects.join(", ")}` +
+    ` · placards ${m.placards_from_names ? "read" : "not read"} from task names`
+  );
+}
+
+/** One option of a field-map select. `key` round-trips through `sourceFromChoice`. */
+export interface FieldChoice {
+  key: string;
+  label: string;
+  source: FieldSource;
+}
+
+/** The select's key for a source, so a stored map lands on its own option. */
+export function choiceKey(s: FieldSource): string {
+  switch (s.source) {
+    case "udf": return `udf:${s.name}`;
+    case "activity_code": return `code:${s.name}`;
+    case "resource": return "resource";
+    case "none": return "none";
+  }
+}
+
+/**
+ * What a slot's select offers, built from the file's own survey: `(none)`,
+ * every UDF with its row count, every activity code type with its count,
+ * and — for the trade only — the resource. A map naming a field the file
+ * does not carry keeps its option, marked, so the stored choice is never
+ * silently dropped.
+ */
+export function fieldChoices(seen: FieldsSeen | null, slot: FieldSlot, current?: FieldSource): FieldChoice[] {
+  const out: FieldChoice[] = [{ key: "none", label: "(none)", source: { source: "none" } }];
+  if (slot === "trade") out.push({ key: "resource", label: "Resource (RSRC, first labor assignment)", source: { source: "resource" } });
+  for (const u of seen?.udfs ?? []) {
+    out.push({
+      key: `udf:${u.name}`,
+      label: `UDF: ${u.name}${u.label && u.label !== u.name ? ` — ${u.label}` : ""} (${u.values.toLocaleString()} row${u.values === 1 ? "" : "s"})`,
+      source: { source: "udf", name: u.name },
+    });
+  }
+  for (const t of seen?.activity_code_types ?? []) {
+    out.push({
+      key: `code:${t.name}`,
+      label: `Activity code: ${t.name} (${t.values.toLocaleString()})`,
+      source: { source: "activity_code", name: t.name },
+    });
+  }
+  if (current && !out.some((c) => c.key === choiceKey(current))) {
+    out.push({
+      key: choiceKey(current),
+      label: `${fieldSourceWords(current)} — not in this file`,
+      source: current,
+    });
+  }
+  return out;
+}
+
+/* ------------------------------------------------------- the quarantine */
+
+/** The class names in yard words. */
+const CLASS_WORDS: Record<string, string> = {
+  unparseable_date: "unparseable date",
+  backwards_window: "backwards window",
+  unknown_status: "unknown status",
+  no_code: "no code",
+  no_name: "no name",
+  width: "width",
+  cross_project_logic: "cross-project logic",
+  unknown_task_in_logic: "unknown task in logic",
+  structure: "structure",
+};
+
+export const classWords = (c: string): string => CLASS_WORDS[c] ?? c.replace(/_/g, " ");
+
+/** `5 quarantined — 3 cross-project logic, 2 unparseable dates`; `nothing quarantined`. */
+export function quarantineSummary(rows: QuarantinedRow[]): string {
+  if (rows.length === 0) return "nothing quarantined";
+  const byClass = new Map<string, number>();
+  for (const r of rows) byClass.set(r.class, (byClass.get(r.class) ?? 0) + 1);
+  const parts = [...byClass.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([c, n]) => `${n} ${classWords(c)}${n > 1 && c === "unparseable_date" ? "s" : ""}`);
+  return `${rows.length} quarantined — ${parts.join(", ")}`;
+}
+
+/** The rows grouped by class, largest group first, file order inside. */
+export function quarantineGroups(rows: QuarantinedRow[]): { class: string; rows: QuarantinedRow[] }[] {
+  const groups = new Map<string, QuarantinedRow[]>();
+  for (const r of rows) {
+    const g = groups.get(r.class);
+    if (g) g.push(r);
+    else groups.set(r.class, [r]);
+  }
+  return [...groups.entries()]
+    .map(([c, rs]) => ({ class: c, rows: rs }))
+    .sort((a, b) => b.rows.length - a.rows.length || a.class.localeCompare(b.class));
+}
+
+/** The fold: the first `limit` rows unless the reader asked for all, and how
+ *  many stay behind the foot — so the count is always said. */
+export function foldRows<T>(rows: T[], showAll: boolean, limit = 25): { shown: T[]; hidden: number } {
+  if (showAll || rows.length <= limit) return { shown: rows, hidden: 0 };
+  return { shown: rows.slice(0, limit), hidden: rows.length - limit };
+}
+
+/** `excluded: 3 level-of-effort (A9001, A9002, A9003) · 1 WBS summary (Z6-SUM) · 2 in project CVN73-DSRA27`; `nothing excluded`. */
+export function exclusionSummary(x: { loe: string[]; wbs: string[]; project: [string, string][] }): string {
+  const list = (codes: string[]) => codes.slice(0, 6).join(", ") + (codes.length > 6 ? ", …" : "");
+  const byProject = new Map<string, number>();
+  for (const [, p] of x.project) byProject.set(p, (byProject.get(p) ?? 0) + 1);
+  const parts = [
+    x.loe.length > 0 ? `${x.loe.length} level-of-effort (${list(x.loe)})` : null,
+    x.wbs.length > 0 ? `${x.wbs.length} WBS summar${x.wbs.length === 1 ? "y" : "ies"} (${list(x.wbs)})` : null,
+    ...[...byProject.entries()].map(([p, n]) => `${n} in project ${p}`),
+  ].filter(Boolean);
+  return parts.length === 0 ? "nothing excluded" : `excluded: ${parts.join(" · ")}`;
+}
+
+/* ------------------------------------------------------------- the runs */
+
+/** A person as the shell can name them: a demo id becomes its demo name;
+ *  anything else is the asserted id itself. */
+export function personWords(id: string): string {
+  const demo = Object.values(DEMO_PEOPLE).find((p) => p.id === id);
+  return demo ? demo.name : id;
+}
+
+/** `Demo Planner (Y-1001)` · `org …0001 (no person on record)` — plus the
+ *  door when it was not the door: `· at boot`, `· by CLI`. */
+export function importedByWords(by: ImportedBy): string {
+  const who = by.person ? personWords(by.person) : `org …${by.org.slice(-4)} (no person on record)`;
+  const via = by.via === "boot" ? " · at boot" : by.via === "cli" ? " · by CLI" : "";
+  return `${who}${via}`;
+}
+
+/** The breadcrumb's words for the served run: what is being read, when it
+ *  came in, and whose export it is. Never blank — the caller passes null for
+ *  the generated register and "unavailable" for a failed read. */
+export function scheduleCrumb(run: ScheduleRunSummary | null | "unavailable"): { text: string; tone: "ok" | "dim" | "warn" } {
+  if (run === "unavailable") return { text: "schedule source unavailable", tone: "warn" };
+  if (run === null) return { text: "reading the generated register", tone: "dim" };
+  return {
+    text: `reading ${run.label} · imported ${fmtDayTime(run.imported_at_ms)} by ${importedByWords(run.imported_by)}`,
+    tone: run.imported_by.person ? "ok" : "warn",
+  };
+}
+
+/** One run's line in the history: `#3 · CVN73-PIA26-full.xer · 09/04 06:12 · by … · 5,706 rows served · 0 quarantined · utf-8`. */
+export function runLine(r: ScheduleRunSummary): string {
+  return (
+    `#${r.seq} · ${r.label} · ${fmtDayTime(r.imported_at_ms)} · by ${importedByWords(r.imported_by)}` +
+    ` · ${r.counts.served.toLocaleString()} rows served · ${r.counts.quarantined.toLocaleString()} quarantined · ${r.encoding}`
+  );
 }
 
 /** A file size a human reads: a real P6 export is megabytes, and the reader

@@ -217,8 +217,14 @@ async fn an_ingested_export_replaces_the_register_without_changing_the_screen() 
 
     // Now the sample export as the schedule of record.
     let (store, world) = InMemoryStore::demo_at(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
-    wadl_api::schedule::load_xer(&store, world.cvn73, "CVN73-PIA26.xer", SAMPLE_XER)
-        .expect("the sample ingests whole");
+    wadl_api::schedule::load_xer(
+        &store,
+        world.cvn73,
+        "CVN73-PIA26.xer",
+        SAMPLE_XER.as_bytes(),
+        DEMO_ANCHOR_MS,
+    )
+    .expect("the sample ingests whole");
     let clock = TestClock::new(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
     let state = wadl_api::AppState::new(Arc::new(store), Arc::new(clock));
     let app = wadl_api::build_router(state);

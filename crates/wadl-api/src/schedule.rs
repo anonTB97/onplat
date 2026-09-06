@@ -7,29 +7,79 @@
 //! scope; the store must not depend on the ingest crate, and the ingest crate
 //! must not know how rows are served.
 //!
-//! The XER's wall clock is read in the hull's yard clock: P6 writes
-//! server-local time with no zone, and the clock document is the yard's
-//! statement of which zone that is. The schedule of record remembers the
-//! clock it was parsed in, so a later clock change can say "re-import".
+//! Three things every path through here shares, door and boot alike:
+//!
+//! * **The file is read through the hull's field map and yard clock.** P6
+//!   writes server-local time with no zone, and the clock document is the
+//!   yard's statement of which zone that is; the map is the yard's statement
+//!   of which fields carry the compartment, the work item, the work type and
+//!   the trade. The record remembers both.
+//! * **Rows are quarantined, not files.** The parser sets aside the rows it
+//!   cannot honestly accept, with line and reason; the file is refused whole
+//!   only when it is not a schedule export at all ([`whole_file_refusal`]).
+//! * **Every load is a run.** [`build_run`] turns a parse into the
+//!   [`ScheduleRun`] both stores record: the map, the encoding, who, when,
+//!   the quarantine, the exclusions, the survey, and the document served.
+//!
+//! Activity ids are stable from `(hull, task_code)` ([`stable_activity_id`]),
+//! so a re-baseline keeps every row's id and an open inspector survives it.
+
+use sha2::{Digest, Sha256};
 
 use wadl_domain::civil::YardClock;
 use wadl_domain::ids::{ActivityId, VesselId};
+use wadl_ingest::field_map::FieldMap;
 use wadl_ingest::xer::{XerIngestReport, XerStatus};
 use wadl_ingest::Reliability as IngestReliability;
-use wadl_store::memory::{InMemoryStore, ScheduleOfRecord};
-use wadl_store::model::{ActivityStatus, ActivitySummary, Reliability, ScheduleEdgeSummary};
+use wadl_store::memory::{FieldMapDoc, InMemoryStore, ScheduleOfRecord};
+use wadl_store::model::{
+    ActivityStatus, ActivitySummary, ImportedBy, QuarantinedRow, Reliability, RunCounts,
+    ScheduleEdgeSummary, ScheduleRun, ScheduleRunReport, ScheduleRunSummary,
+};
+use wadl_store::{Actor, ActorSource, TenantScope};
 
-/// Converts an ingest report into a schedule of record ready to serve.
+/// A stable activity id from the hull and the scheduler's own code:
+/// `sha256("wadl:activity:" ‖ hull uuid ‖ ":" ‖ task_code)`, first sixteen
+/// bytes, version nibble `8` (a name-derived id that is not RFC 4122's v3 or
+/// v5), RFC 4122 variant. Same hull and same code give the same id across
+/// runs; a different hull gives a different id; and the `0xB…` range the
+/// demo generators avoid is no longer needed, because a hash of a real code
+/// cannot collide with a generated `0xAC…`/`0xAD…`/`0xAE…` id except by a
+/// 2⁻¹²² accident.
 #[must_use]
-pub fn schedule_of_record(label: &str, report: &XerIngestReport) -> ScheduleOfRecord {
+pub fn stable_activity_id(vessel: VesselId, code: &str) -> ActivityId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"wadl:activity:");
+    hasher.update(vessel.as_uuid().as_bytes());
+    hasher.update(b":");
+    hasher.update(code.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    for (dst, src) in bytes.iter_mut().zip(digest.iter()) {
+        *dst = *src;
+    }
+    if let Some(b) = bytes.get_mut(6) {
+        *b = (*b & 0x0F) | 0x80;
+    }
+    if let Some(b) = bytes.get_mut(8) {
+        *b = (*b & 0x3F) | 0x80;
+    }
+    ActivityId::from_uuid(uuid::Uuid::from_bytes(bytes))
+}
+
+/// Converts an ingest report into a schedule of record ready to serve, with
+/// ids stable from the hull and each row's code.
+#[must_use]
+pub fn schedule_of_record(
+    vessel: VesselId,
+    label: &str,
+    report: &XerIngestReport,
+) -> ScheduleOfRecord {
     let activities = report
         .activities
         .iter()
-        .enumerate()
-        .map(|(i, a)| ActivitySummary {
-            // Deterministic ids in a range the demo generators never mint, so
-            // an ingested row cannot collide with a generated one mid-swap.
-            activity_id: ActivityId::from_uuid(uuid::Uuid::from_u128(0xB000_0000_u128 + i as u128)),
+        .map(|a| ActivitySummary {
+            activity_id: stable_activity_id(vessel, &a.code),
             code: a.code.clone(),
             name: a.name.clone(),
             work_order_code: a.work_order_code.clone(),
@@ -53,6 +103,7 @@ pub fn schedule_of_record(label: &str, report: &XerIngestReport) -> ScheduleOfRe
             },
             is_milestone: a.is_milestone,
             source_ref: a.source_ref.clone(),
+            work_type: a.work_type.clone(),
         })
         .collect();
     let edges = report
@@ -73,61 +124,251 @@ pub fn schedule_of_record(label: &str, report: &XerIngestReport) -> ScheduleOfRe
     }
 }
 
-/// A parsed export: the schedule, and what its wall clock did not say plainly.
+/// A parsed export: the schedule, and everything the parse said about the
+/// file around it — the quarantine, the exclusions, the survey, the findings.
 #[derive(Debug, Clone)]
 pub struct ParsedSchedule {
     /// The schedule of record, stamped with the clock it was parsed in.
     pub sor: ScheduleOfRecord,
-    /// Wall times the clock skipped or repeated, each with its line, what
-    /// it was read as and the instant — findings, not rejections.
-    pub wall_clock_findings: Vec<String>,
+    /// The ingest report the schedule was made from.
+    pub report: XerIngestReport,
 }
 
-/// Parses an XER export in the hull's clock, without storing it. `parsed_in`
-/// is the clock's name as the record will carry it
+/// How many reasons a whole-file refusal quotes before "…".
+const REFUSAL_EXAMPLES: usize = 3;
+
+/// Why a file is refused whole, when it is — the only three cases: the
+/// parser would not hold it in memory (`MAX_CELLS`), it carries no `TASK`
+/// section (not a schedule export), or not one activity survives the
+/// quarantine and the map's exclusions. Everything else is served around
+/// its quarantine. The text is the door's 422 detail and the boot's
+/// refusal line.
+#[must_use]
+pub fn whole_file_refusal(report: &XerIngestReport) -> Option<String> {
+    if let Some(r) = report
+        .rejected
+        .iter()
+        .find(|r| r.class == "structure" && r.reason.contains("cells"))
+    {
+        return Some(format!("XER rejected: {}", r.reason));
+    }
+    if !report.has_task_section() {
+        return Some(
+            "XER rejected: the file carries no activities — no TASK section was found. \
+             Is this a Primavera P6 XER export?"
+                .to_owned(),
+        );
+    }
+    if !report.activities.is_empty() {
+        return None;
+    }
+    if report.task_rows == 0 {
+        return Some(
+            "XER rejected: the file carries no activities — its TASK section is empty. \
+             Is this a Primavera P6 XER export?"
+                .to_owned(),
+        );
+    }
+    let mut reasons: Vec<String> = report
+        .rejected
+        .iter()
+        .filter(|r| r.table == "TASK")
+        .take(REFUSAL_EXAMPLES)
+        .map(|r| format!("line {}: {}", r.row, r.reason))
+        .collect();
+    if !report.excluded_project.is_empty() {
+        reasons.push(format!(
+            "{} rows in projects the field map does not serve",
+            report.excluded_project.len()
+        ));
+    }
+    reasons.extend(
+        report
+            .findings
+            .iter()
+            .filter(|f| f.starts_with("projects:"))
+            .take(1)
+            .cloned(),
+    );
+    let excluded = report.excluded_loe.len() + report.excluded_wbs.len();
+    if excluded > 0 {
+        reasons.push(format!(
+            "{excluded} level-of-effort or WBS-summary rows excluded from work"
+        ));
+    }
+    let more = if report.rejected.len() > REFUSAL_EXAMPLES {
+        " …"
+    } else {
+        ""
+    };
+    Some(format!(
+        "XER rejected: every one of {} TASK rows was quarantined or excluded — {}{more}",
+        report.task_rows,
+        reasons.join("; ")
+    ))
+}
+
+/// Parses an XER export through a field map in the hull's clock, without
+/// storing it. `parsed_in` is the clock's name as the record will carry it
 /// (`America/New_York · CVN73-clock.csv`).
 ///
 /// # Errors
-/// The rejection lines from the ingest, when any row could not be honestly
-/// accepted — a schedule of record is all-or-nothing, because a partially
-/// loaded schedule presenting as the whole one is exactly the lie the grading
-/// exists to prevent.
+/// See [`whole_file_refusal`] — the three cases in which a file is refused
+/// whole rather than served around its quarantine.
 pub fn parse_xer_in(
+    vessel: VesselId,
     label: &str,
     input: &str,
+    map: &FieldMap,
     clock: &YardClock,
     parsed_in: &str,
 ) -> Result<ParsedSchedule, String> {
-    let report = wadl_ingest::xer::ingest_xer_with(
-        input,
-        label,
-        &wadl_ingest::field_map::FieldMap::default(),
-        clock,
-    );
-    if !report.rejected.is_empty() {
-        return Err(report
-            .rejected
-            .iter()
-            .map(|r| format!("line {}: {}", r.row, r.reason))
-            .collect::<Vec<_>>()
-            .join("; "));
+    let report = wadl_ingest::xer::ingest_xer_with(input, label, map, clock);
+    if let Some(refusal) = whole_file_refusal(&report) {
+        return Err(refusal);
     }
-    let mut sor = schedule_of_record(label, &report);
+    let mut sor = schedule_of_record(vessel, label, &report);
     sor.parsed_in = Some(parsed_in.to_owned());
-    Ok(ParsedSchedule {
-        sor,
-        wall_clock_findings: report.wall_clock_findings,
-    })
+    Ok(ParsedSchedule { sor, report })
 }
 
-/// Parses an XER export with its wall clock read as UTC, without storing it.
-/// The served path is [`parse_xer_in`] with the hull's clock; this stays for
-/// a caller with no clock in hand.
+/// What one import counted, from the report.
+#[must_use]
+pub fn run_counts(report: &XerIngestReport) -> RunCounts {
+    let key_events = report.activities.iter().filter(|a| a.is_milestone).count();
+    RunCounts {
+        task_rows: report.task_rows,
+        served: report.activities.len(),
+        work: report.activities.len() - key_events,
+        key_events,
+        quarantined: report.rejected.len(),
+        excluded_loe: report.excluded_loe.len(),
+        excluded_wbs: report.excluded_wbs.len(),
+        excluded_project: report.excluded_project.len(),
+        edges: report.relationships.len(),
+        edges_quarantined: report
+            .rejected
+            .iter()
+            .filter(|r| r.table == "TASKPRED")
+            .count(),
+        material_skipped: report.material_skipped,
+        equipment_skipped: report.equipment_skipped,
+    }
+}
+
+/// The quarantine as the run stores it.
+#[must_use]
+pub fn quarantine(report: &XerIngestReport) -> Vec<QuarantinedRow> {
+    report
+        .rejected
+        .iter()
+        .map(|r| QuarantinedRow {
+            line: r.row,
+            table: r.table.clone(),
+            code: r.code.clone(),
+            class: r.class.clone(),
+            reason: r.reason.clone(),
+        })
+        .collect()
+}
+
+/// The run's report: the quarantine, the exclusions, the survey, and the
+/// findings — the map's first, then the clock's.
+#[must_use]
+pub fn run_report(report: &XerIngestReport) -> ScheduleRunReport {
+    ScheduleRunReport {
+        quarantine: quarantine(report),
+        excluded_loe: report.excluded_loe.clone(),
+        excluded_wbs: report.excluded_wbs.clone(),
+        excluded_project: report.excluded_project.clone(),
+        fields_seen: serde_json::to_value(&report.fields_seen).unwrap_or_default(),
+        findings: report
+            .findings
+            .iter()
+            .chain(report.wall_clock_findings.iter())
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Who a run is imported by, from the scope it is committed under: the
+/// tenant, the person the identity hop asserted (none when the binary acted
+/// on its own account), and the door.
+#[must_use]
+pub fn imported_by(scope: &TenantScope, via: &str) -> ImportedBy {
+    ImportedBy {
+        org: scope.org,
+        person: person_of(&scope.actor),
+        via: via.to_owned(),
+    }
+}
+
+/// The person on a run: the actor's id unless the actor is the process.
+fn person_of(actor: &Actor) -> Option<String> {
+    (actor.source != ActorSource::System).then(|| actor.id.clone())
+}
+
+/// What a run is built from besides the parse.
+#[derive(Debug, Clone)]
+pub struct RunInputs<'a> {
+    /// The source label, e.g. `CVN73-PIA26-full.xer`.
+    pub label: &'a str,
+    /// `utf-8` or `windows-1252`.
+    pub encoding: &'a str,
+    /// `browser`, `server`, or `caller` for a text body that carried no hint.
+    pub decoded_by: &'a str,
+    /// Who, and through which door.
+    pub imported_by: ImportedBy,
+    /// When, epoch millis — the caller's clock.
+    pub imported_at_ms: i64,
+    /// The map the file was read through.
+    pub field_map: &'a FieldMap,
+}
+
+/// The [`ScheduleRun`] a parse becomes: what both stores record and serve
+/// in one write. `run_id` and `seq` are the store's to assign; `served`
+/// is set on every read.
+#[must_use]
+pub fn build_run(parsed: &ParsedSchedule, inputs: &RunInputs<'_>) -> ScheduleRun {
+    ScheduleRun {
+        summary: ScheduleRunSummary {
+            run_id: uuid::Uuid::nil(),
+            seq: 0,
+            label: inputs.label.to_owned(),
+            imported_at_ms: inputs.imported_at_ms,
+            imported_by: inputs.imported_by.clone(),
+            encoding: inputs.encoding.to_owned(),
+            decoded_by: inputs.decoded_by.to_owned(),
+            projects_served: parsed.report.projects_served.clone(),
+            counts: run_counts(&parsed.report),
+            field_map: serde_json::to_value(inputs.field_map).unwrap_or_default(),
+            served: false,
+            schema_version: wadl_store::DOCUMENT_SCHEMA_VERSION,
+        },
+        report: run_report(&parsed.report),
+        doc: Some(parsed.sor.clone()),
+    }
+}
+
+/// The map a stored document puts in effect, or the default when there is
+/// none — and which of the two it was, for the response and the banner.
 ///
 /// # Errors
-/// See [`parse_xer_in`].
-pub fn parse_xer(label: &str, input: &str) -> Result<ScheduleOfRecord, String> {
-    parse_xer_in(label, input, &YardClock::utc(), "UTC · default_utc").map(|p| p.sor)
+/// A stored document that does not parse as a map (it was validated on the
+/// way in, so this is a store that was written around the door).
+pub fn field_map_in_effect(
+    doc: Option<&FieldMapDoc>,
+) -> Result<(FieldMap, Option<String>), String> {
+    match doc {
+        Some(doc) => {
+            let map: FieldMap = serde_json::from_value(doc.map.clone())
+                .map_err(|e| format!("field map {}: {e}", doc.label))?;
+            map.validate()
+                .map_err(|problems| format!("field map {}: {}", doc.label, problems.join("; ")))?;
+            Ok((map, Some(doc.label.clone())))
+        }
+        None => Ok((FieldMap::default(), None)),
+    }
 }
 
 /// What the boot loader loaded, for the banner.
@@ -137,30 +378,125 @@ pub struct LoadedSchedule {
     pub activities: usize,
     /// The clock the export's wall times were read in.
     pub parsed_in: String,
-    /// See [`ParsedSchedule::wall_clock_findings`].
+    /// Wall times the clock skipped or repeated, each with its line, what
+    /// it was read as and the instant — findings, not rejections.
     pub wall_clock_findings: Vec<String>,
+    /// `utf-8`, `utf-8 (byte-order mark stripped)` or `windows-1252`.
+    pub encoding: String,
+    /// The field map's label, or `None` for the default.
+    pub field_map_label: Option<String>,
+    /// The rows set aside, one line each: `line 44 · A4021 · unparseable …`.
+    pub quarantine: Vec<String>,
+    /// The map's findings against the file.
+    pub findings: Vec<String>,
+    /// The run as recorded — `seq` 1 on a fresh boot.
+    pub run: ScheduleRunSummary,
 }
 
-/// Parses an XER export in the hull's clock — the store's, read unscoped,
-/// which is why the clock document loads before the export — and loads it
-/// as the hull's schedule of record.
+/// Reads an export's bytes in the hull's clock and through its field map —
+/// both the store's, read unscoped, which is why the documents load before
+/// the export — and records the load as a boot run at `now_ms`, served. A
+/// quarantine at boot is reported and the rest is served, as the door would.
 ///
 /// # Errors
-/// See [`parse_xer_in`] — all-or-nothing, for the same reason.
+/// See [`whole_file_refusal`]; a hull the store does not carry; a stored
+/// field map that will not parse.
 pub fn load_xer(
     store: &InMemoryStore,
     vessel: VesselId,
     label: &str,
-    input: &str,
+    bytes: &[u8],
+    now_ms: i64,
 ) -> Result<LoadedSchedule, String> {
+    let org = store
+        .org_of(vessel)
+        .ok_or_else(|| format!("hull {vessel} is not one this store carries"))?;
+    let (text, encoding) = wadl_ingest::encoding::decode_xer(bytes);
+    let (map, field_map_label) = field_map_in_effect(store.field_map_of(vessel).as_ref())?;
     let effect = crate::yard_clock::ClockInEffect::from_doc(store.yard_clock_doc_of(vessel));
     let parsed_in = effect.parsed_in();
-    let parsed = parse_xer_in(label, input, &effect.clock, &parsed_in)?;
-    let activities = parsed.sor.activities.len();
-    store.load_schedule_of_record(vessel, parsed.sor);
+    let parsed = parse_xer_in(vessel, label, &text, &map, &effect.clock, &parsed_in)?;
+    let run = build_run(
+        &parsed,
+        &RunInputs {
+            label,
+            encoding: encoding.label(),
+            decoded_by: wadl_ingest::encoding::DECODED_BY_SERVER,
+            imported_by: ImportedBy {
+                org,
+                person: None,
+                via: "boot".to_owned(),
+            },
+            imported_at_ms: now_ms,
+            field_map: &map,
+        },
+    );
+    let summary = store
+        .load_schedule_run(vessel, run)
+        .map_err(|e| e.to_string())?;
     Ok(LoadedSchedule {
-        activities,
+        activities: parsed.sor.activities.len(),
         parsed_in,
-        wall_clock_findings: parsed.wall_clock_findings,
+        wall_clock_findings: parsed.report.wall_clock_findings.clone(),
+        encoding: encoding.describe().to_owned(),
+        field_map_label,
+        quarantine: parsed
+            .report
+            .rejected
+            .iter()
+            .map(|r| {
+                format!(
+                    "line {} · {} · {}",
+                    r.row,
+                    r.code.as_deref().unwrap_or(r.table.as_str()),
+                    r.reason
+                )
+            })
+            .collect(),
+        findings: parsed.report.findings.clone(),
+        run: summary,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_ids_are_stable_per_hull_and_code_and_carry_the_version_nibble() {
+        let hull = VesselId::from_uuid(uuid::Uuid::from_u128(0x73));
+        let other = VesselId::from_uuid(uuid::Uuid::from_u128(0x71));
+        let a = stable_activity_id(hull, "A4021");
+        assert_eq!(a, stable_activity_id(hull, "A4021"));
+        assert_ne!(a, stable_activity_id(hull, "A4022"));
+        assert_ne!(a, stable_activity_id(other, "A4021"));
+        let uuid = a.as_uuid();
+        assert_eq!(uuid.get_version_num(), 8);
+        assert_eq!(uuid.get_variant(), uuid::Variant::RFC4122);
+    }
+
+    #[test]
+    fn a_file_with_no_task_section_or_no_survivor_is_refused_whole() {
+        let alien = wadl_ingest::xer::ingest_xer("meeting notes\n- coffee\n", "notes.xer");
+        let reason = whole_file_refusal(&alien).unwrap();
+        assert!(
+            reason.contains("no activities") && reason.contains("P6 XER"),
+            "{reason}"
+        );
+
+        let bad = "%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\tstatus_code\ttask_type\tearly_start_date\tearly_end_date\n\
+%R\t1\tA1\tBad\tTK_NotStart\tTT_Task\t2026-13-40 06:00\t2026-08-02 16:00\n\
+%R\t2\tA2\tBackwards\tTK_NotStart\tTT_Task\t2026-08-02 16:00\t2026-08-01 06:00\n%E\n";
+        let report = wadl_ingest::xer::ingest_xer(bad, "bad.xer");
+        let reason = whole_file_refusal(&report).unwrap();
+        assert!(
+            reason.starts_with("XER rejected: every one of 2 TASK rows was quarantined"),
+            "{reason}"
+        );
+        assert!(reason.contains("line 3:"), "{reason}");
+
+        let fine = "%T\tTASK\n%F\ttask_id\ttask_code\ttask_name\tstatus_code\ttask_type\n\
+%R\t1\tA1\tFine\tTK_NotStart\tTT_Task\n%E\n";
+        assert!(whole_file_refusal(&wadl_ingest::xer::ingest_xer(fine, "x")).is_none());
+    }
 }

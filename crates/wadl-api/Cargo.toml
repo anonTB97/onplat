@@ -29,6 +29,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }
+# Stable activity ids: sha256 over (hull, task_code) so a re-baseline keeps
+# every row's id. Already in the workspace for the ledger chain — no new crate.
+sha2.workspace = true
 
 [features]
 # The production serving path: compiles the PostgreSQL store into the binary.

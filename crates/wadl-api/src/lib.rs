@@ -187,6 +187,30 @@ pub fn build_router(state: AppState) -> Router {
             post(schedule_door::revert_schedule),
         )
         .route(
+            "/api/vessels/:id/field-map",
+            get(schedule_door::get_field_map).post(schedule_door::import_field_map),
+        )
+        .route(
+            "/api/vessels/:id/field-map/revert",
+            post(schedule_door::revert_field_map),
+        )
+        .route(
+            "/api/vessels/:id/schedule-runs",
+            get(schedule_door::list_schedule_runs),
+        )
+        .route(
+            "/api/vessels/:id/schedule-runs/detail",
+            get(schedule_door::schedule_run_detail),
+        )
+        .route(
+            "/api/vessels/:id/schedule-runs/diff",
+            get(schedule_door::diff_schedule_runs),
+        )
+        .route(
+            "/api/vessels/:id/schedule-runs/serve",
+            post(schedule_door::serve_schedule_run),
+        )
+        .route(
             "/api/vessels/:id/yard-clock",
             get(yard_clock::get_yard_clock).post(yard_clock::import_yard_clock),
         )

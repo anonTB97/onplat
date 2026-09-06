@@ -959,6 +959,7 @@ impl InMemoryStore {
                     status: status_of(*budget, *earned),
                     is_milestone: false,
                     source_ref: w.source_ref.to_owned(),
+                    work_type: None,
                 });
             }
         }
@@ -1016,6 +1017,7 @@ impl InMemoryStore {
                     status: status_of(*budget, *earned),
                     is_milestone: false,
                     source_ref: format!("{} footprint", sp.package_code),
+                    work_type: None,
                 });
             }
         }
@@ -1049,6 +1051,7 @@ impl InMemoryStore {
                 status: ActivityStatus::NotStarted,
                 is_milestone: true,
                 source_ref: "availability key events".to_owned(),
+                work_type: None,
             });
         }
     }
@@ -1904,6 +1907,14 @@ impl InMemoryStore {
             old.doc = None;
         }
         Ok(summary)
+    }
+
+    /// The tenant a hull belongs to, unscoped — for boot wiring, where the
+    /// XER loader records which org a boot run was imported under before
+    /// any request scope exists. `None` for a hull the seed does not carry.
+    #[must_use]
+    pub fn org_of(&self, vessel: VesselId) -> Option<OrgId> {
+        self.vessels.iter().find(|v| v.id == vessel).map(|v| v.org)
     }
 
     /// The hull's field map document, unscoped — for boot wiring, where

@@ -156,6 +156,25 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         true,
         None,
     ),
+    ("GET", "/api/vessels/:id/field-map", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/field-map",
+        true,
+        Some(
+            r#"{"label":"leak test","map":{"compartment":{"source":"udf","name":"x"},"work_item":{"source":"none"},"work_type":{"source":"none"},"trade":{"source":"resource"},"projects":[],"placards_from_names":true}}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/field-map/revert", true, None),
+    ("GET", "/api/vessels/:id/schedule-runs", true, None),
+    ("GET", "/api/vessels/:id/schedule-runs/detail", true, None),
+    ("GET", "/api/vessels/:id/schedule-runs/diff", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/schedule-runs/serve",
+        true,
+        Some(r#"{"run_id":"00000000-0000-0000-0000-000000000000"}"#),
+    ),
     ("GET", "/api/vessels/:id/yard-clock", true, None),
     (
         "POST",

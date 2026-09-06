@@ -438,9 +438,14 @@ async fn the_reference_hull_boots_with_its_clock() {
     // The export that boots after it is read in it: the sample's A1010
     // actual start, 2026-08-01 06:30 wall, is 10:30Z.
     let sample = include_str!("../../../reference/p6-sample/CVN73-PIA26.xer");
-    let schedule =
-        wadl_api::schedule::load_xer(store.as_ref(), world.cvn73, "CVN73-PIA26.xer", sample)
-            .expect("the sample ingests whole");
+    let schedule = wadl_api::schedule::load_xer(
+        store.as_ref(),
+        world.cvn73,
+        "CVN73-PIA26.xer",
+        sample.as_bytes(),
+        DEMO_ANCHOR_MS,
+    )
+    .expect("the sample ingests whole");
     assert_eq!(schedule.parsed_in, "America/New_York · CVN73-clock.csv");
     assert_eq!(schedule.activities, 18);
 

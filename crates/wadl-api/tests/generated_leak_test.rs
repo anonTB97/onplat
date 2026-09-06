@@ -814,6 +814,132 @@ async fn leak_post_api_vessels_id_schedule_of_record_revert() {
 }
 
 #[tokio::test]
+async fn leak_get_api_vessels_id_field_map() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/field-map"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("GET", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant GET /api/vessels/:id/field-map must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_field_map() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/field-map"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","map":{"compartment":{"source":"udf","name":"x"},"work_item":{"source":"none"},"work_type":{"source":"none"},"trade":{"source":"resource"},"projects":[],"placards_from_names":true}}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/field-map must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_field_map_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/field-map/revert"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/field-map/revert must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_get_api_vessels_id_schedule_runs() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-runs"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("GET", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant GET /api/vessels/:id/schedule-runs must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_get_api_vessels_id_schedule_runs_detail() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-runs/detail"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("GET", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant GET /api/vessels/:id/schedule-runs/detail must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_get_api_vessels_id_schedule_runs_diff() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-runs/diff"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("GET", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant GET /api/vessels/:id/schedule-runs/diff must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_schedule_runs_serve() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-runs/serve"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"run_id":"00000000-0000-0000-0000-000000000000"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/schedule-runs/serve must be 404"
+    );
+}
+
+#[tokio::test]
 async fn leak_get_api_vessels_id_yard_clock() {
     let (_, w) = wadl_api::demo_app();
     let org = w.yard_org.as_uuid().to_string();
@@ -1001,7 +1127,7 @@ async fn control_in_tenant_get_vessel_is_ok() {
 
 #[test]
 fn every_scoped_id_route_has_a_leak_test() {
-    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 50);
+    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 57);
 }
 
 #[tokio::test]
@@ -1551,6 +1677,82 @@ async fn weakest_role_post_api_vessels_id_budget_book_revert() {
 }
 
 #[tokio::test]
+async fn weakest_role_post_api_vessels_id_field_map() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/field-map"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","map":{"compartment":{"source":"udf","name":"x"},"work_item":{"source":"none"},"work_type":{"source":"none"},"trade":{"source":"resource"},"projects":[],"placards_from_names":true}}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/field-map must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_field_map_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/field-map/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/field-map/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_schedule_runs_serve() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/schedule-runs/serve"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader(
+        "POST",
+        &path,
+        &org,
+        &assigned,
+        Some(r#"{"run_id":"00000000-0000-0000-0000-000000000000"}"#),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/schedule-runs/serve must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
 async fn weakest_role_post_api_vessels_id_yard_clock() {
     let (_, w) = wadl_api::demo_app();
     let org = w.yard_org.as_uuid().to_string();
@@ -1598,5 +1800,5 @@ async fn weakest_role_post_api_vessels_id_yard_clock_revert() {
 
 #[test]
 fn every_gated_route_has_a_weakest_role_test() {
-    assert_eq!(wadl_api::roles::GATED.len(), 23);
+    assert_eq!(wadl_api::roles::GATED.len(), 26);
 }

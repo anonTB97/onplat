@@ -1021,6 +1021,7 @@ fn run_named(label: &str, code: &str, at_ms: i64) -> wadl_store::model::Schedule
         status: ActivityStatus::NotStarted,
         is_milestone: false,
         source_ref: format!("{label} · {code}"),
+        work_type: None,
     };
     ScheduleRun {
         summary: ScheduleRunSummary {

@@ -389,6 +389,23 @@ pub const GATED: &[(&str, &str, Capability)] = &[
     ),
     (
         "POST",
+        "/api/vessels/:id/field-map",
+        Capability::CommitDocument,
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/field-map/revert",
+        Capability::CommitDocument,
+    ),
+    // Serving a prior run replaces the schedule of record: the same deed
+    // as committing one through the door.
+    (
+        "POST",
+        "/api/vessels/:id/schedule-runs/serve",
+        Capability::CommitDocument,
+    ),
+    (
+        "POST",
         "/api/vessels/:id/yard-clock",
         Capability::CommitDocument,
     ),

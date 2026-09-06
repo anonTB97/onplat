@@ -56,6 +56,7 @@ fn run_named(label: &str, code: &str, at_ms: i64) -> ScheduleRun {
                 status: ActivityStatus::NotStarted,
                 is_milestone: false,
                 source_ref: format!("{label} · {code}"),
+                work_type: None,
             }],
             edges: vec![],
             parsed_in: None,

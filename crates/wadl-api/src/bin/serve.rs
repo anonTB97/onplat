@@ -19,10 +19,11 @@
 //!   sets this, behind whatever terminates TLS.
 //! * `WADL_STATIC_DIR` — a built `shell-web/dist` to serve as the site; unset
 //!   means API-only (development, where vite serves the shell).
-//! * `WADL_DEMO_DOCS` — a directory of the hull's documents (yard clock,
-//!   compartment register, zone chart, geometry, couplings, field-condition
-//!   log, and a `*.xer`) to load at boot through the doors' own paths; the
-//!   served hull IS the documents. `reference/cvn73` is the shipped one.
+//! * `WADL_DEMO_DOCS` — a directory of the hull's documents (yard clock, P6
+//!   field map, compartment register, zone chart, geometry, couplings,
+//!   field-condition log, and a `*.xer`) to load at boot through the doors'
+//!   own paths; the served hull IS the documents. `reference/cvn73` is the
+//!   shipped one.
 //! * `WADL_SCHEDULE_XER` — a P6 export to load as the schedule of record
 //!   (overrides any `*.xer` in `WADL_DEMO_DOCS`).
 //! * `WADL_MAX_IN_FLIGHT`, `WADL_REQUEST_TIMEOUT_SECS` — overload limits;
@@ -112,6 +113,9 @@ async fn build_store(
         if let Some((name, zone, shifts)) = &loaded.clock {
             println!("  yard clock:          {name} — {zone}, {shifts} shifts");
         }
+        if let Some((name, summary)) = &loaded.field_map {
+            println!("  field map:           {name} — {summary}");
+        }
         if let Some((name, decks, spaces)) = &loaded.register {
             println!("  register:            {name} — {spaces} spaces on {decks} decks");
         }
@@ -148,33 +152,61 @@ async fn build_store(
     // board all serve the export instead of the generated demo rows, and the
     // reconciliation report starts saying what the export does not cover. This
     // is the seam the generator was built to survive, demonstrable end to end.
+    // Read as bytes and decoded here (UTF-8 or Windows-1252), through the
+    // hull's field map, and recorded as run #1 — the same run the door
+    // would write. Rows the parser sets aside are printed and the rest is
+    // served; only a file with nothing to serve refuses the boot.
     if let Some(path) = xer_path {
-        let label = std::path::Path::new(&path)
-            .file_name()
-            .map_or_else(|| path.clone(), |f| f.to_string_lossy().into_owned());
-        let input = std::fs::read_to_string(&path).map_err(|e| {
-            eprintln!("cannot read WADL_SCHEDULE_XER {path}: {e}");
-            e
-        })?;
-        match wadl_api::schedule::load_xer(&store, world.cvn73, &label, &input) {
-            Ok(loaded) => {
-                println!(
-                    "schedule of record: {label} — {} activities for {} · parsed in {}",
-                    loaded.activities, world.cvn73, loaded.parsed_in
-                );
-                for finding in &loaded.wall_clock_findings {
-                    println!("  wall clock:          {finding}");
-                }
-            }
-            Err(reasons) => {
-                // All-or-nothing, and refusing to start beats serving a partial
-                // schedule as though it were the whole one.
-                eprintln!("WADL_SCHEDULE_XER {path} rejected: {reasons}");
-                return Err(std::io::Error::other("schedule of record rejected"));
-            }
-        }
+        boot_schedule(&store, world.cvn73, &path, clock.now().epoch_millis())?;
     }
     Ok((Arc::new(store), "in-memory demo world"))
+}
+
+/// Loads the P6 export at `path` as the hull's schedule of record and prints
+/// the banner lines for it. Refuses only when nothing would be served.
+fn boot_schedule(
+    store: &InMemoryStore,
+    vessel: wadl_domain::ids::VesselId,
+    path: &str,
+    now_ms: i64,
+) -> std::io::Result<()> {
+    let label = std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |f| f.to_string_lossy().into_owned());
+    let bytes = std::fs::read(path).map_err(|e| {
+        eprintln!("cannot read WADL_SCHEDULE_XER {path}: {e}");
+        e
+    })?;
+    match wadl_api::schedule::load_xer(store, vessel, &label, &bytes, now_ms) {
+        Ok(loaded) => {
+            println!(
+                "schedule of record: {label} — {} activities, {} quarantined, {}, map {} · parsed in {} · run #{} for {}",
+                loaded.activities,
+                loaded.quarantine.len(),
+                loaded.encoding,
+                loaded.field_map_label.as_deref().unwrap_or("default"),
+                loaded.parsed_in,
+                loaded.run.seq,
+                vessel,
+            );
+            for row in &loaded.quarantine {
+                println!("  quarantined:         {row}");
+            }
+            for finding in &loaded.findings {
+                println!("  field map:           {finding}");
+            }
+            for finding in &loaded.wall_clock_findings {
+                println!("  wall clock:          {finding}");
+            }
+        }
+        Err(reasons) => {
+            // Nothing survived, or it is not a schedule export: refusing
+            // to start beats serving an empty register as the schedule.
+            eprintln!("WADL_SCHEDULE_XER {path} rejected: {reasons}");
+            return Err(std::io::Error::other("schedule of record rejected"));
+        }
+    }
+    Ok(())
 }
 
 #[tokio::main]

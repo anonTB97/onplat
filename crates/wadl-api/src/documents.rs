@@ -339,6 +339,8 @@ fn instant_from_log(raw: &str) -> Option<i64> {
 pub struct LoadedDocuments {
     /// The yard clock's label, zone and shift count.
     pub clock: Option<(String, String, usize)>,
+    /// The P6 field map's label and one-line summary.
+    pub field_map: Option<(String, String)>,
     /// The register's label, decks and spaces.
     pub register: Option<(String, usize, usize)>,
     /// The zone chart's label and blocks.
@@ -365,13 +367,13 @@ fn find_doc(dir: &Path, suffix: &str) -> Option<(String, String)> {
 }
 
 /// Loads a directory of documents into a hull, in the order the doors would
-/// need them: the yard clock first (the export that follows is read in it),
-/// then the register (everything else names its spaces), then the zone
-/// chart and geometry, then the couplings with their derived vertical
-/// adjacency, then the morning's log. Files are found by suffix
-/// (`-clock.csv`, `-register.csv`, `-zones.csv`, `-couplings.csv`,
-/// `-geometry.csv`, `-hazards.csv`); absent ones are skipped, and the seed
-/// stands in.
+/// need them: the yard clock and the P6 field map first (the export that
+/// follows is read in the one and through the other), then the register
+/// (everything else names its spaces), then the zone chart and geometry,
+/// then the couplings with their derived vertical adjacency, then the
+/// morning's log. Files are found by suffix (`-clock.csv`, `-fieldmap.json`,
+/// `-register.csv`, `-zones.csv`, `-couplings.csv`, `-geometry.csv`,
+/// `-hazards.csv`); absent ones are skipped, and the seed stands in.
 ///
 /// # Errors
 /// The first document that cannot be carried, with the reason — the hull
@@ -392,6 +394,9 @@ pub async fn load_demo_docs(
     let mut loaded = LoadedDocuments::default();
     if let Some((name, text)) = find_doc(dir, "-clock.csv") {
         loaded.clock = Some(doors.clock(&name, &text).await?);
+    }
+    if let Some((name, text)) = find_doc(dir, "-fieldmap.json") {
+        loaded.field_map = Some(doors.field_map(&name, &text).await?);
     }
     if let Some((name, text)) = find_doc(dir, "-register.csv") {
         loaded.register = Some(doors.register(&name, &text).await?);
@@ -438,6 +443,29 @@ impl Loader<'_> {
                 wadl_store::memory::YardClockDoc {
                     label: name.to_owned(),
                     clock,
+                },
+            )
+            .await
+            .map_err(|e| err(name, e))?;
+        Ok(counts)
+    }
+
+    /// The field map, in the JSON shape the door takes: refused whole with
+    /// every reason, exactly as the door would refuse it.
+    async fn field_map(&self, name: &str, text: &str) -> Result<(String, String), String> {
+        let value: serde_json::Value = serde_json::from_str(text).map_err(|e| err(name, e))?;
+        let map: wadl_ingest::field_map::FieldMap =
+            serde_json::from_value(value.clone()).map_err(|e| err(name, e))?;
+        map.validate()
+            .map_err(|problems| err(name, problems.join("; ")))?;
+        let counts = (name.to_owned(), map.summary());
+        self.store
+            .set_field_map(
+                self.scope,
+                self.vessel,
+                wadl_store::memory::FieldMapDoc {
+                    label: name.to_owned(),
+                    map: value,
                 },
             )
             .await

@@ -259,6 +259,9 @@ pub(crate) async fn list_activities(
         hazards: &hazards,
     };
     let source = state.store.schedule_source(&scope, vessel).await?;
+    // The run the served register came from — label, when, by whom — so the
+    // breadcrumb can say whose export this is without a second read.
+    let schedule_run = state.store.served_schedule_run(&scope, vessel).await?;
     let schedule_edges = state.store.list_schedule_edges(&scope, vessel).await?;
     let reconciliation = reconcile(&state, &scope, vessel, &activities).await?;
     // The location-mapping report rides on every read, not only on the import
@@ -283,6 +286,7 @@ pub(crate) async fn list_activities(
     Ok(Json(json!({
         "as_of": at,
         "schedule_source": source,
+        "schedule_run": schedule_run,
         "reconciliation": reconciliation,
         "mapping": mapping,
         "edges": schedule_edges,
@@ -477,11 +481,18 @@ pub(crate) async fn timeframe(
     let clock =
         crate::yard_clock::clock_in_effect(state.store.as_ref(), &scope, VesselId::from_uuid(id))
             .await?;
+    // And the served schedule run, for the breadcrumb: which export, when,
+    // by whom — `null` for the generated register.
+    let schedule_run = state
+        .store
+        .served_schedule_run(&scope, VesselId::from_uuid(id))
+        .await?;
     Ok(Json(json!({
         "now": state.clock.now(),
         "availability_code": vessel.availability_code,
         "availability": vessel.availability,
         "yard_clock": clock.summary(),
+        "schedule_run": schedule_run,
     })))
 }
 

@@ -388,6 +388,11 @@ pub struct ActivitySummary {
     pub is_milestone: bool,
     /// Provenance: the document or run this row came from.
     pub source_ref: String,
+    /// The work type the yard's field map reads for the row (the rule table
+    /// binds by it from S14 on); `None` when the map names no field or the
+    /// row carries none. Absent on rows stored before the map existed.
+    #[serde(default)]
+    pub work_type: Option<String>,
 }
 
 impl ActivitySummary {

@@ -42,6 +42,12 @@ pub(crate) enum ApiError {
     /// changing the request, and "unprocessable" with no reason is a dead end for
     /// whoever is holding the time control.
     OutOfRange(String),
+    /// The request names a thing the store no longer holds in the shape the
+    /// action needs — a run whose rows were dropped by the in-memory cap and
+    /// so cannot be served again or diffed. Not a 404 (the run exists and
+    /// lists) and not a 500 (nothing failed): the caller can pick another
+    /// run, and the detail says why this one will not do.
+    Conflict(String),
     /// The body exceeds the import ceiling. Carries the ceiling so the caller
     /// learns the actual limit instead of guessing at it.
     PayloadTooLarge(usize),
@@ -104,6 +110,7 @@ impl ApiError {
                 Some(detail),
                 vec![],
             ),
+            Self::Conflict(detail) => (StatusCode::CONFLICT, "conflict", Some(detail), vec![]),
             Self::PayloadTooLarge(ceiling) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload too large",

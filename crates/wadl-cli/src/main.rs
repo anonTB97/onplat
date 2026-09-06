@@ -1,10 +1,11 @@
 //! `wadl` — the operator CLI.
 //!
-//! Four commands, each one an operator will reach for on an air-gapped node:
+//! Five commands, each one an operator will reach for on an air-gapped node:
 //! `migrate` applies the forward-only schema, `seed` prints the demo world,
-//! `verify-ledger` re-hashes the audit chain and reports the first break, and
-//! `support-bundle` collects what you would otherwise never get off a
-//! production box into one redacted file.
+//! `verify-ledger` re-hashes the audit chain and reports the first break,
+//! `ingest-xer` reads a P6 export (`--survey` for the mail-back that carries
+//! no schedule content), and `support-bundle` collects what you would
+//! otherwise never get off a production box into one redacted file.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::doc_markdown)]
@@ -51,9 +52,19 @@ enum Command {
     },
     /// Ingest a Primavera P6 XER export and print the graded report.
     IngestXer {
-        /// Path to the .xer file.
+        /// Path to the .xer file (UTF-8 or Windows-1252; decoded here).
         #[arg(long)]
         input: PathBuf,
+        /// Print the survey only — which fields, projects, resource and task
+        /// types the file carries, its encoding, and the quarantine classes
+        /// by line — and no task code or name. The mail-back a yard can send
+        /// about its own export.
+        #[arg(long)]
+        survey: bool,
+        /// A P6 field map (JSON, the door's shape) to read the file through;
+        /// the default convention without it.
+        #[arg(long)]
+        field_map: Option<PathBuf>,
     },
     /// Write a redacted support bundle to a file.
     SupportBundle {
@@ -72,7 +83,11 @@ async fn main() -> Result<()> {
         Command::Migrate { database_url } => migrate(database_url).await,
         Command::Seed { database_url } => seed(database_url).await,
         Command::VerifyLedger { input } => verify_ledger(&input),
-        Command::IngestXer { input } => ingest_xer_file(&input),
+        Command::IngestXer {
+            input,
+            survey,
+            field_map,
+        } => ingest_xer_file(&input, survey, field_map.as_deref()),
         Command::SupportBundle {
             out,
             migrations_dir,
@@ -80,27 +95,58 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Runs the XER ingest and prints what a planner would want from a dry run:
-/// what was accepted, what was refused and why, and the schedule-quality
-/// findings — starting with negative lags, which P6 is perfectly happy with and
-/// the deconfliction engine exists to refuse.
-fn ingest_xer_file(input: &Path) -> Result<()> {
+/// The field map a `--field-map` file names, or the default convention.
+fn field_map_from(path: Option<&Path>) -> Result<wadl_ingest::field_map::FieldMap> {
+    let Some(path) = path else {
+        return Ok(wadl_ingest::field_map::FieldMap::default());
+    };
     let text =
-        std::fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let map: wadl_ingest::field_map::FieldMap =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    if let Err(problems) = map.validate() {
+        anyhow::bail!("{} refused whole: {}", path.display(), problems.join("; "));
+    }
+    Ok(map)
+}
+
+/// Runs the XER ingest and prints what a planner would want from a dry run:
+/// what was accepted, what was set aside and why, what was excluded, and the
+/// schedule-quality findings — starting with negative lags, which P6 is
+/// perfectly happy with and the deconfliction engine exists to refuse. With
+/// `--survey`, prints the survey and nothing of the schedule's content.
+fn ingest_xer_file(input: &Path, survey: bool, field_map: Option<&Path>) -> Result<()> {
+    let bytes = std::fs::read(input).with_context(|| format!("reading {}", input.display()))?;
+    let (text, encoding) = wadl_ingest::encoding::decode_xer(&bytes);
     let label = input.file_name().map_or_else(
         || input.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
-    let report = wadl_ingest::xer::ingest_xer(&text, &label);
+    let map = field_map_from(field_map)?;
+    let report = wadl_ingest::xer::ingest_xer_with(
+        &text,
+        &label,
+        &map,
+        &wadl_domain::civil::YardClock::utc(),
+    );
+    if survey {
+        return print_survey(&report, encoding);
+    }
 
     println!(
-        "project {} — {} activities ({} milestones), {} relationships, {} rejected",
+        "project {} — {} activities ({} milestones), {} relationships, {} quarantined · {} · map: {}",
         report.project.as_deref().unwrap_or("<unnamed>"),
         report.activities.len(),
         report.activities.iter().filter(|a| a.is_milestone).count(),
         report.relationships.len(),
         report.rejected.len(),
+        encoding.describe(),
+        map.summary(),
     );
+    print_exclusions(&report);
+    for finding in &report.findings {
+        println!("FINDING · {finding}");
+    }
     let budget: i64 = report.activities.iter().map(|a| a.budget_hours.get()).sum();
     let earned: i64 = report.activities.iter().map(|a| a.earned_hours.get()).sum();
     println!("hours: {budget} MH budgeted, {earned} MH earned");
@@ -134,8 +180,75 @@ fn ingest_xer_file(input: &Path) -> Result<()> {
         );
     }
     for reject in &report.rejected {
-        println!("REJECTED line {}: {}", reject.row, reject.reason);
+        println!(
+            "QUARANTINED line {} ({} · {}): {}",
+            reject.row,
+            reject.table,
+            reject.code.as_deref().unwrap_or("—"),
+            reject.reason
+        );
     }
+    Ok(())
+}
+
+/// What the map set aside without quarantining: level of effort, WBS
+/// summaries, other projects' rows, and the assignments that are not
+/// man-hours.
+fn print_exclusions(report: &wadl_ingest::xer::XerIngestReport) {
+    if !report.excluded_loe.is_empty() {
+        println!(
+            "excluded level of effort ({}): {}",
+            report.excluded_loe.len(),
+            report.excluded_loe.join(", ")
+        );
+    }
+    if !report.excluded_wbs.is_empty() {
+        println!(
+            "excluded WBS summary ({}): {}",
+            report.excluded_wbs.len(),
+            report.excluded_wbs.join(", ")
+        );
+    }
+    if !report.excluded_project.is_empty() {
+        let rows: Vec<String> = report
+            .excluded_project
+            .iter()
+            .map(|(code, project)| format!("{code} ({project})"))
+            .collect();
+        println!(
+            "excluded, project not served ({}): {}",
+            rows.len(),
+            rows.join(", ")
+        );
+    }
+    if report.material_skipped + report.equipment_skipped > 0 {
+        println!(
+            "not man-hours: {} material and {} equipment assignments skipped",
+            report.material_skipped, report.equipment_skipped
+        );
+    }
+}
+
+/// The survey: the file's fields and counts, its encoding, and the
+/// quarantine's classes by line — never a task code, a name or a reason,
+/// so the output can leave the yard.
+fn print_survey(
+    report: &wadl_ingest::xer::XerIngestReport,
+    encoding: wadl_ingest::encoding::Encoding,
+) -> Result<()> {
+    let quarantine: Vec<serde_json::Value> = report
+        .rejected
+        .iter()
+        .map(|r| serde_json::json!({ "line": r.row, "table": r.table, "class": r.class }))
+        .collect();
+    let survey = serde_json::json!({
+        "encoding": encoding.describe(),
+        "task_rows": report.task_rows,
+        "has_task_section": report.has_task_section(),
+        "fields_seen": report.fields_seen,
+        "quarantine": quarantine,
+    });
+    println!("{}", serde_json::to_string_pretty(&survey)?);
     Ok(())
 }
 

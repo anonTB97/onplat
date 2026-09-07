@@ -1,0 +1,22 @@
+---
+source: crates/wadl-engine/tests/golden_rule_table.rs
+description: the deck above once the coat has cured
+info:
+  rule: R03
+  ordinal: "1"
+  scenario: the deck above once the coat has cured
+  hazard_kind: coating_open
+  origin: 3-160-2-Q
+  subject: 2-160-2-Q
+  work_type: hot_work
+  at_min: 480
+  ended_min: ~
+  expect_state: ALLOW
+  expect_clearer: ""
+  expect_clear_min: ~
+---
+{
+  "state": "ALLOW",
+  "trace": [],
+  "earliest_clear": null
+}

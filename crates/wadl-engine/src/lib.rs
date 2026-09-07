@@ -40,6 +40,7 @@
 pub mod coupling;
 pub mod decision;
 pub mod evaluate;
+pub mod rule_table;
 pub mod rules;
 pub mod traversal;
 

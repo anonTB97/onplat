@@ -1,0 +1,65 @@
+---
+source: crates/wadl-engine/tests/golden_rule_table.rs
+description: hot work on the trunk two hops out
+info:
+  rule: R09
+  ordinal: "0"
+  scenario: hot work on the trunk two hops out
+  hazard_kind: coating_open
+  origin: 3-160-2-Q
+  subject: 4-164-2-Q
+  work_type: hot_work
+  at_min: 0
+  ended_min: ~
+  expect_state: SUSPEND
+  expect_clearer: marine_chemist
+  expect_clear_min: 480
+---
+{
+  "state": "SUSPEND",
+  "trace": [
+    {
+      "rule_code": "R09",
+      "rule_version": "00000000-0000-0000-0000-000000000901",
+      "state": "SUSPEND",
+      "source": "3-160-2-Q",
+      "hazard": "CT-3160-4 · final coat, curing",
+      "depth": 2,
+      "path": [
+        "3-160-2-Q",
+        "3-164-2-Q",
+        "4-164-2-Q"
+      ],
+      "via": [
+        "exhaust_trunk",
+        "exhaust_trunk"
+      ],
+      "authority": "NSTM Ch. 074; NFPA 306",
+      "clearing_authority": "marine_chemist",
+      "earliest_clear": 1778678100000,
+      "reason": "CT-3160-4 · final coat, curing in 3-160-2-Q — reached via exhaust_trunk → exhaust_trunk (2 hops)."
+    },
+    {
+      "rule_code": "R09",
+      "rule_version": "00000000-0000-0000-0000-000000000902",
+      "state": "WARN",
+      "source": "3-160-2-Q",
+      "hazard": "CT-3160-4 · final coat, curing",
+      "depth": 2,
+      "path": [
+        "3-160-2-Q",
+        "3-164-2-Q",
+        "4-164-2-Q"
+      ],
+      "via": [
+        "exhaust_trunk",
+        "exhaust_trunk"
+      ],
+      "authority": "NSTM Ch. 074; NFPA 306",
+      "clearing_authority": "marine_chemist",
+      "earliest_clear": 1778678100000,
+      "reason": "CT-3160-4 · final coat, curing in 3-160-2-Q — reached via exhaust_trunk → exhaust_trunk (2 hops)."
+    }
+  ],
+  "earliest_clear": 1778678100000
+}

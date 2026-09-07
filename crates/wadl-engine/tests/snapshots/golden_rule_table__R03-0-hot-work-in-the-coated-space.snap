@@ -1,0 +1,39 @@
+---
+source: crates/wadl-engine/tests/golden_rule_table.rs
+description: hot work in the coated space
+info:
+  rule: R03
+  ordinal: "0"
+  scenario: hot work in the coated space
+  hazard_kind: coating_open
+  origin: 3-160-2-Q
+  subject: 3-160-2-Q
+  work_type: hot_work
+  at_min: 0
+  ended_min: ~
+  expect_state: BLOCK
+  expect_clearer: marine_chemist
+  expect_clear_min: 480
+---
+{
+  "state": "BLOCK",
+  "trace": [
+    {
+      "rule_code": "R03",
+      "rule_version": "00000000-0000-0000-0000-000000000300",
+      "state": "BLOCK",
+      "source": "3-160-2-Q",
+      "hazard": "CT-3160-4 · final coat, curing",
+      "depth": 0,
+      "path": [
+        "3-160-2-Q"
+      ],
+      "via": [],
+      "authority": "NFPA 306; NSTM Ch. 074 Vol. 1",
+      "clearing_authority": "marine_chemist",
+      "earliest_clear": 1778678100000,
+      "reason": "CT-3160-4 · final coat, curing in this space."
+    }
+  ],
+  "earliest_clear": 1778678100000
+}

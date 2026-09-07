@@ -1,0 +1,42 @@
+---
+source: crates/wadl-engine/tests/golden_rule_table.rs
+description: hot work on the branch of an open stow
+info:
+  rule: R13
+  ordinal: "0"
+  scenario: hot work on the branch of an open stow
+  hazard_kind: flammable_stow
+  origin: 3-160-2-Q
+  subject: 3-164-2-Q
+  work_type: hot_work
+  at_min: 0
+  ended_min: ~
+  expect_state: BLOCK
+  expect_clearer: fire_marshal
+  expect_clear_min: ~
+---
+{
+  "state": "BLOCK",
+  "trace": [
+    {
+      "rule_code": "R13",
+      "rule_version": "00000000-0000-0000-0000-000000001301",
+      "state": "BLOCK",
+      "source": "3-160-2-Q",
+      "hazard": "Open solvent stow · paint locker",
+      "depth": 1,
+      "path": [
+        "3-160-2-Q",
+        "3-164-2-Q"
+      ],
+      "via": [
+        "exhaust_trunk"
+      ],
+      "authority": "NFPA 306; NSTM Ch. 074",
+      "clearing_authority": "fire_marshal",
+      "earliest_clear": null,
+      "reason": "Open solvent stow · paint locker in 3-160-2-Q — reached via exhaust_trunk (1 hop)."
+    }
+  ],
+  "earliest_clear": null
+}

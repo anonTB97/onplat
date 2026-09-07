@@ -1,0 +1,21 @@
+# Golden scenarios for the rule table — one per row in force, the expectation written first, in the authority's words.
+# The engine runs each over the golden graph (the CVN-73 aft third round 3-160-2-Q) plus 2-160-2-Q → 3-160-2-Q deck_penetration
+# and 3-148-2-E → 3-148-0-L electrical_bus. Minutes count from the hazard's raise (07:15 on the shift). Blank expect_clear_min =
+# no clock (clears on verification); blank ended_min = the fact still stands. One insta snapshot per row, named rule-ordinal-scenario.
+rule,ordinal,scenario,hazard_kind,origin,subject,work_type,at_min,ended_min,expect_state,expect_clearer,expect_clear_min
+R03,0,hot work in the coated space,coating_open,3-160-2-Q,3-160-2-Q,hot_work,0,,BLOCK,marine_chemist,480
+R03,0,an inspection in the coated space,coating_open,3-160-2-Q,3-160-2-Q,inspection,0,,ALLOW,,
+R03,1,hot work on the deck above,coating_open,3-160-2-Q,2-160-2-Q,hot_work,0,,BLOCK,marine_chemist,480
+R03,1,the deck above once the coat has cured,coating_open,3-160-2-Q,2-160-2-Q,hot_work,480,,ALLOW,,
+R04,0,any work below live hot work at 45 min,hot_work_live,2-160-2-Q,3-160-2-Q,mechanical,45,,SUSPEND,fire_marshal,
+R04,0,the same after the permit closed,hot_work_live,2-160-2-Q,3-160-2-Q,mechanical,70,60,SUSPEND,fire_marshal,90
+R04,0,the same once the fire watch has run,hot_work_live,2-160-2-Q,3-160-2-Q,mechanical,90,60,ALLOW,,
+R06,0,hot work across the bulkhead,coating_open,3-160-2-Q,3-156-2-Q,hot_work,0,,WARN,marine_chemist,480
+R07,0,an inspection inside the envelope,energised_bus,3-148-2-E,3-148-2-E,inspection,0,,BLOCK,isolation_authority,
+R07,1,electrical work one bus hop out,energised_bus,3-148-2-E,3-148-0-L,electrical,0,,BLOCK,isolation_authority,
+R09,0,hot work on the trunk two hops out,coating_open,3-160-2-Q,4-164-2-Q,hot_work,0,,SUSPEND,marine_chemist,480
+R09,1,mechanical work on the trunk two hops out,coating_open,3-160-2-Q,4-164-2-Q,mechanical,0,,WARN,marine_chemist,480
+R13,0,hot work on the branch of an open stow,flammable_stow,3-160-2-Q,3-164-2-Q,hot_work,0,,BLOCK,fire_marshal,
+R13,0,coating work on the branch of an open stow,flammable_stow,3-160-2-Q,3-164-2-Q,coating,0,,ALLOW,,
+R22,0,rigging under a stop-work,stop_work,3-160-2-Q,3-160-2-Q,rigging,0,,SUSPEND,issuing_authority,
+R22,0,rigging next door to a stop-work,stop_work,3-160-2-Q,3-156-2-Q,rigging,0,,ALLOW,,

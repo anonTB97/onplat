@@ -39,7 +39,9 @@ use uuid::Uuid;
 use wadl_domain::ids::{OrgId, VesselId};
 use wadl_domain::time::Timestamp;
 use wadl_store::memory::{GeometryRegister, ManningBook, YardClockDoc};
-use wadl_store::model::{DeckCoverageSummary, ManningCrewSummary, SpaceGeometrySummary};
+use wadl_store::model::{
+    DeckCoverageSummary, HullStatement, ManningCrewSummary, RowOutcome, SpaceGeometrySummary,
+};
 use wadl_store::pg::PgStore;
 use wadl_store::StoreError;
 use wadl_store::TenantScope;
@@ -115,15 +117,37 @@ macro_rules! require_db {
     };
 }
 
+/// The seed's hulls visible to `org_id` under the policy — the count the
+/// tenancy assertions were written against. Hulls other tests bootstrap in
+/// this database (`T-…`) are set aside by name inside the same
+/// policy-filtered query, so the count is still the policy's row set with no
+/// application-side gate in it.
+async fn seed_hulls(store: &PgStore, org_id: OrgId) -> i64 {
+    let mut tx = store.with_tenant(org_id).await.unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM vessel WHERE hull_no NOT LIKE 'T-%'")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    n
+}
+
 #[tokio::test]
 async fn rls_hides_other_tenants_rows_entirely() {
     let store = require_db!();
 
     // Observed at the policy level, with no application-side filtering at all.
-    let yard_sees = store.pg_count_visible_vessels(org(YARD_ORG)).await.unwrap();
-    let navy_sees = store.pg_count_visible_vessels(org(NAVY_ORG)).await.unwrap();
-    assert_eq!(yard_sees, 5, "the yard owns five hulls");
-    assert_eq!(navy_sees, 1, "the navy owns one");
+    assert_eq!(
+        seed_hulls(&store, org(YARD_ORG)).await,
+        5,
+        "the yard owns five hulls"
+    );
+    assert_eq!(
+        seed_hulls(&store, org(NAVY_ORG)).await,
+        1,
+        "the navy owns one"
+    );
+    assert!(store.pg_count_visible_vessels(org(NAVY_ORG)).await.unwrap() >= 1);
 }
 
 #[tokio::test]
@@ -1293,4 +1317,131 @@ async fn the_field_map_round_trips_and_stays_in_tenant() {
 
     store.clear_field_map(&scope, hull).await.unwrap();
     assert!(store.field_map(&scope, hull).await.unwrap().is_none());
+}
+
+/// A hull-row statement for a fresh test hull in the yard tenant: the seed's
+/// organisation and class (which will read `existed`), a new hull and
+/// availability named by the caller.
+fn test_statement(hull: Uuid, availability: Uuid, hull_no: &str) -> HullStatement {
+    serde_json::from_value(serde_json::json!({
+        "organization": { "org_id": org(YARD_ORG).as_uuid(), "kind": "shipbuilder", "name": "Demo Yard", "country": "USA" },
+        "class": { "class_id": Uuid::from_u128(0xC0068), "code": "CVN-68", "name": "Nimitz class", "hull_type": "CVN", "frame_min": 1, "frame_max": 260 },
+        "vessel": { "vessel_id": hull, "hull_no": hull_no, "name": "Test hull" },
+        "availability": { "availability_id": availability, "code": "T-26", "kind": "PIA", "location": "Test dock", "start_on": "2026-01-05", "end_on": "2026-09-30" }
+    }))
+    .unwrap()
+}
+
+/// `wadl bootstrap-hull`'s store half: the four rows land once, the second
+/// application is a no-op with no new ledger row, the hull's first ledger
+/// row is `HULL_BOOTSTRAPPED` under `system:cli` and verifies, the other
+/// tenant cannot see the hull even when "assigned" to it, a dry run writes
+/// nothing, and the same hull number under a new id is refused whole.
+#[tokio::test]
+async fn a_bootstrapped_hull_is_invisible_to_the_other_tenant() {
+    let store = require_db!();
+    let hull_id = Uuid::now_v7();
+    // The tail of a v7 uuid is its random half; the head is a timestamp that
+    // two runs a minute apart share.
+    let hull_no = format!("T-{}", &hull_id.simple().to_string()[24..]);
+    let statement = test_statement(hull_id, Uuid::now_v7(), &hull_no);
+    let now_ms = 1_780_000_000_000;
+
+    let first = store
+        .bootstrap_hull(&statement, "test-hull.json", false, now_ms)
+        .await
+        .unwrap();
+    assert_eq!(first.organization, RowOutcome::Existed);
+    assert_eq!(first.class, RowOutcome::Existed);
+    assert_eq!(first.vessel, RowOutcome::Created);
+    assert_eq!(first.availability, RowOutcome::Created);
+    assert!(first.ledger_seq.is_some(), "{first:?}");
+
+    let again = store
+        .bootstrap_hull(&statement, "test-hull.json", false, now_ms + 1)
+        .await
+        .unwrap();
+    assert!(!again.changes_anything(), "{again:?}");
+    assert_eq!(again.ledger_seq, None);
+
+    // Visible to the yard when assigned; invisible to the navy even when the
+    // assignment claim names it — RLS, not the claim, decides.
+    let hull = VesselId::from_uuid(hull_id);
+    let yard = TenantScope::new(org(YARD_ORG), [hull]);
+    let seen: Vec<String> = store
+        .list_vessels(&yard)
+        .await
+        .into_iter()
+        .map(|v| v.hull_no)
+        .collect();
+    assert_eq!(seen, vec![hull_no.clone()]);
+    let navy = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(store.list_vessels(&navy).await.is_empty());
+    assert!(matches!(
+        store.list_audit(&navy, hull, None).await,
+        Err(StoreError::NotFound)
+    ));
+
+    // The hull's ledger opens with the statement, chained and verifying.
+    let ledger = store.list_audit(&yard, hull, None).await.unwrap();
+    assert_eq!(ledger.len(), 1, "{ledger:?}");
+    assert_eq!(ledger[0].action, "HULL_BOOTSTRAPPED");
+    assert_eq!(ledger[0].actor_id.as_deref(), Some("system:cli"));
+    assert_eq!(ledger[0].chain_version, 2);
+    assert_eq!(Some(ledger[0].seq), first.ledger_seq);
+    let detail: serde_json::Value = serde_json::from_str(&ledger[0].detail).unwrap();
+    assert_eq!(detail["via"], "cli");
+    assert_eq!(detail["statement"]["vessel"]["hull_no"], hull_no);
+    assert_eq!(detail["outcome"]["vessel"], "created");
+    assert_eq!(detail["outcome"]["class"], "existed");
+    wadl_store::ledger::verify_records(&ledger).unwrap();
+
+    // A dry run for another hull reports and writes nothing.
+    let dry_id = Uuid::now_v7();
+    let dry_no = format!("T-{}", &dry_id.simple().to_string()[24..]);
+    let dry = store
+        .bootstrap_hull(
+            &test_statement(dry_id, Uuid::now_v7(), &dry_no),
+            "test-hull.json",
+            true,
+            now_ms,
+        )
+        .await
+        .unwrap();
+    assert_eq!(dry.vessel, RowOutcome::WouldCreate);
+    assert_eq!(dry.ledger_seq, None);
+    let dry_scope = TenantScope::new(org(YARD_ORG), [VesselId::from_uuid(dry_id)]);
+    assert!(store.list_vessels(&dry_scope).await.is_empty());
+
+    // The same hull number under a new id is a mistake, refused whole.
+    let clash = test_statement(Uuid::now_v7(), Uuid::now_v7(), &hull_no);
+    match store
+        .bootstrap_hull(&clash, "test-hull.json", false, now_ms)
+        .await
+    {
+        Err(StoreError::Conflict(reason)) => {
+            assert!(reason.contains(&hull_no), "{reason}");
+            assert!(reason.contains("different id"), "{reason}");
+        }
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    let clash_scope =
+        TenantScope::new(org(YARD_ORG), [VesselId::from_uuid(clash.vessel.vessel_id)]);
+    assert!(store.list_vessels(&clash_scope).await.is_empty());
+
+    // Leave the shared database as the seed left it: the owner's session can
+    // delete what the application role never may.
+    for sql in [
+        "DELETE FROM audit_entry WHERE vessel_id = $1",
+        "DELETE FROM ingest_run WHERE vessel_id = $1",
+        "DELETE FROM availability WHERE vessel_id = $1",
+        "DELETE FROM vessel WHERE vessel_id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(hull_id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    assert!(store.list_vessels(&yard).await.is_empty());
 }

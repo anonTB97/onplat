@@ -11,7 +11,10 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::doc_markdown)]
 
+mod bootstrap;
+
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -82,24 +85,63 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Apply a hull-row statement (organisation, class, hull, availability)
+    /// as the owner, idempotently, ledgered on the hull it creates.
+    BootstrapHull {
+        /// The statement JSON (template: reference/cvn73/CVN73-hull.json).
+        #[arg(long)]
+        statement: PathBuf,
+        /// Validate and print what would be created; write nothing. Works
+        /// without a database (existence is then not checked).
+        #[arg(long)]
+        dry_run: bool,
+        /// PostgreSQL URL. Falls back to `DATABASE_URL`.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+}
+
+/// The exit code for a refusal: the input was read and rejected for a reason
+/// that was printed, and nothing was written. Distinct from 1 (a failure).
+const REFUSED_CODE: u8 = 2;
+
+/// [`REFUSED_CODE`] as the process exit code (`ExitCode::from` is not const).
+fn refused() -> ExitCode {
+    ExitCode::from(REFUSED_CODE)
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<ExitCode> {
+    let done = |r: Result<()>| r.map(|()| ExitCode::SUCCESS);
     match Cli::parse().command {
-        Command::Migrate { database_url } => migrate(database_url).await,
-        Command::Seed { database_url } => seed(database_url).await,
-        Command::VerifyLedger { input } => verify_ledger(&input),
+        Command::Migrate { database_url } => done(migrate(database_url).await),
+        Command::Seed { database_url } => done(seed(database_url).await),
+        Command::VerifyLedger { input } => done(verify_ledger(&input)),
         Command::IngestXer {
             input,
             survey,
             field_map,
-        } => ingest_xer_file(&input, survey, field_map.as_deref()),
+        } => done(ingest_xer_file(&input, survey, field_map.as_deref())),
         Command::SupportBundle {
             out,
             migrations_dir,
-        } => support_bundle(&out, &migrations_dir),
-        Command::Version { json } => version(json),
+        } => done(support_bundle(&out, &migrations_dir)),
+        Command::Version { json } => done(version(json)),
+        Command::BootstrapHull {
+            statement,
+            dry_run,
+            database_url,
+        } => bootstrap::run(&statement, dry_run, database_url).await,
     }
 }
 

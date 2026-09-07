@@ -16,6 +16,9 @@ pub enum ActorSource {
     DevShim,
     /// The dev shim with no person header at all: `dev:anonymous`.
     DevShimAnonymous,
+    /// Named by the operator on the command line (`wadl load-docs --person`):
+    /// a person on the record, asserted by whoever held the DBA's session.
+    Cli,
     /// The binary itself (boot loaders, seeds) or a store caller that named
     /// nobody.
     System,

@@ -38,6 +38,8 @@ pub mod model;
 #[cfg(feature = "postgres")]
 pub mod pg;
 #[cfg(feature = "postgres")]
+pub mod pg_bootstrap;
+#[cfg(feature = "postgres")]
 pub mod pg_repo;
 pub mod repo;
 pub mod scope;

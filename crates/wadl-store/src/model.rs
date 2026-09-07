@@ -650,3 +650,252 @@ pub struct ScheduleRun {
     /// but not served again or diffed by rows.
     pub doc: Option<crate::memory::ScheduleOfRecord>,
 }
+
+// ---------------------------------------------------------------------------
+// The hull-row statement (`wadl bootstrap-hull`).
+// ---------------------------------------------------------------------------
+
+/// The organisation block of a [`HullStatement`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OrgStatement {
+    /// The tenant's id — the `x-org-id` the proxy will assert.
+    pub org_id: uuid::Uuid,
+    /// One of migration 0001's `org_kind`: `shipbuilder`, `navy`,
+    /// `class_society`, `regulator`, `vendor`.
+    pub kind: String,
+    /// The organisation's name.
+    pub name: String,
+    /// ISO 3166-1 alpha-3, when known.
+    #[serde(default)]
+    pub country: Option<String>,
+}
+
+/// The ship-class block of a [`HullStatement`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClassStatement {
+    /// The class id.
+    pub class_id: uuid::Uuid,
+    /// The class code, e.g. `CVN-68`; unique per tenant.
+    pub code: String,
+    /// The class name, e.g. `Nimitz class`.
+    pub name: String,
+    /// `CVN`, `DDG`, …
+    #[serde(default)]
+    pub hull_type: Option<String>,
+    /// The lowest frame station on the class.
+    #[serde(default)]
+    pub frame_min: Option<i32>,
+    /// The highest frame station on the class.
+    #[serde(default)]
+    pub frame_max: Option<i32>,
+}
+
+/// The hull block of a [`HullStatement`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VesselStatement {
+    /// The hull's id — the `x-assigned-vessels` entry the proxy will assert
+    /// and the id in every hash route.
+    pub vessel_id: uuid::Uuid,
+    /// The hull number, e.g. `CVN-73`; unique per tenant.
+    pub hull_no: String,
+    /// The ship's name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// The availability block of a [`HullStatement`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AvailabilityStatement {
+    /// The availability's id.
+    pub availability_id: uuid::Uuid,
+    /// The availability code, e.g. `PIA-26`; unique per hull.
+    pub code: String,
+    /// `PIA`, `SRA`, `DPIA`, …
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Where the hull sits for it.
+    #[serde(default)]
+    pub location: Option<String>,
+    /// First day, `YYYY-MM-DD`.
+    pub start_on: String,
+    /// Last day, inclusive, `YYYY-MM-DD`.
+    pub end_on: String,
+}
+
+/// The hull-row statement: the four tenancy rows a pilot hull needs before
+/// its first door opens — organisation, class, hull, availability — as the
+/// document the data-load record files. Ids are **required**, never
+/// generated: this file, the proxy's `x-assigned-vessels` and the data-load
+/// record must name the same hull. Decks are not in it; the register door
+/// supplies them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HullStatement {
+    /// The tenant.
+    pub organization: OrgStatement,
+    /// The class the hull belongs to.
+    pub class: ClassStatement,
+    /// The hull.
+    pub vessel: VesselStatement,
+    /// The availability the pilot runs in.
+    pub availability: AvailabilityStatement,
+}
+
+/// Migration 0001's `org_kind` values.
+pub const ORG_KINDS: [&str; 5] = [
+    "shipbuilder",
+    "navy",
+    "class_society",
+    "regulator",
+    "vendor",
+];
+
+/// `YYYY-MM-DD` as days from the epoch, or `None` when it is not a date.
+fn civil_days(text: &str) -> Option<i64> {
+    let mut parts = text.trim().split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u8 = parts.next()?.parse().ok()?;
+    let day: u8 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = wadl_domain::civil::days_from_civil(year, month, day);
+    // Round-trip: 2026-02-30 is not a date.
+    (wadl_domain::civil::civil_from_days(days) == (year, month, day)).then_some(days)
+}
+
+impl HullStatement {
+    /// Every reason the statement cannot be applied, in yard words; empty
+    /// when it can. Ids nil, an unknown organisation kind, blank codes or
+    /// names, a class whose frames run backwards, an availability that ends
+    /// before it starts or whose bounds are not dates.
+    #[must_use]
+    pub fn validate(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (what, id) in [
+            ("organization.org_id", self.organization.org_id),
+            ("class.class_id", self.class.class_id),
+            ("vessel.vessel_id", self.vessel.vessel_id),
+            (
+                "availability.availability_id",
+                self.availability.availability_id,
+            ),
+        ] {
+            if id.is_nil() {
+                problems.push(format!(
+                    "{what} is the nil UUID — every id is required and named by the yard"
+                ));
+            }
+        }
+        if !ORG_KINDS.contains(&self.organization.kind.as_str()) {
+            problems.push(format!(
+                "organization.kind {:?} is not one of {}",
+                self.organization.kind,
+                ORG_KINDS.join(", ")
+            ));
+        }
+        for (what, text) in [
+            ("organization.name", &self.organization.name),
+            ("class.code", &self.class.code),
+            ("class.name", &self.class.name),
+            ("vessel.hull_no", &self.vessel.hull_no),
+            ("availability.code", &self.availability.code),
+        ] {
+            if text.trim().is_empty() {
+                problems.push(format!("{what} is blank"));
+            }
+        }
+        if let (Some(lo), Some(hi)) = (self.class.frame_min, self.class.frame_max) {
+            if lo > hi {
+                problems.push(format!(
+                    "class.frame_min {lo} is after class.frame_max {hi}"
+                ));
+            }
+        }
+        match (
+            civil_days(&self.availability.start_on),
+            civil_days(&self.availability.end_on),
+        ) {
+            (Some(start), Some(end)) if end <= start => problems.push(format!(
+                "availability.end_on {} is not after availability.start_on {}",
+                self.availability.end_on, self.availability.start_on
+            )),
+            (Some(_), Some(_)) => {}
+            (start, end) => {
+                if start.is_none() {
+                    problems.push(format!(
+                        "availability.start_on {:?} is not a YYYY-MM-DD date",
+                        self.availability.start_on
+                    ));
+                }
+                if end.is_none() {
+                    problems.push(format!(
+                        "availability.end_on {:?} is not a YYYY-MM-DD date",
+                        self.availability.end_on
+                    ));
+                }
+            }
+        }
+        problems
+    }
+}
+
+/// What applying one row of a statement did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowOutcome {
+    /// The row was written.
+    Created,
+    /// A row with this id was already there; nothing written.
+    Existed,
+    /// A dry run: the row would be written.
+    WouldCreate,
+}
+
+impl RowOutcome {
+    /// The word the CLI prints.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Existed => "existed",
+            Self::WouldCreate => "would create",
+        }
+    }
+}
+
+/// What [`HullStatement`] application did, row by row.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapOutcome {
+    /// The organisation row.
+    pub organization: RowOutcome,
+    /// The class row.
+    pub class: RowOutcome,
+    /// The hull row.
+    pub vessel: RowOutcome,
+    /// The availability row.
+    pub availability: RowOutcome,
+    /// The `HULL_BOOTSTRAPPED` ledger row's `seq`, when one was written —
+    /// only when something was created and it was not a dry run.
+    pub ledger_seq: Option<i64>,
+    /// Whether this was a dry run (nothing written).
+    pub dry_run: bool,
+}
+
+impl BootstrapOutcome {
+    /// The four rows in FK order, for printing.
+    #[must_use]
+    pub fn rows(&self) -> [(&'static str, RowOutcome); 4] {
+        [
+            ("organization", self.organization),
+            ("class", self.class),
+            ("vessel", self.vessel),
+            ("availability", self.availability),
+        ]
+    }
+
+    /// Whether any row was, or would be, written.
+    #[must_use]
+    pub fn changes_anything(&self) -> bool {
+        self.rows().iter().any(|(_, o)| *o != RowOutcome::Existed)
+    }
+}

@@ -1893,69 +1893,19 @@ impl Repositories for PgStore {
         occurred_at_ms: i64,
     ) -> Result<AuditRecord, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
-        let occurred_at = chrono::DateTime::from_timestamp_millis(occurred_at_ms)
-            .ok_or_else(|| StoreError::Backend("occurred_at out of range".to_owned()))?;
-        // Chain lookup and insert in ONE transaction, serialized per hull by a
-        // transaction-scoped advisory lock — NOT `FOR UPDATE`, which needs the
-        // UPDATE privilege 0007 deliberately revokes from an append-only
-        // ledger. The lock releases at commit; two concurrent appends cannot
-        // both chain to the same predecessor.
         let mut tx = self.with_tenant(scope.org).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(vessel.as_uuid().to_string())
-            .execute(&mut *tx)
-            .await?;
-        let prev: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT entry_hash FROM audit_entry
-              WHERE vessel_id = $1 ORDER BY entry_id DESC LIMIT 1",
-        )
-        .bind(vessel.as_uuid())
-        .fetch_optional(&mut *tx)
-        .await?;
-        // Format 2 from migration 0017 on: the person is in the hash, and the
-        // table's check constraint refuses a format-2 row that names nobody.
-        let actor = &scope.actor;
-        let entry_hash = crate::ledger::compute_hash_v2(
-            prev.as_deref(),
+        let record = append_audit_in(
+            &mut tx,
+            scope,
+            vessel,
             action,
             detail,
+            subject_ref,
             occurred_at_ms,
-            &actor.id,
-            &actor.name,
-        );
-        let seq: i64 = sqlx::query_scalar(
-            "INSERT INTO audit_entry
-                (org_id, vessel_id, action, detail, subject_ref, occurred_at,
-                 prev_hash, entry_hash, actor_id, actor_name, chain_version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             RETURNING entry_id",
         )
-        .bind(scope.org.as_uuid())
-        .bind(vessel.as_uuid())
-        .bind(action)
-        .bind(detail)
-        .bind(subject_ref)
-        .bind(occurred_at)
-        .bind(prev.as_deref())
-        .bind(entry_hash.as_slice())
-        .bind(&actor.id)
-        .bind(&actor.name)
-        .bind(i16::from(crate::ledger::CHAIN_VERSION))
-        .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(AuditRecord {
-            seq,
-            action: action.to_owned(),
-            detail: detail.to_owned(),
-            subject_ref: subject_ref.map(str::to_owned),
-            occurred_at_ms,
-            entry_hash: hex::encode(entry_hash),
-            prev_hash: prev.map(hex::encode),
-            actor_id: Some(actor.id.clone()),
-            actor_name: Some(actor.name.clone()),
-            chain_version: crate::ledger::CHAIN_VERSION,
-        })
+        Ok(record)
     }
 
     async fn list_audit(
@@ -1999,4 +1949,85 @@ impl Repositories for PgStore {
             })
             .collect())
     }
+}
+
+/// Appends one ledger row inside `tx`, which must already run as the
+/// application role under the hull's tenant (`with_tenant`, or the owner-mode
+/// bootstrap after it switches role). The chain logic lives here once so a
+/// row written in the same transaction as the hull it names (`pg_bootstrap`)
+/// chains exactly like a row the API writes.
+///
+/// Chain lookup and insert in ONE transaction, serialized per hull by a
+/// transaction-scoped advisory lock — NOT `FOR UPDATE`, which needs the
+/// UPDATE privilege 0007 deliberately revokes from an append-only ledger. The
+/// lock releases at commit; two concurrent appends cannot both chain to the
+/// same predecessor.
+///
+/// # Errors
+/// [`StoreError::Backend`] on any statement failure or an instant out of range.
+pub(crate) async fn append_audit_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    scope: &TenantScope,
+    vessel: VesselId,
+    action: &str,
+    detail: &str,
+    subject_ref: Option<&str>,
+    occurred_at_ms: i64,
+) -> Result<AuditRecord, StoreError> {
+    let occurred_at = chrono::DateTime::from_timestamp_millis(occurred_at_ms)
+        .ok_or_else(|| StoreError::Backend("occurred_at out of range".to_owned()))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(vessel.as_uuid().to_string())
+        .execute(&mut **tx)
+        .await?;
+    let prev: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT entry_hash FROM audit_entry
+          WHERE vessel_id = $1 ORDER BY entry_id DESC LIMIT 1",
+    )
+    .bind(vessel.as_uuid())
+    .fetch_optional(&mut **tx)
+    .await?;
+    // Format 2 from migration 0017 on: the person is in the hash, and the
+    // table's check constraint refuses a format-2 row that names nobody.
+    let actor = &scope.actor;
+    let entry_hash = crate::ledger::compute_hash_v2(
+        prev.as_deref(),
+        action,
+        detail,
+        occurred_at_ms,
+        &actor.id,
+        &actor.name,
+    );
+    let seq: i64 = sqlx::query_scalar(
+        "INSERT INTO audit_entry
+            (org_id, vessel_id, action, detail, subject_ref, occurred_at,
+             prev_hash, entry_hash, actor_id, actor_name, chain_version)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING entry_id",
+    )
+    .bind(scope.org.as_uuid())
+    .bind(vessel.as_uuid())
+    .bind(action)
+    .bind(detail)
+    .bind(subject_ref)
+    .bind(occurred_at)
+    .bind(prev.as_deref())
+    .bind(entry_hash.as_slice())
+    .bind(&actor.id)
+    .bind(&actor.name)
+    .bind(i16::from(crate::ledger::CHAIN_VERSION))
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(AuditRecord {
+        seq,
+        action: action.to_owned(),
+        detail: detail.to_owned(),
+        subject_ref: subject_ref.map(str::to_owned),
+        occurred_at_ms,
+        entry_hash: hex::encode(entry_hash),
+        prev_hash: prev.map(hex::encode),
+        actor_id: Some(actor.id.clone()),
+        actor_name: Some(actor.name.clone()),
+        chain_version: crate::ledger::CHAIN_VERSION,
+    })
 }

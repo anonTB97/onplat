@@ -59,6 +59,9 @@ impl From<StoreError> for ApiError {
     fn from(err: StoreError) -> Self {
         match err {
             StoreError::NotFound => Self::NotFound,
+            // The store's own refusal to contradict a row already there is
+            // the caller's to resolve, in the words the store chose.
+            StoreError::Conflict(detail) => Self::Conflict(detail),
             StoreError::Backend(detail) => {
                 // Emitted as a JSON line on stderr — the same shape as the
                 // audit stream on stdout, but kept on the diagnostic channel.

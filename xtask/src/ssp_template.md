@@ -64,7 +64,7 @@ route with a foreign hull id and requires not-found (CI job `leak-tests`).
 | Import body ceiling | {import_mb} MB, import doors only | `read_import_body`, after scope check |
 | Other request bodies | axum default (small) | router default |
 | Bind address | `127.0.0.1` unless `WADL_BIND` set | `serve` binary |
-| Identity trust | dev shim, or proxy-asserted when `WADL_PROXY_KEY` set | `wadl-api` auth extractor |
+| Identity trust | dev shim, or proxy-asserted when `WADL_PROXY_KEY` set; the dev shim refuses non-loopback binds unless `WADL_ALLOW_DEV_SHIM_OFF_LOOPBACK=yes` | `wadl-api` auth extractor; `serve` binary at boot |
 | Person | required in proxy mode (`x-wadl-person`); `dev:anonymous` on the shim | `wadl-api` auth extractor; hashed into every ledger row |
 | Roles without `x-wadl-roles` | `reader`, or `WADL_DEFAULT_ROLES` when set | `wadl-api` auth extractor; refused at boot if unknown |
 | Store | in-memory demo; PostgreSQL when built with the `postgres` feature and `DATABASE_URL` is set (RLS armed per request) | `serve` binary + `wadl-store` |

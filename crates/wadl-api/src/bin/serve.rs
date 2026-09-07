@@ -16,7 +16,12 @@
 //! * `WADL_PORT` — listen port, default 8080.
 //! * `WADL_BIND` — listen address, default `127.0.0.1`. Loopback by default
 //!   on purpose: exposing the port is a decision, made in the unit file that
-//!   sets this, behind whatever terminates TLS.
+//!   sets this, behind whatever terminates TLS. Without `WADL_PROXY_KEY` the
+//!   dev header shim is the identity, and it refuses to bind anything but
+//!   loopback (`wadl_api::auth::dev_shim_may_bind`).
+//! * `WADL_ALLOW_DEV_SHIM_OFF_LOOPBACK=yes` — the one override for that
+//!   refusal, for a host that is itself isolated (a demo laptop on a closed
+//!   network). Ignored in proxy mode, and any value but `yes` is ignored.
 //! * `WADL_STATIC_DIR` — a built `shell-web/dist` to serve as the site; unset
 //!   means API-only (development, where vite serves the shell).
 //! * `WADL_DEMO_DOCS` — a directory of the hull's documents (yard clock, P6
@@ -315,6 +320,19 @@ async fn main() -> std::io::Result<()> {
 
     let port: u16 = env_parse("WADL_PORT").unwrap_or(8080);
     let bind: IpAddr = env_parse("WADL_BIND").unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    // The dev shim trusts identity headers as given: off loopback it would
+    // hand every door to anyone who can reach the port. A unit file that
+    // widens WADL_BIND without arming the proxy key is refused here, before
+    // the listener exists — unless the operator says the host is isolated.
+    if std::env::var("WADL_PROXY_KEY").is_err() {
+        if let Err(refusal) = wadl_api::auth::dev_shim_may_bind(
+            bind,
+            wadl_api::auth::dev_shim_off_loopback_override_set(),
+        ) {
+            eprintln!("{refusal}");
+            return Err(std::io::Error::other("dev shim off loopback"));
+        }
+    }
 
     // Print the demo identity so an operator can set the dev-shim headers,
     // and which trust boundary is armed so nobody has to guess from behavior.

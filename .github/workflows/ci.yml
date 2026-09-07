@@ -80,6 +80,21 @@ jobs:
           done
           scripts/self-assessment.sh
           kill %1
+      # The dev shim trusts identity headers as given, so the binary refuses
+      # to bind it anywhere but loopback; the explicit override admits it.
+      - name: the dev shim refuses to bind off loopback
+        run: |
+          if WADL_BIND=0.0.0.0 WADL_PORT=8081 timeout 5 ./target/debug/serve 2>refusal.txt; then
+            echo "serve bound 0.0.0.0 on the dev shim"; exit 1
+          fi
+          grep -q 'loopback only' refusal.txt
+          WADL_BIND=0.0.0.0 WADL_PORT=8081 WADL_ALLOW_DEV_SHIM_OFF_LOOPBACK=yes ./target/debug/serve &
+          for i in $(seq 1 50); do
+            curl -sf http://127.0.0.1:8081/health >/dev/null && break
+            sleep 0.2
+          done
+          curl -sf http://127.0.0.1:8081/health | grep -q '"version"'
+          kill %1
 
   fixtures:
     name: sample P6 export is internally consistent

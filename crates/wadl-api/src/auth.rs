@@ -26,6 +26,7 @@
 //! means replacing the inside of [`resolve`] and nothing else.
 
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::sync::OnceLock;
 
 use axum::extract::FromRequestParts;
@@ -165,6 +166,37 @@ pub fn unknown_default_roles() -> Vec<String> {
     std::env::var("WADL_DEFAULT_ROLES")
         .map(|raw| parse_role_codes(&raw).1)
         .unwrap_or_default()
+}
+
+/// The variable that lets the dev header shim bind off loopback — for a host
+/// that is itself isolated (a demo laptop on a closed network). Honoured
+/// only when set to exactly `yes`.
+pub const DEV_SHIM_OFF_LOOPBACK_VAR: &str = "WADL_ALLOW_DEV_SHIM_OFF_LOOPBACK";
+
+/// Whether the dev header shim may bind `bind`. Pure: the shim trusts
+/// identity headers as given, so it may listen on loopback only — anything
+/// wider needs `WADL_PROXY_KEY` (proxy-asserted identity) or the explicit
+/// override. The binary calls this after parsing `WADL_BIND` and before
+/// binding, only when no proxy key is set.
+///
+/// # Errors
+/// The refusal line the binary prints before exiting non-zero.
+pub fn dev_shim_may_bind(bind: IpAddr, override_set: bool) -> Result<(), String> {
+    if bind.is_loopback() || override_set {
+        return Ok(());
+    }
+    Err(format!(
+        "the dev header shim trusts identity headers as given and may bind loopback only \
+         (WADL_BIND={bind}); set WADL_PROXY_KEY for proxy-asserted identity, or \
+         {DEV_SHIM_OFF_LOOPBACK_VAR}=yes if this host is itself isolated"
+    ))
+}
+
+/// Whether the operator set the off-loopback override — exactly `yes`; any
+/// other value is ignored so a typo cannot widen the bind by accident.
+#[must_use]
+pub fn dev_shim_off_loopback_override_set() -> bool {
+    std::env::var(DEV_SHIM_OFF_LOOPBACK_VAR).is_ok_and(|v| v.trim() == "yes")
 }
 
 /// The human name of the active trust mode, served by `/api/whoami` and
@@ -693,6 +725,44 @@ mod tests {
         assert_eq!(
             parse_role_codes("planner,nobody").1,
             vec!["nobody".to_owned()]
+        );
+    }
+
+    #[test]
+    fn the_dev_shim_binds_loopback_v4_and_v6() {
+        assert_eq!(
+            dev_shim_may_bind(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), false),
+            Ok(())
+        );
+        assert_eq!(
+            dev_shim_may_bind(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), false),
+            Ok(())
+        );
+        assert_eq!(
+            dev_shim_may_bind(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)), false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_dev_shim_refuses_a_public_address_and_names_the_override() {
+        let refusal =
+            dev_shim_may_bind(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), false).unwrap_err();
+        assert!(refusal.contains("loopback only"), "{refusal}");
+        assert!(refusal.contains("WADL_PROXY_KEY"), "{refusal}");
+        assert!(
+            refusal.contains("WADL_ALLOW_DEV_SHIM_OFF_LOOPBACK=yes"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("0.0.0.0"), "{refusal}");
+        assert!(dev_shim_may_bind(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), false).is_err());
+    }
+
+    #[test]
+    fn the_override_admits_it() {
+        assert_eq!(
+            dev_shim_may_bind(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), true),
+            Ok(())
         );
     }
 }

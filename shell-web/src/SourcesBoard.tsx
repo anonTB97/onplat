@@ -13,7 +13,7 @@
 // Reverts live here as well as on their home screens: taking a document back
 // out is a provenance decision, and this is the provenance screen.
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import {
   getCouplings,
   getRegister,
@@ -53,9 +53,9 @@ import {
   type ClockDoorFinding,
 } from "./api";
 import { fmtStamp, type YardClockInfo } from "./clock";
-import { DiscardButton } from "./DiscardButton";
-import { holdersOf, ROLE_WORDS, useIdentity, type Capability } from "./identity";
+import { useIdentity, type Capability } from "./identity";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
+import { SourceCard } from "./SourceCard";
 import {
   decodeXerFile,
   fmtBytes,

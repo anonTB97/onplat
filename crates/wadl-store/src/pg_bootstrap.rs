@@ -5,7 +5,13 @@
 //!
 //! Today: [`PgStore::bootstrap_hull`], the hull-row statement
 //! `docs/pilot-playbook.md` §1 files, applied as one transaction and
-//! ledgered on the hull it creates.
+//! ledgered on the hull it creates — with the baseline reference data a
+//! tenant needs before its first door opens (the coupling types the
+//! coupling register names and the rule set the engine evaluates), which
+//! until now only the demo seed installed. The seed installs the same rule
+//! set through the same function. A tenant bootstrapped here is never
+//! seeded afterwards: the seed is the demo world, and its fixed coupling-type
+//! ids would clash with the baseline's by `(org_id, code)`.
 
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
@@ -20,6 +26,190 @@ use crate::scope::{Actor, TenantScope};
 /// The ledger action a hull-row statement writes on the hull it created.
 pub const HULL_BOOTSTRAPPED: &str = "HULL_BOOTSTRAPPED";
 
+/// The coupling types every tenant starts with — `pg_seed.sql`'s three rows
+/// and the memory store's `seeded_coupling_types`, one list: code, label,
+/// directional, what it carries, default reach in hops.
+pub const BASELINE_COUPLING_TYPES: [(&str, &str, bool, &[&str], i32); 3] = [
+    (
+        "deck_penetration",
+        "Deck penetration",
+        true,
+        &["heat", "vapour"],
+        1,
+    ),
+    (
+        "shared_bulkhead",
+        "Shared bulkhead",
+        false,
+        &["heat", "vapour"],
+        2,
+    ),
+    ("exhaust_trunk", "Exhaust trunk", true, &["vapour"], 3),
+];
+
+/// A stable id for a tenant's baseline row: `sha256("wadl:" ‖ tag ‖ ":" ‖
+/// org ‖ ":" ‖ key)`, first sixteen bytes, version nibble 8 (a name-derived
+/// id that is not RFC 4122's v3 or v5), RFC 4122 variant. The same tenant
+/// and key give the same id, so the installer is idempotent by primary key
+/// as well as by natural key; two tenants never share a row.
+fn derived_id(org: Uuid, tag: &str, key: &[u8]) -> Uuid {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"wadl:");
+    hasher.update(tag.as_bytes());
+    hasher.update(b":");
+    hasher.update(org.as_bytes());
+    hasher.update(b":");
+    hasher.update(key);
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    for (dst, src) in bytes.iter_mut().zip(digest.iter()) {
+        *dst = *src;
+    }
+    if let Some(b) = bytes.get_mut(6) {
+        *b = (*b & 0x0F) | 0x80;
+    }
+    if let Some(b) = bytes.get_mut(8) {
+        *b = (*b & 0x3F) | 0x80;
+    }
+    Uuid::from_bytes(bytes)
+}
+
+/// Installs [`BASELINE_COUPLING_TYPES`] for a tenant that has none.
+///
+/// # Errors
+/// [`StoreError::Backend`] on any statement failure.
+pub(crate) async fn install_baseline_coupling_types(
+    tx: &mut Transaction<'_, Postgres>,
+    org: Uuid,
+    dry_run: bool,
+) -> Result<RowOutcome, StoreError> {
+    let present: i64 = sqlx::query_scalar("SELECT count(*) FROM coupling_type WHERE org_id = $1")
+        .bind(org)
+        .fetch_one(&mut **tx)
+        .await?;
+    if present > 0 {
+        return Ok(RowOutcome::Existed);
+    }
+    if dry_run {
+        return Ok(RowOutcome::WouldCreate);
+    }
+    for (code, label, directional, propagates, hops) in BASELINE_COUPLING_TYPES {
+        let carries: Vec<String> = propagates.iter().map(|p| (*p).to_owned()).collect();
+        sqlx::query(
+            "INSERT INTO coupling_type
+                (coupling_type_id, org_id, code, label, directional, propagates, default_max_hops)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (org_id, code) DO NOTHING",
+        )
+        .bind(derived_id(org, "coupling_type", code.as_bytes()))
+        .bind(org)
+        .bind(code)
+        .bind(label)
+        .bind(directional)
+        .bind(&carries)
+        .bind(hops)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(RowOutcome::Created)
+}
+
+/// Installs the baseline rule set — [`wadl_engine::RuleSet::seed_usn_hot_work`]
+/// — for a tenant that has no rules, per the 0011 payload contract:
+/// `trigger_expr` is the serde form of the engine's `RuleEntry`, so what
+/// `rules_in_force` deserializes is byte-identical to what the engine was
+/// written against. SQL literals would be a hand-copied shadow of that
+/// shape, and hand copies drift. The demo seed installs its rules through
+/// this same function.
+///
+/// # Errors
+/// [`StoreError::Backend`] on any statement failure or an unparseable code.
+pub(crate) async fn install_baseline_rules(
+    tx: &mut Transaction<'_, Postgres>,
+    org: Uuid,
+    dry_run: bool,
+) -> Result<RowOutcome, StoreError> {
+    use wadl_engine::rules::Applies;
+
+    let present: i64 = sqlx::query_scalar("SELECT count(*) FROM rule WHERE org_id = $1")
+        .bind(org)
+        .fetch_one(&mut **tx)
+        .await?;
+    if present > 0 {
+        return Ok(RowOutcome::Existed);
+    }
+    if dry_run {
+        return Ok(RowOutcome::WouldCreate);
+    }
+    let entries = wadl_engine::RuleSet::seed_usn_hot_work();
+    let mut version_no: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
+    for entry in entries.entries() {
+        let rule_id = derived_id(org, "rule", entry.rule_code.as_bytes());
+        sqlx::query(
+            "INSERT INTO rule (rule_id, org_id, code, name, kind)
+             VALUES ($1, $2, $3, $3, 'hazard_cascade')
+             ON CONFLICT (rule_id) DO NOTHING",
+        )
+        .bind(rule_id)
+        .bind(org)
+        .bind(&entry.rule_code)
+        .execute(&mut **tx)
+        .await?;
+
+        let version = version_no.entry(entry.rule_code.clone()).or_insert(0);
+        *version += 1;
+        let state = match entry.state {
+            wadl_engine::DecisionState::Allow => "ALLOW",
+            wadl_engine::DecisionState::Warn => "WARN",
+            wadl_engine::DecisionState::Block => "BLOCK",
+            wadl_engine::DecisionState::Suspend => "SUSPEND",
+        };
+        let max_hops: Option<i32> = match &entry.applies {
+            Applies::SameSpace => None,
+            Applies::Coupled { max_hops, .. } => Some(i32::from(max_hops.get())),
+        };
+        let trigger = serde_json::to_value(entry)
+            .map_err(|e| StoreError::Backend(format!("rule payload: {e}")))?;
+        let clearing = serde_json::json!({
+            "clearing_authority": entry.clearing_authority,
+            "hold_minutes": entry.hold.map(wadl_domain::units::Minutes::get),
+        });
+        let rule_version_id =
+            derived_id(org, "rule_version", entry.rule_version.as_uuid().as_bytes());
+        sqlx::query(
+            "INSERT INTO rule_version
+                (rule_version_id, rule_id, version_no, effective_from,
+                 trigger_expr, max_hops, result_state, clearing_expr,
+                 clearing_authority, waivable)
+             VALUES ($1, $2, $3, timestamptz '2026-01-01 00:00Z',
+                     $4, $5, $6::decision_state, $7, $8, $9)
+             ON CONFLICT (rule_version_id) DO NOTHING",
+        )
+        .bind(rule_version_id)
+        .bind(rule_id)
+        .bind(*version)
+        .bind(trigger)
+        .bind(max_hops)
+        .bind(state)
+        .bind(clearing)
+        .bind(&entry.clearing_authority)
+        .bind(entry.waivable)
+        .execute(&mut **tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO rule_binding (rule_version_id, class_id, work_type, category)
+             VALUES ($1, NULL, 'hot_work', NULL)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(rule_version_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(RowOutcome::Created)
+}
+
 /// The `source_system` the provenance row carries.
 const SOURCE_SYSTEM: &str = "bootstrap";
 
@@ -31,6 +221,10 @@ impl PgStore {
     /// another tenant — is [`StoreError::Conflict`] and rolls everything
     /// back: a second statement for the same hull with a new id is a
     /// mistake, not an update.
+    ///
+    /// Then the tenant's baseline reference data, when it has none: the three
+    /// coupling types the coupling register names and the rule set the
+    /// engine evaluates (`created | existed` as one row each).
     ///
     /// When anything was created, the same transaction writes an
     /// `ingest_run` provenance row (`source_system: bootstrap`, the statement
@@ -66,11 +260,16 @@ impl PgStore {
         let class = class_row(&mut tx, statement, dry_run).await?;
         let vessel = vessel_row(&mut tx, statement, dry_run).await?;
         let availability = availability_row(&mut tx, statement, dry_run).await?;
+        let org_uuid = statement.organization.org_id;
+        let coupling_types = install_baseline_coupling_types(&mut tx, org_uuid, dry_run).await?;
+        let rules = install_baseline_rules(&mut tx, org_uuid, dry_run).await?;
         let mut outcome = BootstrapOutcome {
             organization,
             class,
             vessel,
             availability,
+            coupling_types,
+            rules,
             ledger_seq: None,
             dry_run,
         };
@@ -112,6 +311,8 @@ impl PgStore {
                 "class": outcome.class,
                 "vessel": outcome.vessel,
                 "availability": outcome.availability,
+                "coupling_types": outcome.coupling_types,
+                "rules": outcome.rules,
             },
             "via": "cli",
             "by_org": org.to_string(),

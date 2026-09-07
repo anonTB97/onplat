@@ -874,6 +874,10 @@ pub struct BootstrapOutcome {
     pub vessel: RowOutcome,
     /// The availability row.
     pub availability: RowOutcome,
+    /// The tenant's baseline coupling types (three rows, reported as one).
+    pub coupling_types: RowOutcome,
+    /// The tenant's baseline rule set (reported as one).
+    pub rules: RowOutcome,
     /// The `HULL_BOOTSTRAPPED` ledger row's `seq`, when one was written —
     /// only when something was created and it was not a dry run.
     pub ledger_seq: Option<i64>,
@@ -882,14 +886,17 @@ pub struct BootstrapOutcome {
 }
 
 impl BootstrapOutcome {
-    /// The four rows in FK order, for printing.
+    /// The rows in FK order — the statement's four, then the tenant's two
+    /// baseline sets — for printing.
     #[must_use]
-    pub fn rows(&self) -> [(&'static str, RowOutcome); 4] {
+    pub fn rows(&self) -> [(&'static str, RowOutcome); 6] {
         [
             ("organization", self.organization),
             ("class", self.class),
             ("vessel", self.vessel),
             ("availability", self.availability),
+            ("coupling_types", self.coupling_types),
+            ("rules", self.rules),
         ]
     }
 

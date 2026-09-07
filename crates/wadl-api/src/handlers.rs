@@ -1762,19 +1762,22 @@ pub(crate) async fn ledger_document(
     label: Option<&str>,
     counts: Value,
 ) -> Result<(), ApiError> {
-    let now_ms = state.clock.now().epoch_millis();
-    let detail = json!({
-        "kind": kind,
-        "label": label,
-        "counts": counts,
-        "by_org": scope.org.to_string(),
-        "at_ms": now_ms,
-    });
-    let detail = serde_json::to_string(&detail).unwrap_or_default();
-    state
-        .store
-        .append_audit(scope, vessel, action, &detail, None, now_ms)
-        .await?;
+    // One writer for every such row, shared with the boot loader and the
+    // CLI (`documents::ledger_document_on`); the doors are `via: door`.
+    crate::documents::ledger_document_on(
+        state.store.as_ref(),
+        scope,
+        vessel,
+        crate::documents::DocumentLedgerLine {
+            action,
+            kind,
+            label,
+            counts,
+            via: "door",
+        },
+        state.clock.now().epoch_millis(),
+    )
+    .await?;
     Ok(())
 }
 

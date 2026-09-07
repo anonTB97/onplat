@@ -18,14 +18,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use serde_json::{json, Value};
 use wadl_domain::ids::VesselId;
 use wadl_engine::HazardKind;
 use wadl_store::memory::{CompartmentRegister, CouplingRegister, GeometryRegister, ZoneRegister};
 use wadl_store::model::{
-    CompartmentSummary, CouplingRowSummary, DeckCoverageSummary, RegisterDeckSummary,
+    AuditRecord, CompartmentSummary, CouplingRowSummary, DeckCoverageSummary, RegisterDeckSummary,
     RegisterSpaceSummary, SpaceGeometrySummary, ZoneBoundSummary,
 };
-use wadl_store::{Repositories, TenantScope};
+use wadl_store::{Repositories, StoreError, TenantScope};
 
 /// Proposes `deck_penetration` edges from the register: a space directly
 /// above another when their decks are consecutive in the hull's deck order,
@@ -334,7 +335,19 @@ fn instant_from_log(raw: &str) -> Option<i64> {
     Some(((days * 24 + hour) * 60 + minute) * 60_000 + second * 1000)
 }
 
-/// What the boot loader loaded, for the startup banner.
+/// One ledger row a load wrote: the document kind, its label, the row's `seq`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerLine {
+    /// `yard_clock`, `p6_field_map`, `compartment_register`, `zone_register`,
+    /// `geometry_register`, `coupling_register` or `hazard_log`.
+    pub kind: String,
+    /// The file name.
+    pub label: String,
+    /// The `DOCUMENT_REPLACED` row's sequence on the hull's ledger.
+    pub seq: i64,
+}
+
+/// What the loader loaded, for the startup banner and the CLI's lines.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LoadedDocuments {
     /// The yard clock's label, zone and shift count.
@@ -351,6 +364,145 @@ pub struct LoadedDocuments {
     pub geometry: Option<(String, usize, usize)>,
     /// The field-condition log's label and the rows raised.
     pub hazards: Option<(String, usize)>,
+    /// The ledger rows written, in door order — empty on a dry run.
+    pub ledger: Vec<LedgerLine>,
+}
+
+impl LoadedDocuments {
+    /// One banner line per document loaded, in door order, each with the
+    /// document kind its ledger row carries — the boot banner prints the
+    /// lines, the CLI appends the row's `seq`.
+    #[must_use]
+    pub fn banner_lines(&self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        if let Some((name, zone, shifts)) = &self.clock {
+            out.push((
+                "yard_clock",
+                format!("yard clock:          {name} — {zone}, {shifts} shifts"),
+            ));
+        }
+        if let Some((name, summary)) = &self.field_map {
+            out.push((
+                "p6_field_map",
+                format!("field map:           {name} — {summary}"),
+            ));
+        }
+        if let Some((name, decks, spaces)) = &self.register {
+            out.push((
+                "compartment_register",
+                format!("register:            {name} — {spaces} spaces on {decks} decks"),
+            ));
+        }
+        if let Some((name, blocks)) = &self.zones {
+            out.push((
+                "zone_register",
+                format!("zone chart:          {name} — {blocks} blocks"),
+            ));
+        }
+        if let Some((name, spaces, bands)) = &self.geometry {
+            out.push((
+                "geometry_register",
+                format!("geometry:            {name} — {spaces} surveyed, {bands} deck bands"),
+            ));
+        }
+        if let Some((name, authored, derived)) = &self.couplings {
+            out.push((
+                "coupling_register",
+                format!("couplings:           {name} — {authored} authored, {derived} derived"),
+            ));
+        }
+        if let Some((name, raised)) = &self.hazards {
+            out.push((
+                "hazard_log",
+                format!("field conditions:    {name} — {raised} raised"),
+            ));
+        }
+        out
+    }
+
+    /// The ledger `seq` of the row written for `kind`, when one was.
+    #[must_use]
+    pub fn ledger_seq(&self, kind: &str) -> Option<i64> {
+        self.ledger.iter().find(|l| l.kind == kind).map(|l| l.seq)
+    }
+}
+
+/// Which path is loading, and whether it stores anything. `via` is written
+/// into every ledger row's detail: `boot` (the demo binary on its own
+/// account), `cli` (`wadl load-docs`), `test`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadVia<'a> {
+    /// `boot`, `cli` or `test`.
+    pub via: &'a str,
+    /// Parse and validate every file in order; store and ledger nothing.
+    pub dry_run: bool,
+}
+
+/// A load refused at one file. Every file before it is committed — the
+/// loader is a sequence of doors, each all-or-nothing, like data-load day —
+/// and `loaded_before` says which, with their ledger rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadRefused {
+    /// `<file name>: <reason>`.
+    pub reason: String,
+    /// What was committed before the refusal.
+    pub loaded_before: LoadedDocuments,
+}
+
+impl std::fmt::Display for LoadRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl From<LoadRefused> for String {
+    fn from(refused: LoadRefused) -> Self {
+        refused.reason
+    }
+}
+
+/// The detail of one `DOCUMENT_REPLACED` / `DOCUMENT_REVERTED` ledger row.
+#[derive(Debug, Clone)]
+pub(crate) struct DocumentLedgerLine<'a> {
+    /// `DOCUMENT_REPLACED` or `DOCUMENT_REVERTED`.
+    pub(crate) action: &'a str,
+    /// The document kind.
+    pub(crate) kind: &'a str,
+    /// The document's label — the file name — when it has one.
+    pub(crate) label: Option<&'a str>,
+    /// The counts the door reported.
+    pub(crate) counts: Value,
+    /// `door`, `boot`, `cli` or `test`.
+    pub(crate) via: &'a str,
+}
+
+/// Writes one ledger row for a document changing hands, on any store: the
+/// doors (`via: door`), the boot loader (`boot`), the CLI (`cli`) and the
+/// tests share this so every such row has one shape —
+/// `{ kind, label, counts, via, by_org, at_ms }` — hashed into the chain.
+///
+/// # Errors
+/// [`StoreError::NotFound`] when the hull is outside `scope`;
+/// [`StoreError::Backend`] when the row cannot be written.
+pub(crate) async fn ledger_document_on(
+    store: &dyn Repositories,
+    scope: &TenantScope,
+    vessel: VesselId,
+    line: DocumentLedgerLine<'_>,
+    now_ms: i64,
+) -> Result<AuditRecord, StoreError> {
+    let detail = json!({
+        "kind": line.kind,
+        "label": line.label,
+        "counts": line.counts,
+        "via": line.via,
+        "by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    store
+        .append_audit(scope, vessel, line.action, &detail, None, now_ms)
+        .await
 }
 
 fn find_doc(dir: &Path, suffix: &str) -> Option<(String, String)> {
@@ -366,6 +518,34 @@ fn find_doc(dir: &Path, suffix: &str) -> Option<(String, String)> {
     Some((name, text))
 }
 
+/// The boot loader: [`load_docs`] on the binary's own account, storing and
+/// ledgering every document `via: boot`. Kept for the boot path and the
+/// tests that boot the reference hull.
+///
+/// # Errors
+/// The first document that cannot be carried, with the reason.
+pub async fn load_demo_docs(
+    store: &dyn Repositories,
+    scope: &TenantScope,
+    vessel: VesselId,
+    dir: &Path,
+    now_ms: i64,
+) -> Result<LoadedDocuments, String> {
+    load_docs(
+        store,
+        scope,
+        vessel,
+        dir,
+        now_ms,
+        LoadVia {
+            via: "boot",
+            dry_run: false,
+        },
+    )
+    .await
+    .map_err(String::from)
+}
+
 /// Loads a directory of documents into a hull, in the order the doors would
 /// need them: the yard clock and the P6 field map first (the export that
 /// follows is read in the one and through the other), then the register
@@ -375,45 +555,88 @@ fn find_doc(dir: &Path, suffix: &str) -> Option<(String, String)> {
 /// `-register.csv`, `-zones.csv`, `-couplings.csv`, `-geometry.csv`,
 /// `-hazards.csv`); absent ones are skipped, and the seed stands in.
 ///
+/// Every stored document writes one `DOCUMENT_REPLACED` row with its kind,
+/// label, counts and `via` — the boot path included, which is the truth
+/// about where a served hull came from. With `dry_run`, every file is parsed
+/// and validated in order and nothing is stored or ledgered: later files
+/// validate against the register and geometry parsed earlier in the same
+/// run, which the store never saw.
+///
 /// # Errors
-/// The first document that cannot be carried, with the reason — the hull
-/// refuses to serve a half-loaded world as though it were the whole one.
-pub async fn load_demo_docs(
+/// The first document that cannot be carried, with the reason and the
+/// documents committed before it — the hull refuses to serve a half-loaded
+/// world as though it were the whole one, and says how far it got.
+pub async fn load_docs(
     store: &dyn Repositories,
     scope: &TenantScope,
     vessel: VesselId,
     dir: &Path,
     now_ms: i64,
-) -> Result<LoadedDocuments, String> {
-    let doors = Loader {
+    via: LoadVia<'_>,
+) -> Result<LoadedDocuments, LoadRefused> {
+    let mut doors = Loader {
         store,
         scope,
         vessel,
         now_ms,
+        via,
+        staged: Staged::default(),
+        lines: Vec::new(),
     };
     let mut loaded = LoadedDocuments::default();
     if let Some((name, text)) = find_doc(dir, "-clock.csv") {
-        loaded.clock = Some(doors.clock(&name, &text).await?);
+        match doors.clock(&name, &text).await {
+            Ok(c) => loaded.clock = Some(c),
+            Err(reason) => return Err(doors.refused(reason, loaded)),
+        }
     }
     if let Some((name, text)) = find_doc(dir, "-fieldmap.json") {
-        loaded.field_map = Some(doors.field_map(&name, &text).await?);
+        match doors.field_map(&name, &text).await {
+            Ok(c) => loaded.field_map = Some(c),
+            Err(reason) => return Err(doors.refused(reason, loaded)),
+        }
     }
     if let Some((name, text)) = find_doc(dir, "-register.csv") {
-        loaded.register = Some(doors.register(&name, &text).await?);
+        match doors.register(&name, &text).await {
+            Ok(c) => loaded.register = Some(c),
+            Err(reason) => return Err(doors.refused(reason, loaded)),
+        }
     }
     if let Some((name, text)) = find_doc(dir, "-zones.csv") {
-        loaded.zones = Some(doors.zones(&name, &text).await?);
+        match doors.zones(&name, &text).await {
+            Ok(c) => loaded.zones = Some(c),
+            Err(reason) => return Err(doors.refused(reason, loaded)),
+        }
     }
     if let Some((name, text)) = find_doc(dir, "-geometry.csv") {
-        loaded.geometry = Some(doors.geometry(&name, &text).await?);
+        match doors.geometry(&name, &text).await {
+            Ok(c) => loaded.geometry = Some(c),
+            Err(reason) => return Err(doors.refused(reason, loaded)),
+        }
     }
     if let Some((name, text)) = find_doc(dir, "-couplings.csv") {
-        loaded.couplings = Some(doors.couplings(&name, &text).await?);
+        match doors.couplings(&name, &text).await {
+            Ok(c) => loaded.couplings = Some(c),
+            Err(reason) => return Err(doors.refused(reason, loaded)),
+        }
     }
     if let Some((name, text)) = find_doc(dir, "-hazards.csv") {
-        loaded.hazards = Some(doors.hazards(&name, &text).await?);
+        match doors.hazards(&name, &text).await {
+            Ok(c) => loaded.hazards = Some(c),
+            Err(reason) => return Err(doors.refused(reason, loaded)),
+        }
     }
+    loaded.ledger = doors.lines;
     Ok(loaded)
+}
+
+/// The register and geometry as parsed in this load, so the documents after
+/// them validate against what this run carries — on a dry run the store
+/// never sees them, and on a real one they are what the store now holds.
+#[derive(Default)]
+struct Staged {
+    register: Option<CompartmentRegister>,
+    geometry: Option<GeometryRegister>,
 }
 
 /// One document at a time, each refusing with the file's name in front.
@@ -422,6 +645,9 @@ struct Loader<'a> {
     scope: &'a TenantScope,
     vessel: VesselId,
     now_ms: i64,
+    via: LoadVia<'a>,
+    staged: Staged,
+    lines: Vec<LedgerLine>,
 }
 
 fn err(name: &str, e: impl std::fmt::Display) -> String {
@@ -429,58 +655,160 @@ fn err(name: &str, e: impl std::fmt::Display) -> String {
 }
 
 impl Loader<'_> {
-    async fn clock(&self, name: &str, text: &str) -> Result<(String, String, usize), String> {
+    /// Whether this load stores anything.
+    fn storing(&self) -> bool {
+        !self.via.dry_run
+    }
+
+    /// The refusal, carrying what was committed before it.
+    fn refused(self, reason: String, mut loaded: LoadedDocuments) -> LoadRefused {
+        loaded.ledger = self.lines;
+        LoadRefused {
+            reason,
+            loaded_before: loaded,
+        }
+    }
+
+    /// One `DOCUMENT_REPLACED` row for a document just stored.
+    async fn ledger(
+        &mut self,
+        kind: &'static str,
+        label: &str,
+        counts: Value,
+    ) -> Result<(), String> {
+        let record = ledger_document_on(
+            self.store,
+            self.scope,
+            self.vessel,
+            DocumentLedgerLine {
+                action: "DOCUMENT_REPLACED",
+                kind,
+                label: Some(label),
+                counts,
+                via: self.via.via,
+            },
+            self.now_ms,
+        )
+        .await
+        .map_err(|e| err(label, e))?;
+        self.lines.push(LedgerLine {
+            kind: kind.to_owned(),
+            label: label.to_owned(),
+            seq: record.seq,
+        });
+        Ok(())
+    }
+
+    async fn clock(&mut self, name: &str, text: &str) -> Result<(String, String, usize), String> {
         let clock = crate::yard_clock::parse_clock_csv(text).map_err(|e| err(name, e))?;
         let problems = clock.validate();
         if !problems.is_empty() {
             return Err(err(name, problems.join("; ")));
         }
         let counts = (name.to_owned(), clock.zone.clone(), clock.shifts.len());
-        self.store
-            .set_yard_clock(
-                self.scope,
-                self.vessel,
-                wadl_store::memory::YardClockDoc {
-                    label: name.to_owned(),
-                    clock,
-                },
+        if self.storing() {
+            self.store
+                .set_yard_clock(
+                    self.scope,
+                    self.vessel,
+                    wadl_store::memory::YardClockDoc {
+                        label: name.to_owned(),
+                        clock,
+                    },
+                )
+                .await
+                .map_err(|e| err(name, e))?;
+            self.ledger(
+                "yard_clock",
+                name,
+                json!({ "zone": counts.1, "shifts": counts.2 }),
             )
-            .await
-            .map_err(|e| err(name, e))?;
+            .await?;
+        }
         Ok(counts)
     }
 
     /// The field map, in the JSON shape the door takes: refused whole with
     /// every reason, exactly as the door would refuse it.
-    async fn field_map(&self, name: &str, text: &str) -> Result<(String, String), String> {
+    async fn field_map(&mut self, name: &str, text: &str) -> Result<(String, String), String> {
         let value: serde_json::Value = serde_json::from_str(text).map_err(|e| err(name, e))?;
         let map: wadl_ingest::field_map::FieldMap =
             serde_json::from_value(value.clone()).map_err(|e| err(name, e))?;
         map.validate()
             .map_err(|problems| err(name, problems.join("; ")))?;
         let counts = (name.to_owned(), map.summary());
-        self.store
-            .set_field_map(
-                self.scope,
-                self.vessel,
-                wadl_store::memory::FieldMapDoc {
-                    label: name.to_owned(),
-                    map: value,
-                },
+        if self.storing() {
+            self.store
+                .set_field_map(
+                    self.scope,
+                    self.vessel,
+                    wadl_store::memory::FieldMapDoc {
+                        label: name.to_owned(),
+                        map: value,
+                    },
+                )
+                .await
+                .map_err(|e| err(name, e))?;
+            self.ledger(
+                "p6_field_map",
+                name,
+                json!({ "summary": counts.1, "projects": map.projects.len() }),
             )
-            .await
-            .map_err(|e| err(name, e))?;
+            .await?;
+        }
         Ok(counts)
     }
 
+    /// The hull's spaces: the register parsed in this load when there is
+    /// one, else the store's.
     async fn placards(&self) -> Result<Vec<CompartmentSummary>, String> {
+        if let Some(reg) = &self.staged.register {
+            return Ok(wadl_store::memory::register_compartments(reg));
+        }
         self.store
             .list_compartments(self.scope, self.vessel)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn register(&self, name: &str, text: &str) -> Result<(String, usize, usize), String> {
+    /// The hull's deck codes, from the same source as [`Self::placards`].
+    async fn deck_codes(&self) -> Result<BTreeSet<String>, String> {
+        if let Some(reg) = &self.staged.register {
+            return Ok(reg.decks.iter().map(|d| d.code.clone()).collect());
+        }
+        Ok(self
+            .store
+            .list_decks(self.scope, self.vessel)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|d| d.code)
+            .collect())
+    }
+
+    /// Surveyed extents by placard: this load's geometry when parsed, else
+    /// the store's.
+    async fn extents(&self) -> Result<BTreeMap<String, (i32, i32)>, String> {
+        let staged = self.staged.geometry.clone();
+        let stored = match staged {
+            Some(g) => Some(g),
+            None => self
+                .store
+                .geometry_register(self.scope, self.vessel)
+                .await
+                .map_err(|e| e.to_string())?,
+        };
+        Ok(stored
+            .map(|g| {
+                g.spaces
+                    .iter()
+                    .map(|s| (s.compartment_no.clone(), (s.fwd_frame, s.aft_frame)))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn register(&mut self, name: &str, text: &str) -> Result<(String, usize, usize), String> {
         let (decks, spaces) = parse_register_csv(text).map_err(|e| err(name, e))?;
         let known: BTreeSet<&str> = decks.iter().map(|d| d.code.as_str()).collect();
         if let Some(s) = spaces
@@ -496,32 +824,33 @@ impl Loader<'_> {
             ));
         }
         let counts = (name.to_owned(), decks.len(), spaces.len());
-        self.store
-            .set_compartment_register(
-                self.scope,
-                self.vessel,
-                CompartmentRegister {
-                    label: name.to_owned(),
-                    decks,
-                    spaces,
-                },
+        let register = CompartmentRegister {
+            label: name.to_owned(),
+            decks,
+            spaces,
+        };
+        if self.storing() {
+            self.store
+                .set_compartment_register(self.scope, self.vessel, register.clone())
+                .await
+                .map_err(|e| err(name, e))?;
+            self.ledger(
+                "compartment_register",
+                name,
+                json!({ "decks": counts.1, "spaces": counts.2 }),
             )
-            .await
-            .map_err(|e| err(name, e))?;
+            .await?;
+        }
+        self.staged.register = Some(register);
         Ok(counts)
     }
 
-    async fn zones(&self, name: &str, text: &str) -> Result<(String, usize), String> {
+    async fn zones(&mut self, name: &str, text: &str) -> Result<(String, usize), String> {
         let bounds = parse_zones_csv(text).map_err(|e| err(name, e))?;
-        let decks = self
-            .store
-            .list_decks(self.scope, self.vessel)
-            .await
-            .map_err(|e| e.to_string())?;
-        let deck_codes: BTreeSet<&str> = decks.iter().map(|d| d.code.as_str()).collect();
+        let deck_codes = self.deck_codes().await?;
         for b in &bounds {
             for code in [&b.top_deck, &b.bottom_deck].into_iter().flatten() {
-                if !deck_codes.contains(code.as_str()) {
+                if !deck_codes.contains(code) {
                     return Err(err(
                         name,
                         format!("{}: deck {code:?} is not one the register carries", b.zone),
@@ -530,39 +859,53 @@ impl Loader<'_> {
             }
         }
         let counts = (name.to_owned(), bounds.len());
-        self.store
-            .set_zone_register(
-                self.scope,
-                self.vessel,
-                ZoneRegister {
-                    label: name.to_owned(),
-                    bounds,
-                },
-            )
-            .await
-            .map_err(|e| err(name, e))?;
+        if self.storing() {
+            self.store
+                .set_zone_register(
+                    self.scope,
+                    self.vessel,
+                    ZoneRegister {
+                        label: name.to_owned(),
+                        bounds,
+                    },
+                )
+                .await
+                .map_err(|e| err(name, e))?;
+            self.ledger("zone_register", name, json!({ "blocks": counts.1 }))
+                .await?;
+        }
         Ok(counts)
     }
 
-    async fn geometry(&self, name: &str, text: &str) -> Result<(String, usize, usize), String> {
+    async fn geometry(&mut self, name: &str, text: &str) -> Result<(String, usize, usize), String> {
         let (spaces, bands) = parse_geometry_csv(text).map_err(|e| err(name, e))?;
         let counts = (name.to_owned(), spaces.len(), bands.len());
-        self.store
-            .set_geometry_register(
-                self.scope,
-                self.vessel,
-                GeometryRegister {
-                    label: name.to_owned(),
-                    spaces,
-                    decks: bands,
-                },
+        let register = GeometryRegister {
+            label: name.to_owned(),
+            spaces,
+            decks: bands,
+        };
+        if self.storing() {
+            self.store
+                .set_geometry_register(self.scope, self.vessel, register.clone())
+                .await
+                .map_err(|e| err(name, e))?;
+            self.ledger(
+                "geometry_register",
+                name,
+                json!({ "spaces": counts.1, "deck_bands": counts.2 }),
             )
-            .await
-            .map_err(|e| err(name, e))?;
+            .await?;
+        }
+        self.staged.geometry = Some(register);
         Ok(counts)
     }
 
-    async fn couplings(&self, name: &str, text: &str) -> Result<(String, usize, usize), String> {
+    async fn couplings(
+        &mut self,
+        name: &str,
+        text: &str,
+    ) -> Result<(String, usize, usize), String> {
         let authored = parse_couplings_csv(text).map_err(|e| err(name, e))?;
         let compartments = self.placards().await?;
         let placards: BTreeSet<&str> = compartments
@@ -592,44 +935,41 @@ impl Loader<'_> {
         }
         // Surveyed extents, where the geometry register has them, make the
         // derivation honest about what overlaps what.
+        let extents = self.extents().await?;
         let mut with_extents = compartments;
-        if let Some(g) = self
-            .store
-            .geometry_register(self.scope, self.vessel)
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            let extents: BTreeMap<&str, (i32, i32)> = g
-                .spaces
-                .iter()
-                .map(|s| (s.compartment_no.as_str(), (s.fwd_frame, s.aft_frame)))
-                .collect();
-            for c in &mut with_extents {
-                if let Some(&(fwd, aft)) = extents.get(c.compartment_no.as_str()) {
-                    c.fwd_frame = Some(fwd);
-                    c.aft_frame = Some(aft);
-                }
+        for c in &mut with_extents {
+            if let Some(&(fwd, aft)) = extents.get(c.compartment_no.as_str()) {
+                c.fwd_frame = Some(fwd);
+                c.aft_frame = Some(aft);
             }
         }
         let derived = derive_vertical_edges(&with_extents, &authored);
         let counts = (name.to_owned(), authored.len(), derived.len());
-        let mut edges = authored;
-        edges.extend(derived);
-        self.store
-            .set_coupling_register(
-                self.scope,
-                self.vessel,
-                CouplingRegister {
-                    label: name.to_owned(),
-                    edges,
-                },
+        if self.storing() {
+            let mut edges = authored;
+            edges.extend(derived);
+            self.store
+                .set_coupling_register(
+                    self.scope,
+                    self.vessel,
+                    CouplingRegister {
+                        label: name.to_owned(),
+                        edges,
+                    },
+                )
+                .await
+                .map_err(|e| err(name, e))?;
+            self.ledger(
+                "coupling_register",
+                name,
+                json!({ "authored": counts.1, "derived": counts.2 }),
             )
-            .await
-            .map_err(|e| err(name, e))?;
+            .await?;
+        }
         Ok(counts)
     }
 
-    async fn hazards(&self, name: &str, text: &str) -> Result<(String, usize), String> {
+    async fn hazards(&mut self, name: &str, text: &str) -> Result<(String, usize), String> {
         let lines = parse_hazard_log_csv(text).map_err(|e| err(name, e))?;
         let compartments = self.placards().await?;
         let placards: BTreeSet<&str> = compartments
@@ -659,18 +999,28 @@ impl Loader<'_> {
             {
                 continue;
             }
-            self.store
-                .raise_hazard(
-                    self.scope,
-                    self.vessel,
-                    &l.compartment,
-                    l.kind,
-                    l.since_ms.unwrap_or(self.now_ms),
-                    &l.label,
-                )
-                .await
-                .map_err(|e| err(name, e))?;
+            if self.storing() {
+                self.store
+                    .raise_hazard(
+                        self.scope,
+                        self.vessel,
+                        &l.compartment,
+                        l.kind,
+                        l.since_ms.unwrap_or(self.now_ms),
+                        &l.label,
+                    )
+                    .await
+                    .map_err(|e| err(name, e))?;
+            }
             raised += 1;
+        }
+        if self.storing() {
+            self.ledger(
+                "hazard_log",
+                name,
+                json!({ "listed": lines.len(), "raised": raised }),
+            )
+            .await?;
         }
         Ok((name.to_owned(), raised))
     }

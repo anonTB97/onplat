@@ -36,7 +36,7 @@ use wadl_store::model::{
     ActivityStatus, ActivitySummary, ImportedBy, QuarantinedRow, Reliability, RunCounts,
     ScheduleEdgeSummary, ScheduleRun, ScheduleRunReport, ScheduleRunSummary,
 };
-use wadl_store::{Actor, ActorSource, TenantScope};
+use wadl_store::{Actor, ActorSource, Repositories, TenantScope};
 
 /// A stable activity id from the hull and the scheduler's own code:
 /// `sha256("wadl:activity:" ‖ hull uuid ‖ ":" ‖ task_code)`, first sixteen
@@ -371,7 +371,7 @@ pub fn field_map_in_effect(
     }
 }
 
-/// What the boot loader loaded, for the banner.
+/// What a load of an export did, for the banner and the CLI's line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedSchedule {
     /// Activities served.
@@ -389,14 +389,51 @@ pub struct LoadedSchedule {
     pub quarantine: Vec<String>,
     /// The map's findings against the file.
     pub findings: Vec<String>,
-    /// The run as recorded — `seq` 1 on a fresh boot.
+    /// The run as recorded — `seq` 1 on a fresh hull; `seq` 0 on a dry run,
+    /// which records nothing.
     pub run: ScheduleRunSummary,
+    /// The `SCHEDULE_REPLACED` ledger row's `seq`, when one was written.
+    pub ledger_seq: Option<i64>,
+}
+
+/// The banner's view of a parse and the run it became.
+fn loaded_schedule(
+    parsed: &ParsedSchedule,
+    encoding: wadl_ingest::encoding::Encoding,
+    field_map_label: Option<String>,
+    run: ScheduleRunSummary,
+    ledger_seq: Option<i64>,
+) -> LoadedSchedule {
+    LoadedSchedule {
+        activities: parsed.sor.activities.len(),
+        parsed_in: parsed.sor.parsed_in.clone().unwrap_or_default(),
+        wall_clock_findings: parsed.report.wall_clock_findings.clone(),
+        encoding: encoding.describe().to_owned(),
+        field_map_label,
+        quarantine: parsed
+            .report
+            .rejected
+            .iter()
+            .map(|r| {
+                format!(
+                    "line {} · {} · {}",
+                    r.row,
+                    r.code.as_deref().unwrap_or(r.table.as_str()),
+                    r.reason
+                )
+            })
+            .collect(),
+        findings: parsed.report.findings.clone(),
+        run,
+        ledger_seq,
+    }
 }
 
 /// Reads an export's bytes in the hull's clock and through its field map —
 /// both the store's, read unscoped, which is why the documents load before
 /// the export — and records the load as a boot run at `now_ms`, served. A
 /// quarantine at boot is reported and the rest is served, as the door would.
+/// Memory-only and unledgered; the boot path and the CLI use [`commit_xer`].
 ///
 /// # Errors
 /// See [`whole_file_refusal`]; a hull the store does not carry; a stored
@@ -434,28 +471,131 @@ pub fn load_xer(
     let summary = store
         .load_schedule_run(vessel, run)
         .map_err(|e| e.to_string())?;
-    Ok(LoadedSchedule {
-        activities: parsed.sor.activities.len(),
-        parsed_in,
-        wall_clock_findings: parsed.report.wall_clock_findings.clone(),
-        encoding: encoding.describe().to_owned(),
+    Ok(loaded_schedule(
+        &parsed,
+        encoding,
         field_map_label,
-        quarantine: parsed
-            .report
-            .rejected
-            .iter()
-            .map(|r| {
-                format!(
-                    "line {} · {} · {}",
-                    r.row,
-                    r.code.as_deref().unwrap_or(r.table.as_str()),
-                    r.reason
-                )
-            })
-            .collect(),
-        findings: parsed.report.findings.clone(),
-        run: summary,
-    })
+        summary,
+        None,
+    ))
+}
+
+/// One export to commit through the scoped path — the boot loader's and the
+/// CLI's, on either store.
+#[derive(Debug, Clone, Copy)]
+pub struct XerLoad<'a> {
+    /// The source label, e.g. `CVN73-PIA26-full.xer`.
+    pub label: &'a str,
+    /// The file's bytes, decoded here (UTF-8 or Windows-1252).
+    pub bytes: &'a [u8],
+    /// `boot`, `cli` or `test` — on the run and on the ledger row.
+    pub via: &'a str,
+    /// The commit instant, epoch millis — the caller's clock.
+    pub now_ms: i64,
+    /// Parse and report; record and ledger nothing.
+    pub dry_run: bool,
+}
+
+/// Commits an export as the hull's schedule of record exactly as the door
+/// does, on any store and under a scope: decoded here, read through the
+/// hull's stored field map and in its yard clock, recorded as a run with
+/// `imported_by { org, person, via }` and served, and ledgered
+/// `SCHEDULE_REPLACED` with the run's record (`delta: null` — the door's
+/// re-import delta is computed against a served register at request time;
+/// this path is the load itself). A quarantine is reported and the rest is
+/// served. With `dry_run`, the parse is reported and nothing is written.
+///
+/// # Errors
+/// A hull outside `scope`; see [`whole_file_refusal`]; a stored field map
+/// that will not parse; a store that refuses the run or the ledger row.
+pub async fn commit_xer(
+    store: &dyn Repositories,
+    scope: &TenantScope,
+    vessel: VesselId,
+    load: XerLoad<'_>,
+) -> Result<LoadedSchedule, String> {
+    store
+        .get_vessel(scope, vessel)
+        .await
+        .map_err(|e| format!("hull {vessel}: {e}"))?;
+    let (text, encoding) = wadl_ingest::encoding::decode_xer(load.bytes);
+    let map_doc = store
+        .field_map(scope, vessel)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (map, field_map_label) = field_map_in_effect(map_doc.as_ref())?;
+    let map_source = if field_map_label.is_some() {
+        "document"
+    } else {
+        "default"
+    };
+    let clock_doc = store
+        .yard_clock(scope, vessel)
+        .await
+        .map_err(|e| e.to_string())?;
+    let effect = crate::yard_clock::ClockInEffect::from_doc(clock_doc);
+    let parsed_in = effect.parsed_in();
+    let parsed = parse_xer_in(vessel, load.label, &text, &map, &effect.clock, &parsed_in)?;
+    let run = build_run(
+        &parsed,
+        &RunInputs {
+            label: load.label,
+            encoding: encoding.label(),
+            decoded_by: wadl_ingest::encoding::DECODED_BY_SERVER,
+            imported_by: imported_by(scope, load.via),
+            imported_at_ms: load.now_ms,
+            field_map: &map,
+        },
+    );
+    if load.dry_run {
+        let summary = run.summary.clone();
+        return Ok(loaded_schedule(
+            &parsed,
+            encoding,
+            field_map_label,
+            summary,
+            None,
+        ));
+    }
+    let summary = store
+        .commit_schedule_run(scope, vessel, run)
+        .await
+        .map_err(|e| e.to_string())?;
+    let detail = serde_json::json!({
+        "label": summary.label,
+        "activities": summary.counts.served,
+        "edges": summary.counts.edges,
+        "delta": serde_json::Value::Null,
+        "parsed_in": parsed_in,
+        "run_id": summary.run_id,
+        "seq": summary.seq,
+        "imported_by": summary.imported_by,
+        "encoding": summary.encoding,
+        "decoded_by": summary.decoded_by,
+        "field_map": summary.field_map,
+        "field_map_source": map_source,
+        "counts": summary.counts,
+        "via": load.via,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = store
+        .append_audit(
+            scope,
+            vessel,
+            "SCHEDULE_REPLACED",
+            &detail,
+            None,
+            load.now_ms,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(loaded_schedule(
+        &parsed,
+        encoding,
+        field_map_label,
+        summary,
+        Some(record.seq),
+    ))
 }
 
 #[cfg(test)]

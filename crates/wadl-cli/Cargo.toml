@@ -28,6 +28,9 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+# `--org`/`--vessel` on `load-docs` are uuids; v7 mints the test hulls the
+# database tests bootstrap. Already in the tree (store, api, ingest).
+uuid = { workspace = true, features = ["v7"] }
 
 [lints]
 workspace = true

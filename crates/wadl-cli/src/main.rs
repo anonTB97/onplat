@@ -5,13 +5,16 @@
 //! `verify-ledger` re-hashes the audit chain and reports the first break,
 //! `ingest-xer` reads a P6 export (`--survey` for the mail-back that carries
 //! no schedule content), `support-bundle` collects what you would otherwise
-//! never get off a production box into one redacted file, and `version`
-//! prints the release stamp this tree was built with.
+//! never get off a production box into one redacted file, `version` prints
+//! the release stamp this tree was built with, `bootstrap-hull` applies the
+//! hull-row statement as the owner, and `load-docs` loads a hull's documents
+//! and export through the doors' own paths, ledgered.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::doc_markdown)]
 
 mod bootstrap;
+mod load_docs;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -99,6 +102,32 @@ enum Command {
         #[arg(long)]
         database_url: Option<String>,
     },
+    /// Load a hull's documents (and optionally a P6 export) through the
+    /// doors' own parsers and store calls, each commit ledgered.
+    LoadDocs {
+        /// The directory of documents (`reference/cvn73` is the shipped one).
+        #[arg(long)]
+        dir: PathBuf,
+        /// A P6 XER export to commit as the schedule of record after them.
+        #[arg(long)]
+        xer: Option<PathBuf>,
+        /// The tenant's uuid (the `x-org-id` the proxy asserts).
+        #[arg(long)]
+        org: uuid::Uuid,
+        /// The hull's uuid (the `x-assigned-vessels` entry).
+        #[arg(long)]
+        vessel: uuid::Uuid,
+        /// The person on the record; the binary's own account without one.
+        #[arg(long)]
+        person: Option<String>,
+        /// Parse and validate every file in order; commit nothing. Without a
+        /// database, validates against a scratch in-memory hull.
+        #[arg(long)]
+        dry_run: bool,
+        /// PostgreSQL URL. Falls back to `DATABASE_URL`.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
 }
 
 /// The exit code for a refusal: the input was read and rejected for a reason
@@ -142,6 +171,26 @@ async fn run() -> Result<ExitCode> {
             dry_run,
             database_url,
         } => bootstrap::run(&statement, dry_run, database_url).await,
+        Command::LoadDocs {
+            dir,
+            xer,
+            org,
+            vessel,
+            person,
+            dry_run,
+            database_url,
+        } => {
+            load_docs::run(load_docs::LoadDocsArgs {
+                dir,
+                xer,
+                org,
+                vessel,
+                person,
+                dry_run,
+                database_url,
+            })
+            .await
+        }
     }
 }
 

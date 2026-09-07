@@ -93,8 +93,10 @@ pub(crate) async fn run(
     }
 }
 
-/// The four rows as the statement names them, one line each.
-fn describe(s: &HullStatement) -> [String; 4] {
+/// The rows as the statement names them, one line each: its four, then the
+/// tenant's baseline reference data.
+fn describe(s: &HullStatement) -> [String; 6] {
+    let rules = wadl_engine::RuleSet::seed_usn_hot_work();
     [
         format!("{} ({})", s.organization.name, s.organization.kind),
         format!("{} · {}", s.class.code, s.class.name),
@@ -114,14 +116,33 @@ fn describe(s: &HullStatement) -> [String; 4] {
                 .map(|l| format!(" · {l}"))
                 .unwrap_or_default()
         ),
+        format!(
+            "baseline coupling types · {}",
+            wadl_store::pg_bootstrap::BASELINE_COUPLING_TYPES
+                .iter()
+                .map(|(code, ..)| *code)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        format!(
+            "baseline rule set · USN hot work, {} rules",
+            rules.entries().len()
+        ),
     ]
 }
 
 /// The plan without a database: every row would be created.
 fn print_statement(s: &HullStatement) {
-    for (name, what) in ["organization", "class", "vessel", "availability"]
-        .into_iter()
-        .zip(describe(s))
+    for (name, what) in [
+        "organization",
+        "class",
+        "vessel",
+        "availability",
+        "coupling_types",
+        "rules",
+    ]
+    .into_iter()
+    .zip(describe(s))
     {
         println!("{name:<14} would create   {what}");
     }

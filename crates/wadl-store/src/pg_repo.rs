@@ -70,93 +70,16 @@ impl PgStore {
     /// # Errors
     /// [`StoreError::Backend`] if any statement fails.
     pub async fn seed_demo(&self) -> Result<(), StoreError> {
+        const YARD_ORG: uuid::Uuid = uuid::Uuid::from_u128(0x01);
         // The seed is many statements; `execute` on a raw multi-statement string
         // runs them in one implicit transaction.
         sqlx::raw_sql(SEED_SQL).execute(self.pool()).await?;
-        self.seed_demo_rules().await
-    }
-
-    /// Seeds the demo rule set programmatically from
-    /// [`wadl_engine::RuleSet::seed_usn_hot_work`], per the 0011 payload
-    /// contract: `trigger_expr` is the serde form of the engine's `RuleEntry`,
-    /// so what `rules_in_force` deserializes is byte-identical to what the
-    /// engine was written against. SQL literals here would be a hand-copied
-    /// shadow of that shape, and hand copies drift.
-    async fn seed_demo_rules(&self) -> Result<(), StoreError> {
-        use wadl_engine::rules::Applies;
-
-        const YARD_ORG: uuid::Uuid = uuid::Uuid::from_u128(0x01);
-        let entries = wadl_engine::RuleSet::seed_usn_hot_work();
-        let mut version_no: std::collections::BTreeMap<String, i32> =
-            std::collections::BTreeMap::new();
-        for entry in entries.entries() {
-            let rule_no: u128 = entry
-                .rule_code
-                .trim_start_matches('R')
-                .parse()
-                .map_err(|_| {
-                    StoreError::Backend(format!("unparseable rule code {:?}", entry.rule_code))
-                })?;
-            let rule_id = uuid::Uuid::from_u128(0x00E0_0000_0000 + rule_no);
-            sqlx::query(
-                "INSERT INTO rule (rule_id, org_id, code, name, kind)
-                 VALUES ($1, $2, $3, $3, 'hazard_cascade')
-                 ON CONFLICT (rule_id) DO NOTHING",
-            )
-            .bind(rule_id)
-            .bind(YARD_ORG)
-            .bind(&entry.rule_code)
-            .execute(self.pool())
-            .await?;
-
-            let version = version_no.entry(entry.rule_code.clone()).or_insert(0);
-            *version += 1;
-            let state = match entry.state {
-                wadl_engine::DecisionState::Allow => "ALLOW",
-                wadl_engine::DecisionState::Warn => "WARN",
-                wadl_engine::DecisionState::Block => "BLOCK",
-                wadl_engine::DecisionState::Suspend => "SUSPEND",
-            };
-            let max_hops: Option<i32> = match &entry.applies {
-                Applies::SameSpace => None,
-                Applies::Coupled { max_hops, .. } => Some(i32::from(max_hops.get())),
-            };
-            let trigger = serde_json::to_value(entry)
-                .map_err(|e| StoreError::Backend(format!("rule payload: {e}")))?;
-            let clearing = serde_json::json!({
-                "clearing_authority": entry.clearing_authority,
-                "hold_minutes": entry.hold.map(wadl_domain::units::Minutes::get),
-            });
-            sqlx::query(
-                "INSERT INTO rule_version
-                    (rule_version_id, rule_id, version_no, effective_from,
-                     trigger_expr, max_hops, result_state, clearing_expr,
-                     clearing_authority, waivable)
-                 VALUES ($1, $2, $3, timestamptz '2026-01-01 00:00Z',
-                         $4, $5, $6::decision_state, $7, $8, $9)
-                 ON CONFLICT (rule_version_id) DO NOTHING",
-            )
-            .bind(entry.rule_version.as_uuid())
-            .bind(rule_id)
-            .bind(*version)
-            .bind(trigger)
-            .bind(max_hops)
-            .bind(state)
-            .bind(clearing)
-            .bind(&entry.clearing_authority)
-            .bind(entry.waivable)
-            .execute(self.pool())
-            .await?;
-
-            sqlx::query(
-                "INSERT INTO rule_binding (rule_version_id, class_id, work_type, category)
-                 VALUES ($1, NULL, 'hot_work', NULL)
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(entry.rule_version.as_uuid())
-            .execute(self.pool())
-            .await?;
-        }
+        // The demo rule set is the baseline every tenant gets at bootstrap,
+        // installed through the same function (`pg_bootstrap`), so the seed
+        // and a bootstrapped pilot tenant evaluate one rule set.
+        let mut tx = self.pool().begin().await?;
+        crate::pg_bootstrap::install_baseline_rules(&mut tx, YARD_ORG, false).await?;
+        tx.commit().await?;
         Ok(())
     }
 

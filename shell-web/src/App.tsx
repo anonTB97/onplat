@@ -694,6 +694,10 @@ export default function App() {
               verdictsOk={outOfScope ? null : verdictsOk}
               role={persona.name}
               onOpenSpace={jump}
+              onOpenModule={(id) => {
+                const target = MODULES.find((mod) => mod.id === id && mod.built);
+                if (target) setModule(target);
+              }}
             />
           )}
 

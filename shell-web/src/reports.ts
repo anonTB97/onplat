@@ -18,15 +18,19 @@ import { STATE_STYLE } from "./theme";
 import { activityWindowHours, refusalOverlaps } from "./windowLoad";
 import { offsetAt, offsetLabel, shiftChip, shiftWindows, type YardClock } from "./yardClock";
 
-export type ReportId = "shift" | "zone" | "compartment" | "conflicts" | "conditions";
+export type ReportId = "shift" | "zone" | "compartment" | "conflicts" | "conditions" | "tomorrow" | "keyEvent";
 
-/** The catalogue: what each report is, for whom, and what it answers. */
-export const CATALOGUE: { id: ReportId; name: string; audience: string; question: string }[] = [
+/** The catalogue: what each report is, for whom, and what it answers. A
+ *  sheet whose reads live on another board (the engine at a future instant,
+ *  the schedule's logic walked) names that board in `cutOn` and is cut there. */
+export const CATALOGUE: { id: ReportId; name: string; audience: string; question: string; cutOn?: string }[] = [
   { id: "shift", name: "Shift sheet", audience: "trade foremen · production super", question: "Who goes where this shift, and what stands in front of them" },
   { id: "zone", name: "Zone day sheet", audience: "zone managers", question: "What runs in my zone, what is held, and who clears it" },
   { id: "compartment", name: "Compartment card", audience: "foremen · safety · ship's force", question: "Everything about one space: work in it, what holds it, who can release it" },
   { id: "conflicts", name: "Conflict log", audience: "superintendents · safety · project management", question: "Every open conflict, ranked, with what was answered for" },
   { id: "conditions", name: "Field-condition register", audience: "safety · ship's force · planners", question: "Every open field condition on the hull: where, since when, who clears it" },
+  { id: "tomorrow", name: "Tomorrow's board", audience: "production super · trade foremen", question: "What the next shift walks into, and who can clear it tonight", cutOn: "dailyOps" },
+  { id: "keyEvent", name: "Key-event readiness", audience: "project super · programme office", question: "Work gating the next key event, worst first, with what P6 has been asked", cutOn: "week" },
 ];
 
 export interface ReportCut {

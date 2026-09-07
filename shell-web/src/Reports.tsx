@@ -42,17 +42,22 @@ import { chipStyle, C, commitBtnStyle, tdStyle, thStyle } from "./theme";
 
 const DAY = 86_400_000;
 
-function download(lines: string[], filename: string): void {
-  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+/** The board a `cutOn` sheet is produced on, said the way the rail says it. */
+const CUT_ON_WORD: Record<string, string> = { dailyOps: "Tomorrow board (Daily Ops)", week: "Week Ahead board" };
+
+/** Hands the report's CSV to the browser as a download named for its cut. */
+export function downloadCsv(report: Report): void {
+  const blob = new Blob([toCsv(report).join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = filename;
+  link.download = reportFilename(report, "csv");
   link.click();
   URL.revokeObjectURL(url);
 }
 
-function print(report: Report): void {
+/** Opens the monochrome one-pager and asks the browser to print it. */
+export function printReport(report: Report): void {
   const w = window.open("", "_blank", "width=900,height=1000");
   if (!w) return;
   w.document.write(toPrintHtml(report));
@@ -72,6 +77,7 @@ export default function Reports({
   verdictsOk,
   role,
   onOpenSpace,
+  onOpenModule,
 }: {
   identity: Identity;
   vesselId: string;
@@ -86,6 +92,8 @@ export default function Reports({
   /** The role producing the sheet — the person, once identity lands. */
   role: string;
   onOpenSpace: (compartment: string) => void;
+  /** Opens the board a `cutOn` sheet is produced on — its reads live there. */
+  onOpenModule: (id: string) => void;
 }) {
   const [which, setWhich] = useState<ReportId>("shift");
   // The yard's shifts by the yard's names; the first named shift is the
@@ -176,6 +184,11 @@ export default function Reports({
         return conflictLog({ cut, issues, spaces, zone });
       case "conditions":
         return fieldConditions({ cut, hazards, spaces });
+      case "tomorrow":
+      case "keyEvent":
+        // Cut on their own boards: the engine at a future instant and the
+        // schedule's logic are read there, not here.
+        return null;
     }
     // `clockEpoch` stands for the module clock every cut reads.
   }, [register, hazards, hullLabel, role, which, spaces, chosen, zone, worstZone, space, worstSpace, decision, issues, clockEpoch]);
@@ -188,7 +201,7 @@ export default function Reports({
         kicker={`Reports · ${hullLabel}`}
         title="Dated cuts to print, export, and take to the meeting"
         stats={[
-          { value: CATALOGUE.length, label: "reports" },
+          { value: CATALOGUE.length, label: "reports", title: `${CATALOGUE.filter((c) => !c.cutOn).length} cut here; ${CATALOGUE.filter((c) => c.cutOn).length} cut on the boards that hold their reads.` },
           register && { value: register.activities.length, label: "activities in the register" },
           hazards && { value: hazards.length, label: "open field conditions" },
           { value: issues.length, label: "open issues" },
@@ -202,22 +215,28 @@ export default function Reports({
         </div>
       )}
 
-      {/* The catalogue: pick a report by the question it answers. */}
+      {/* The catalogue: pick a report by the question it answers. A sheet
+          cut on another board (its reads live there) is a link to that board. */}
       <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", marginBottom: 12 }}>
         {CATALOGUE.map((c) => (
           <button
             key={c.id}
-            onClick={() => setWhich(c.id)}
+            onClick={() => (c.cutOn ? onOpenModule(c.cutOn) : setWhich(c.id))}
             aria-pressed={which === c.id}
+            title={c.cutOn ? `This sheet is cut on the ${CUT_ON_WORD[c.cutOn] ?? c.cutOn}, where its reads are — opens it.` : undefined}
             style={{
               textAlign: "left", font: "inherit", cursor: "pointer", padding: "9px 11px", borderRadius: 7,
               background: which === c.id ? C.raised : C.panel, color: C.text,
               border: `1px solid ${which === c.id ? C.accent : C.line}`,
+              borderStyle: c.cutOn ? "dashed" : "solid",
             }}
           >
             <div style={{ fontSize: 12.5, fontWeight: 700 }}>{c.name}</div>
             <div style={{ fontSize: 10.5, color: C.dim, marginTop: 2 }}>{c.audience}</div>
             <div style={{ fontSize: 11, color: C.bright, marginTop: 4 }}>{c.question}</div>
+            {c.cutOn && (
+              <div style={{ fontSize: 10.5, color: C.accent, marginTop: 5 }}>Cut on the {CUT_ON_WORD[c.cutOn] ?? c.cutOn} →</div>
+            )}
           </button>
         ))}
       </div>
@@ -269,7 +288,7 @@ export default function Reports({
         <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <button
             disabled={!report}
-            onClick={() => report && download(toCsv(report), reportFilename(report, "csv"))}
+            onClick={() => report && downloadCsv(report)}
             style={{ ...chipStyle(false), opacity: report ? 1 : 0.5 }}
             title="The same table as CSV, with the cut in its first rows"
           >
@@ -277,7 +296,7 @@ export default function Reports({
           </button>
           <button
             disabled={!report}
-            onClick={() => report && print(report)}
+            onClick={() => report && printReport(report)}
             style={{ ...commitBtnStyle, opacity: report ? 1 : 0.5 }}
             title="A monochrome one-pager for the clipboard wall — the warnings survive a photocopier"
           >

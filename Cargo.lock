@@ -2198,6 +2198,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tower",
  "uuid",

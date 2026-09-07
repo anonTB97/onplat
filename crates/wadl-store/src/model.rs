@@ -527,6 +527,34 @@ pub struct AuditRecord {
     pub chain_version: u8,
 }
 
+/// One applied migration as the database records it (`_sqlx_migrations`),
+/// for the support bundle and the runbook's upgrade check.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AppliedMigration {
+    /// The `NNNN` number.
+    pub version: i64,
+    /// The file's description.
+    pub description: String,
+    /// When it was applied, RFC 3339.
+    pub installed_on: String,
+    /// Whether it completed.
+    pub success: bool,
+}
+
+/// One ingested document a hull holds — what, not its content — for the
+/// support bundle.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DocumentInventoryRow {
+    /// The hull number, e.g. `CVN-73`.
+    pub hull_no: String,
+    /// The document kind, e.g. `compartment_register`.
+    pub kind: String,
+    /// The document's label — the file name.
+    pub label: String,
+    /// When it was committed, epoch millis.
+    pub ingested_at_ms: i64,
+}
+
 /// Who imported a schedule run, and through which door.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportedBy {

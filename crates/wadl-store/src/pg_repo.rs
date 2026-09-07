@@ -1851,38 +1851,46 @@ impl Repositories for PgStore {
     ) -> Result<Vec<AuditRecord>, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         let mut tx = self.with_tenant(scope.org).await?;
-        let rows = sqlx::query(
-            "SELECT entry_id, action, detail, subject_ref,
-                    (EXTRACT(EPOCH FROM occurred_at) * 1000)::bigint AS occurred_at_ms,
-                    prev_hash, entry_hash, actor_id, actor_name, chain_version
-               FROM audit_entry
-              WHERE vessel_id = $1
-                AND ($2::text IS NULL OR subject_ref = $2)
-              ORDER BY entry_id DESC",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {AUDIT_COLUMNS}
+               FROM audit_entry a
+              WHERE a.vessel_id = $1
+                AND ($2::text IS NULL OR a.subject_ref = $2)
+              ORDER BY a.entry_id DESC"
+        ))
         .bind(vessel.as_uuid())
         .bind(subject_ref)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| AuditRecord {
-                seq: row.get("entry_id"),
-                action: row.get("action"),
-                detail: row.get("detail"),
-                subject_ref: row.get("subject_ref"),
-                occurred_at_ms: row.get("occurred_at_ms"),
-                entry_hash: hex::encode(row.get::<Vec<u8>, _>("entry_hash")),
-                prev_hash: row.get::<Option<Vec<u8>>, _>("prev_hash").map(hex::encode),
-                actor_id: row.get("actor_id"),
-                actor_name: row.get("actor_name"),
-                // A version outside u8 is not a version this build can hash;
-                // 0 makes `verify_records` report it as a mismatch rather than
-                // silently reading it as format 1.
-                chain_version: u8::try_from(row.get::<i16, _>("chain_version")).unwrap_or(0),
-            })
-            .collect())
+        Ok(rows.iter().map(audit_record_from_row).collect())
+    }
+}
+
+/// The columns [`audit_record_from_row`] reads, for any `audit_entry` select
+/// (`a` is the table's alias).
+pub(crate) const AUDIT_COLUMNS: &str = "a.entry_id, a.action, a.detail, a.subject_ref,
+                    (EXTRACT(EPOCH FROM a.occurred_at) * 1000)::bigint AS occurred_at_ms,
+                    a.prev_hash, a.entry_hash, a.actor_id, a.actor_name, a.chain_version";
+
+/// One `audit_entry` row as the API serves it — the tenant-scoped read and
+/// the owner-mode chain walk (`audit_chains_all`) map rows through this one
+/// function so a ledger row reads the same whichever session read it.
+pub(crate) fn audit_record_from_row(row: &sqlx::postgres::PgRow) -> AuditRecord {
+    AuditRecord {
+        seq: row.get("entry_id"),
+        action: row.get("action"),
+        detail: row.get("detail"),
+        subject_ref: row.get("subject_ref"),
+        occurred_at_ms: row.get("occurred_at_ms"),
+        entry_hash: hex::encode(row.get::<Vec<u8>, _>("entry_hash")),
+        prev_hash: row.get::<Option<Vec<u8>>, _>("prev_hash").map(hex::encode),
+        actor_id: row.get("actor_id"),
+        actor_name: row.get("actor_name"),
+        // A version outside u8 is not a version this build can hash; 0 makes
+        // `verify_records` report it as a mismatch rather than silently
+        // reading it as format 1.
+        chain_version: u8::try_from(row.get::<i16, _>("chain_version")).unwrap_or(0),
     }
 }
 

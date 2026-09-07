@@ -3,7 +3,13 @@
 //! application role from creating a tenant — the same reason `seed_demo`
 //! runs as the connecting role.
 //!
-//! Today: [`PgStore::bootstrap_hull`], the hull-row statement
+//! [`PgStore::audit_chains_all`], [`PgStore::migration_state`] and
+//! [`PgStore::documents_inventory`] are the read-only owner-mode reads
+//! `wadl verify-ledger --database-url` and `wadl support-bundle` make:
+//! every hull's chain, the applied migrations, what documents each hull
+//! holds — never a document's content.
+//!
+//! [`PgStore::bootstrap_hull`] is the hull-row statement
 //! `docs/pilot-playbook.md` §1 files, applied as one transaction and
 //! ledgered on the hull it creates — with the baseline reference data a
 //! tenant needs before its first door opens (the coupling types the
@@ -13,15 +19,114 @@
 //! seeded afterwards: the seed is the demo world, and its fixed coupling-type
 //! ids would clash with the baseline's by `(org_id, code)`.
 
+use sqlx::Row as _;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use wadl_domain::ids::{OrgId, VesselId};
 
 use crate::error::StoreError;
-use crate::model::{BootstrapOutcome, HullStatement, RowOutcome};
+use crate::model::{
+    AppliedMigration, AuditRecord, BootstrapOutcome, DocumentInventoryRow, HullStatement,
+    RowOutcome,
+};
 use crate::pg::PgStore;
+use crate::pg_repo::{audit_record_from_row, AUDIT_COLUMNS};
 use crate::scope::{Actor, TenantScope};
+
+/// One hull's ledger, oldest first, as the connecting role read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HullChain {
+    /// The hull number, e.g. `CVN-73`.
+    pub hull_no: String,
+    /// The hull's id.
+    pub vessel_id: Uuid,
+    /// Its rows, oldest first — the order `ledger::verify_records` walks.
+    pub records: Vec<AuditRecord>,
+}
+
+impl PgStore {
+    /// Every hull's ledger chain, oldest row first, hulls by hull number —
+    /// read as the connecting role outside row-level security (the
+    /// operator's session, like `migrate`), read-only. Hulls with no rows
+    /// are listed with an empty chain, so a hull the ledger never saw is
+    /// visible as such.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] on any statement failure.
+    pub async fn audit_chains_all(&self) -> Result<Vec<HullChain>, StoreError> {
+        let hulls = sqlx::query("SELECT vessel_id, hull_no FROM vessel ORDER BY hull_no")
+            .fetch_all(self.pool())
+            .await?;
+        let mut chains = Vec::with_capacity(hulls.len());
+        for hull in &hulls {
+            let vessel_id: Uuid = hull.get("vessel_id");
+            let rows = sqlx::query(&format!(
+                "SELECT {AUDIT_COLUMNS} FROM audit_entry a
+                  WHERE a.vessel_id = $1 ORDER BY a.entry_id ASC"
+            ))
+            .bind(vessel_id)
+            .fetch_all(self.pool())
+            .await?;
+            chains.push(HullChain {
+                hull_no: hull.get("hull_no"),
+                vessel_id,
+                records: rows.iter().map(audit_record_from_row).collect(),
+            });
+        }
+        Ok(chains)
+    }
+
+    /// The migrations the database records as applied, in order.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] on any statement failure (an unmigrated
+    /// database has no `_sqlx_migrations` table and reads as such).
+    pub async fn migration_state(&self) -> Result<Vec<AppliedMigration>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT version, description, installed_on, success
+               FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| AppliedMigration {
+                version: r.get("version"),
+                description: r.get("description"),
+                installed_on: r
+                    .get::<chrono::DateTime<chrono::Utc>, _>("installed_on")
+                    .to_rfc3339(),
+                success: r.get("success"),
+            })
+            .collect())
+    }
+
+    /// What documents each hull holds — kind, label, when — and never their
+    /// content. Read as the connecting role, read-only.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] on any statement failure.
+    pub async fn documents_inventory(&self) -> Result<Vec<DocumentInventoryRow>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT v.hull_no, d.kind, d.label,
+                    (EXTRACT(EPOCH FROM d.ingested_at) * 1000)::bigint AS ingested_at_ms
+               FROM ingested_document d JOIN vessel v ON v.vessel_id = d.vessel_id
+              ORDER BY v.hull_no, d.kind",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| DocumentInventoryRow {
+                hull_no: r.get("hull_no"),
+                kind: r.get("kind"),
+                label: r.get("label"),
+                ingested_at_ms: r.get("ingested_at_ms"),
+            })
+            .collect())
+    }
+}
 
 /// The ledger action a hull-row statement writes on the hull it created.
 pub const HULL_BOOTSTRAPPED: &str = "HULL_BOOTSTRAPPED";

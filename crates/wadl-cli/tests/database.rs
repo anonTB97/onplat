@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 use wadl_domain::time::{TestClock, Timestamp};
@@ -391,4 +391,182 @@ async fn a_bad_document_refuses_that_file_and_keeps_the_ones_before_it() {
     assert_eq!(clock["label"], "T-clock.csv", "{clock}");
     let (_, register) = get(&app, YARD_ORG, hull.vessel, "/register").await;
     assert_ne!(register["served"], "ingested", "{register}");
+}
+
+/// `wadl verify-ledger --database-url` reads every hull's chain as the owner
+/// and names the hull; a row altered under the owner's own session is
+/// reported at its `seq`, exit 1; put back, the chain verifies again.
+#[tokio::test]
+async fn verify_ledger_reads_a_live_database_and_reports_per_hull() {
+    let Some(url) = database_url() else {
+        eprintln!("DATABASE_URL not set; skipping the database test");
+        return;
+    };
+    let hull = TestHull::mint();
+    let statement = hull.statement.to_string_lossy().into_owned();
+    let (code, out, err) = wadl(&[
+        "bootstrap-hull",
+        "--statement",
+        &statement,
+        "--database-url",
+        &url,
+    ]);
+    assert_eq!(code, 0, "{out}\n{err}");
+
+    let (code, out, err) = wadl(&["verify-ledger", "--database-url", &url]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains(&format!("{} · 1 entry verify", hull.hull_no)),
+        "{out}"
+    );
+    assert!(out.contains("hulls verify"), "{out}");
+
+    // Tamper as the owner, the way no door can: the row's own detail.
+    let store = PgStore::connect(&url).await.unwrap();
+    let seq: i64 = sqlx::query_scalar("SELECT min(entry_id) FROM audit_entry WHERE vessel_id = $1")
+        .bind(hull.vessel)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE audit_entry SET detail = detail || ' ' WHERE entry_id = $1")
+        .bind(seq)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let (code, out, err) = wadl(&["verify-ledger", "--database-url", &url]);
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert!(
+        out.contains(&format!(
+            "{} · BROKEN at seq {seq}: HashMismatch",
+            hull.hull_no
+        )),
+        "{out}"
+    );
+    assert!(err.contains("BROKEN"), "{err}");
+
+    // Put back; the chain re-hashes.
+    sqlx::query(
+        "UPDATE audit_entry SET detail = left(detail, length(detail) - 1) WHERE entry_id = $1",
+    )
+    .bind(seq)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let (code, out, _) = wadl(&["verify-ledger", "--database-url", &url]);
+    assert_eq!(code, 0, "{out}");
+
+    // Nothing named: refused, exit 2.
+    let output = Command::new(env!("CARGO_BIN_EXE_wadl"))
+        .arg("verify-ledger")
+        .env_remove("DATABASE_URL")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+/// The support bundle against the test database and a planted secret: no
+/// uuid, no connection URL, no environment value, no person; the
+/// migrations pending list is empty, the hull's chain verdict is in it.
+#[tokio::test]
+async fn the_support_bundle_carries_no_uuid_no_url_and_no_env_value() {
+    let Some(url) = database_url() else {
+        eprintln!("DATABASE_URL not set; skipping the database test");
+        return;
+    };
+    let hull = TestHull::mint();
+    let statement = hull.statement.to_string_lossy().into_owned();
+    let (code, out, err) = wadl(&[
+        "bootstrap-hull",
+        "--statement",
+        &statement,
+        "--database-url",
+        &url,
+    ]);
+    assert_eq!(code, 0, "{out}\n{err}");
+
+    let out_path = hull.dir.join("bundle.json");
+    let secret = "planted-proxy-key-value-7f3a";
+    let output = Command::new(env!("CARGO_BIN_EXE_wadl"))
+        .args([
+            "support-bundle",
+            "--out",
+            &out_path.to_string_lossy(),
+            "--database-url",
+            &url,
+            // Port 1 answers nothing: the bundle records the reason, not a failure.
+            "--base",
+            "http://127.0.0.1:1",
+            "--journal-lines",
+            "5",
+        ])
+        .env("WADL_PROXY_KEY", secret)
+        .env("WADL_MARKINGS", "CUI|planted")
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = std::fs::read_to_string(&out_path).unwrap();
+    let bundle: Value = serde_json::from_str(&text).unwrap();
+
+    // Nothing that should not leave the yard.
+    assert!(
+        !text.contains(secret),
+        "the proxy key value is in the bundle"
+    );
+    assert!(!text.contains("planted"), "an env value is in the bundle");
+    assert!(
+        !text.contains("postgres://"),
+        "a connection URL is in the bundle"
+    );
+    assert!(
+        !text.contains(&hull.vessel.to_string()) && !text.contains(&YARD_ORG.to_string()),
+        "a uuid is in the bundle"
+    );
+    let bytes = text.as_bytes();
+    let uuid_like = (0..bytes.len().saturating_sub(36)).any(|i| {
+        bytes[i..i + 36]
+            .iter()
+            .enumerate()
+            .all(|(pos, b)| match pos {
+                8 | 13 | 18 | 23 => *b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+    });
+    assert!(!uuid_like, "a uuid-shaped string is in the bundle");
+
+    // What it does carry.
+    assert_eq!(bundle["generated_by"], "wadl support-bundle");
+    assert_eq!(bundle["cli_version"]["schema"].as_str().unwrap().len(), 4);
+    assert!(
+        bundle["health"]
+            .as_str()
+            .is_some_and(|h| h.starts_with("unreachable:")),
+        "{}",
+        bundle["health"]
+    );
+    assert_eq!(bundle["migrations"]["pending"], json!([]));
+    assert!(bundle["migrations"]["applied"].as_array().unwrap().len() >= 18);
+    let verdict = bundle["ledger"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["hull_no"] == hull.hull_no)
+        .unwrap_or_else(|| panic!("the hull's verdict: {}", bundle["ledger"]));
+    assert_eq!(verdict["entries"], 1);
+    assert_eq!(verdict["verified"], true);
+    let set: Vec<&str> = bundle["environment"]["set"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        set.contains(&"WADL_PROXY_KEY") && set.contains(&"WADL_MARKINGS"),
+        "{set:?}"
+    );
+    assert!(
+        bundle["audit_recent"]["lines"].is_array(),
+        "{}",
+        bundle["audit_recent"]
+    );
 }

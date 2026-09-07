@@ -14,7 +14,9 @@
 #![allow(clippy::doc_markdown)]
 
 mod bootstrap;
+mod bundle;
 mod load_docs;
+mod verify;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -22,9 +24,6 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use wadl_domain::Clock;
-use wadl_store::clock::SystemClock;
-use wadl_store::ledger::{self, LedgerEntry};
 use wadl_store::pg::PgStore;
 use wadl_store::{InMemoryStore, Repositories};
 
@@ -51,11 +50,16 @@ enum Command {
         #[arg(long)]
         database_url: Option<String>,
     },
-    /// Verify the audit ledger's hash chain from a JSON export.
+    /// Verify the audit ledger's hash chain — from a JSON export, or every
+    /// hull's chain in a live database, read as the owner. Exit 0 when all
+    /// verify, 1 when any chain is broken, 2 when nothing was named.
     VerifyLedger {
-        /// Path to a JSON array of ledger entries.
+        /// Path to a JSON array of ledger entries (the ledger route's export).
+        #[arg(long, conflicts_with = "database_url")]
+        input: Option<PathBuf>,
+        /// PostgreSQL URL. Falls back to `DATABASE_URL` when `--input` is absent.
         #[arg(long)]
-        input: PathBuf,
+        database_url: Option<String>,
     },
     /// Ingest a Primavera P6 XER export and print the graded report.
     IngestXer {
@@ -73,14 +77,23 @@ enum Command {
         #[arg(long)]
         field_map: Option<PathBuf>,
     },
-    /// Write a redacted support bundle to a file.
+    /// Write a redacted support bundle: release stamp, /health, migrations
+    /// embedded vs applied, every hull's ledger verdict, the document
+    /// inventory, which variables are set (names only), recent audit lines.
     SupportBundle {
         /// Output path.
         #[arg(long, default_value = "support-bundle.json")]
         out: PathBuf,
-        /// Migrations directory to inventory.
-        #[arg(long, default_value = "migrations")]
-        migrations_dir: PathBuf,
+        /// PostgreSQL URL. Falls back to `DATABASE_URL`; without either the
+        /// database sections are marked not collected.
+        #[arg(long)]
+        database_url: Option<String>,
+        /// The served API's base for `/health`.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        base: String,
+        /// How many `journalctl -u wadl` lines to collect.
+        #[arg(long, default_value_t = 200)]
+        journal_lines: usize,
     },
     /// Print this build's release stamp: commit, commit instant, migration set.
     Version {
@@ -155,7 +168,10 @@ async fn run() -> Result<ExitCode> {
     match Cli::parse().command {
         Command::Migrate { database_url } => done(migrate(database_url).await),
         Command::Seed { database_url } => done(seed(database_url).await),
-        Command::VerifyLedger { input } => done(verify_ledger(&input)),
+        Command::VerifyLedger {
+            input,
+            database_url,
+        } => verify::run(input.as_deref(), database_url).await,
         Command::IngestXer {
             input,
             survey,
@@ -163,8 +179,18 @@ async fn run() -> Result<ExitCode> {
         } => done(ingest_xer_file(&input, survey, field_map.as_deref())),
         Command::SupportBundle {
             out,
-            migrations_dir,
-        } => done(support_bundle(&out, &migrations_dir)),
+            database_url,
+            base,
+            journal_lines,
+        } => {
+            bundle::run(bundle::BundleArgs {
+                out,
+                database_url,
+                base,
+                journal_lines,
+            })
+            .await
+        }
         Command::Version { json } => done(version(json)),
         Command::BootstrapHull {
             statement,
@@ -402,66 +428,5 @@ async fn seed(database_url: Option<String>) -> Result<()> {
         "cvn73_stranded_hours": stranded,
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);
-    Ok(())
-}
-
-fn verify_ledger(input: &Path) -> Result<()> {
-    let text =
-        std::fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
-    // Exports from before chain format 2 carry no `chain_version` or actor
-    // fields; serde defaults read them as format 1, which is what they are.
-    let entries: Vec<LedgerEntry> = serde_json::from_str(&text).context("parsing ledger JSON")?;
-    match ledger::verify_chain(&entries) {
-        Ok(()) => {
-            let named = entries.iter().filter(|e| e.chain_version >= 2).count();
-            println!(
-                "ledger intact — {} entries verify ({} name a person, {} from before people were asserted)",
-                entries.len(),
-                named,
-                entries.len() - named
-            );
-            Ok(())
-        }
-        Err(brk) => {
-            anyhow::bail!(
-                "ledger BROKEN at index {} (seq {}): {:?}",
-                brk.index,
-                brk.seq,
-                brk.reason
-            )
-        }
-    }
-}
-
-fn support_bundle(out: &Path, migrations_dir: &Path) -> Result<()> {
-    let mut migrations: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(migrations_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
-            {
-                migrations.push(entry.file_name().to_string_lossy().into_owned());
-            }
-        }
-    }
-    migrations.sort();
-    let schema_version = migrations
-        .last()
-        .cloned()
-        .unwrap_or_else(|| "none".to_owned());
-    let bundle = serde_json::json!({
-        "generated_by": "wadl support-bundle",
-        "generated_at_epoch_ms": SystemClock.now().epoch_millis(),
-        "schema_version": schema_version,
-        "migration_count": migrations.len(),
-        "migrations": migrations,
-        "engine": "wadl-engine (milestone-1 seam)",
-        "redaction": "no secrets, no PII, no tenant identifiers included",
-    });
-    std::fs::write(out, serde_json::to_string_pretty(&bundle)?)
-        .with_context(|| format!("writing {}", out.display()))?;
-    println!("wrote {}", out.display());
     Ok(())
 }

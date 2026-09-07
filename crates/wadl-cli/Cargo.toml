@@ -38,6 +38,9 @@ uuid = { workspace = true, features = ["v7"] }
 # would: axum for the request types, tower for `oneshot`. Test-only.
 axum.workspace = true
 tower = { workspace = true, features = ["util"] }
+# The verify-ledger test alters one ledger row as the owner — the tamper no
+# door can make — to prove the break is reported; test-only.
+sqlx.workspace = true
 
 [lints]
 workspace = true

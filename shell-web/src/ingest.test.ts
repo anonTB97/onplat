@@ -5,7 +5,7 @@
 // the refusals are pinned here alongside the shapes.
 
 import { describe, expect, it } from "vitest";
-import { deltaSummary, hazardKindFromLog, parseCouplingCsv, parseHazardLogCsv, parseRegisterCsv } from "./ingest";
+import { deltaSummary, hazardKindFromLog, parseCouplingCsv, parseFieldMapJson, parseHazardLogCsv, parseRegisterCsv } from "./ingest";
 
 describe("deltaSummary", () => {
   const base = {
@@ -31,6 +31,47 @@ describe("deltaSummary", () => {
     expect(deltaSummary({ ...base, retimed: 2, proposals: { open: 2, reflected: ["A51350"], still_open: ["A51360"] } })).toBe(
       "vs CVN73-PIA26-full.xer: 2 retimed — no work moved into a refusal · proposals: 1 of 2 reflected (A51350), 1 still open",
     );
+  });
+});
+
+describe("parseFieldMapJson", () => {
+  it("reads the boot loader's shape, defaulting the optional keys the way the server does", () => {
+    const text = `{
+      "compartment": { "source": "udf", "name": "COMPT" },
+      "work_item": { "source": "activity_code", "name": "WI" },
+      "work_type": { "source": "none" },
+      "trade": { "source": "resource" },
+      "projects": ["CVN73-PIA26"],
+      "placards_from_names": false
+    }`;
+    expect(parseFieldMapJson(text)).toEqual({
+      compartment: { source: "udf", name: "COMPT" },
+      work_item: { source: "activity_code", name: "WI" },
+      work_type: { source: "none" },
+      trade: { source: "resource" },
+      projects: ["CVN73-PIA26"],
+      placards_from_names: false,
+    });
+    // `projects` and `placards_from_names` may be left out: every project, placards read.
+    const bare = parseFieldMapJson(
+      '{"compartment":{"source":"none"},"work_item":{"source":"none"},"work_type":{"source":"none"},"trade":{"source":"none"}}',
+    );
+    expect(bare.projects).toEqual([]);
+    expect(bare.placards_from_names).toBe(true);
+  });
+
+  it("refuses a file that is not the shape, naming the slot", () => {
+    expect(() => parseFieldMapJson("not json")).toThrow(/not JSON/);
+    expect(() => parseFieldMapJson("[]")).toThrow(/one JSON object/);
+    expect(() => parseFieldMapJson('{"compartment":{"source":"udf"}}')).toThrow(/"compartment" with source udf needs a "name"/);
+    expect(() =>
+      parseFieldMapJson('{"compartment":{"source":"wbs_level"},"work_item":{"source":"none"},"work_type":{"source":"none"},"trade":{"source":"none"}}'),
+    ).toThrow(/"compartment" has source "wbs_level"/);
+    expect(() =>
+      parseFieldMapJson('{"compartment":{"source":"none"},"work_item":{"source":"none"},"work_type":{"source":"none"},"trade":{"source":"none"},"projects":"CVN73-PIA26"}'),
+    ).toThrow(/"projects" must be a list/);
+    // Meaning is the server's to refuse: a resource outside the trade parses here and is refused there.
+    expect(parseFieldMapJson('{"compartment":{"source":"resource"},"work_item":{"source":"none"},"work_type":{"source":"none"},"trade":{"source":"none"}}').compartment).toEqual({ source: "resource" });
   });
 });
 

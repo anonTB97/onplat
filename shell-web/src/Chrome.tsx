@@ -545,7 +545,7 @@ export function TopBar({
               return (
                 <span
                   style={{
-                    display: "block", fontSize: 10.5, fontWeight: 400, maxWidth: 420,
+                    display: "block", fontSize: 10.5, fontWeight: 400, maxWidth: 560,
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                     color: crumb.tone === "warn" ? C.warn : crumb.tone === "ok" ? C.ok : DIM,
                   }}

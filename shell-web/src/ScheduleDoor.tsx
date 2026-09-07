@@ -826,9 +826,9 @@ function RunRow({
             </span>
           )}
         </td>
-        <td style={{ ...td, fontFamily: "monospace", color: C.bright, wordBreak: "break-all" }}>{run.label}</td>
+        <td style={{ ...td, fontFamily: "monospace", color: C.bright, whiteSpace: "nowrap" }}>{run.label}</td>
         <td style={{ ...td, whiteSpace: "nowrap", color: C.dim }}>{fmtDayTime(run.imported_at_ms)}</td>
-        <td style={{ ...td, color: run.imported_by.person ? C.bright : C.warn }} title={`${run.imported_by.person ?? "no person"} · via ${run.imported_by.via} · org ${run.imported_by.org}`}>
+        <td style={{ ...td, whiteSpace: "nowrap", color: run.imported_by.person ? C.bright : C.warn }} title={`${run.imported_by.person ?? "no person"} · via ${run.imported_by.via} · org ${run.imported_by.org}`}>
           {importedByWords(run.imported_by)}
         </td>
         <td style={{ ...td, whiteSpace: "nowrap", color: C.bright }} title={`${run.counts.work} work · ${run.counts.key_events} key events · ${run.counts.edges} edges · ${x} excluded`}>

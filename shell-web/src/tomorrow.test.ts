@@ -267,7 +267,8 @@ describe("tomorrowSheet", () => {
     expect(sheet.scope).toBe("Days 0700–1530 · 09/03 · all zones");
     expect(sheet.cut).toBe(cut);
     const headings = sheet.sections.map((s) => s.heading);
-    expect(headings[0]).toContain("Clearable tonight 1 of 1 — isolation authority");
+    expect(headings[0]).toBe("Clearable tonight · action 1 of 1");
+    expect(sheet.sections[0]?.note).toContain("isolation authority · Bus 3-SG-2 energised");
     expect(headings).toContain("Clears on its own");
     expect(headings).toContain("Needs a plan");
     expect(headings.some((h) => h.startsWith("Sendable — "))).toBe(true);

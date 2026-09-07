@@ -180,7 +180,10 @@ const CAVEAT: Record<Confidence, string> = {
 /** The caveat word a group carries, or nothing for a computed effect. */
 export const confidenceWord = (c: Confidence): string => CAVEAT[c];
 
-const byMhDesc = <T extends { mhShift: number }>(x: T, y: T): number => y.mhShift - x.mhShift;
+/** The served rule list, each code once — a trace can fire a rule on two paths. */
+const uniq = (rules: string[]): string[] => [...new Set(rules)];
+
+const byMhDesc =<T extends { mhShift: number }>(x: T, y: T): number => y.mhShift - x.mhShift;
 
 const sum = (rows: ShiftRow[]): number => rows.reduce((s, r) => s + r.mhShift, 0);
 
@@ -217,7 +220,7 @@ function duringShift(ctx: Ctx, taken: Set<string>): SelfClearRow[] {
     out.push({
       space: no, name: s.compartment.name, heldNow: heldIn(ctx.now, no), heldAtStart: true,
       clearsAt: s.earliest_clear, when: "during_shift", authority: authorityWord(s.clearing_authority),
-      rules: s.rules_fired, rows, mhShift: sum(rows),
+      rules: uniq(s.rules_fired), rows, mhShift: sum(rows),
     });
   }
   return out.sort(byMhDesc);
@@ -257,7 +260,7 @@ function leftHeld(ctx: Ctx, taken: Set<string>): { after: SelfClearRow[]; plan: 
     const s = ctx.atStart.get(no);
     if (!s || s.permits_work || taken.has(no)) continue;
     taken.add(no);
-    const base = { space: no, name: s.compartment.name, rules: s.rules_fired, rows, mhShift: sum(rows), authority: authorityWord(s.clearing_authority) };
+    const base = { space: no, name: s.compartment.name, rules: uniq(s.rules_fired), rows, mhShift: sum(rows), authority: authorityWord(s.clearing_authority) };
     if (s.earliest_clear !== null) {
       after.push({ ...base, heldNow: heldIn(ctx.now, no), heldAtStart: true, clearsAt: s.earliest_clear, when: "after_shift" });
     } else {
@@ -276,7 +279,7 @@ function curedBefore(ctx: Ctx): SelfClearRow[] {
     out.push({
       space: no, name: n.compartment.name, heldNow: true, heldAtStart: false,
       clearsAt: n.earliest_clear, when: "before_shift", authority: authorityWord(n.clearing_authority),
-      rules: n.rules_fired, rows, mhShift: sum(rows),
+      rules: uniq(n.rules_fired), rows, mhShift: sum(rows),
     });
   }
   return out.sort(byMhDesc);
@@ -432,7 +435,7 @@ function emptyOr(section: ReportSection, empty: string): ReportSection {
 /** The printed board: the cut, the projection note, every section, the layers. */
 export function tomorrowSheet(board: TomorrowBoard, cut: ReportCut, zone: string | null): Report {
   const clearable: ReportSection[] = board.clearable.map((g, i) => ({
-    heading: `Clearable tonight ${i + 1} of ${board.clearable.length} — ${g.actor}`,
+    heading: `Clearable tonight · action ${i + 1} of ${board.clearable.length}`,
     note: groupHeadline(g),
     columns: ROW_COLUMNS,
     numeric: [5],

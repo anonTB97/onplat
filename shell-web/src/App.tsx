@@ -633,6 +633,8 @@ export default function App() {
               clockEpoch={clockEpoch}
               spaces={rows}
               verdictsOk={outOfScope ? null : verdictsOk}
+              zoneFocus={zoneFocus}
+              role={persona.name}
               onOpenSpace={jump}
             />
           )}

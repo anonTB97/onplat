@@ -30,6 +30,11 @@ import { activityWindowHours, refusalOverlaps } from "./windowLoad";
 
 import { currentClock, fmtDay, fmtStamp, fmtTime, zoneLabel } from "./clock";
 import { shiftChoices, shiftWindow, type Shift } from "./reports";
+import TomorrowBoard from "./TomorrowBoard";
+import { nextShift, nextShiftWord } from "./tomorrow";
+
+/** The fourth chip: the next shift after the instant, evaluated at its start. */
+const TOMORROW = "tomorrow";
 
 /** The activity's slot as a foreman reads it: times inside a day, else days. */
 const fmtSlot = (w: { start: number; end: number } | null): string => {
@@ -61,6 +66,8 @@ export default function DailyOps({
   clockEpoch,
   spaces,
   verdictsOk,
+  zoneFocus = null,
+  role,
   onOpenSpace,
   onOpenJob,
 }: {
@@ -68,6 +75,11 @@ export default function DailyOps({
   vesselId: string;
   hullLabel: string;
   asOf: AsOf;
+  /** The zone in focus, shared through the shell — honoured by the Tomorrow
+   *  board (the shift board itself is the whole hull, as it always was). */
+  zoneFocus?: string | null;
+  /** The role producing a printed sheet. */
+  role: string;
   /** Bumped by the app when the hull's yard clock changes, so the shift
    *  windows below are recomputed in the new clock. */
   clockEpoch: number;
@@ -86,20 +98,30 @@ export default function DailyOps({
 }) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
+  const [source, setSource] = useState<string | null>(null);
   const [shift, setShift] = useState<Shift>("instant");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setError(null);
+    // Guarded against reordering: with the time control playing, a slow
+    // answer for one instant must not land after a faster later one.
+    let stale = false;
     listActivities(identity, vesselId, asOf)
       .then((r) => {
+        if (stale) return;
         setActivities(r.activities);
         setAsOfMs(r.as_of);
+        setSource(r.schedule_source);
       })
       .catch((e: unknown) => {
+        if (stale) return;
         setActivities(null);
         setError(String(e));
       });
+    return () => {
+      stale = true;
+    };
   }, [identity, vesselId, asOf]);
 
   const refused = useMemo(() => {
@@ -114,11 +136,23 @@ export default function DailyOps({
   // the clock in effect; a shift name the new clock does not know falls back
   // to the instant rather than to a window nobody named.
   const choices = useMemo(() => shiftChoices(currentClock()), [clockEpoch]);
-  const chosen = choices.some((c) => c.id === shift) ? shift : "instant";
-  // `clockEpoch` stands for the module clock `shiftWindow` reads.
+  // Tomorrow: the first of the yard's shifts after the as-of instant, on
+  // this day or the next — a Swing reader sees Mids, a Mids reader sees Days.
+  // `clockEpoch` stands for the module clock the windows are placed in.
+  const next = useMemo(
+    () => (asOfMs !== null ? nextShift(currentClock(), asOfMs) : null),
+    [asOfMs, clockEpoch],
+  );
+  const tomorrowMode = shift === TOMORROW && next !== null;
+  const chosen = tomorrowMode ? TOMORROW : choices.some((c) => c.id === shift) ? shift : "instant";
   const win = useMemo(
-    () => (asOfMs !== null ? shiftWindow(asOfMs, chosen) : null),
-    [asOfMs, chosen, clockEpoch],
+    () =>
+      tomorrowMode && next
+        ? { start: next.start, end: next.end, label: next.label }
+        : asOfMs !== null
+          ? shiftWindow(asOfMs, chosen)
+          : null,
+    [asOfMs, chosen, clockEpoch, tomorrowMode, next],
   );
   const inSlice = useMemo(() => {
     return (a: Activity): boolean => {
@@ -187,10 +221,14 @@ export default function DailyOps({
   });
   const chip = chipStyle;
 
+  const tomorrowChip =
+    next && asOfMs !== null ? `${nextShiftWord(currentClock(), asOfMs, next)} · ${next.label} · ${next.dayLabel}` : null;
   const sliceLabel =
-    win === null
-      ? `at ${asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}` : "now"}`
-      : `${win.label} · ${fmtDay(win.start)}`;
+    tomorrowMode && tomorrowChip
+      ? tomorrowChip
+      : win === null
+        ? `at ${asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}` : "now"}`
+        : `${win.label} · ${fmtDay(win.start)}`;
 
   // The one-pager. Generated as its own monochrome document rather than
   // printing the app: a shift board goes up on a clipboard wall, where dark
@@ -265,7 +303,7 @@ export default function DailyOps({
       <ModuleHeader
         kicker={`Daily Ops · ${hullLabel}`}
         title="The shift board"
-        stats={[
+        stats={tomorrowMode ? [] : [
           { value: onShift.length, label: onShift.length === 1 ? "activity" : "activities", title: `Planned for ${sliceLabel}` },
           win !== null
             ? {
@@ -291,10 +329,18 @@ export default function DailyOps({
           },
         ]}
         note={
-          <>
-            Slice: <b style={{ color: C.bright }}>{sliceLabel}</b> — scrub the clock and the
-            shift moves with it; the full register is on the Sequence Board.
-          </>
+          tomorrowMode ? (
+            <>
+              Slice: <b style={{ color: C.bright }}>{sliceLabel}</b> — the next shift after the
+              instant on the time control, its holds evaluated by the engine at the shift&apos;s
+              start. Scrub the clock and the next shift moves with it.
+            </>
+          ) : (
+            <>
+              Slice: <b style={{ color: C.bright }}>{sliceLabel}</b> — scrub the clock and the
+              shift moves with it; the full register is on the Sequence Board.
+            </>
+          )
         }
       />
 
@@ -317,23 +363,53 @@ export default function DailyOps({
             {s.label}
           </button>
         ))}
-        <button
-          style={{ ...chip(false), marginLeft: "auto" }}
-          onClick={printBoard}
-          title="A monochrome one-pager for the clipboard wall — the warnings survive a photocopier."
-        >
-          ⎙ Print board
-        </button>
+        {tomorrowChip && (
+          <button
+            style={{ ...chip(tomorrowMode), marginLeft: 6, borderStyle: tomorrowMode ? "solid" : "dashed" }}
+            onClick={() => setShift(TOMORROW)}
+            title={`The next shift after the instant on the time control, in the yard's clock (${currentClock().zone}): its work against the engine's verdicts AT THE SHIFT'S START, with the holds split into clearable tonight, clears on its own, and needs a plan.`}
+          >
+            {tomorrowChip}
+          </button>
+        )}
+        {!tomorrowMode && (
+          <button
+            style={{ ...chip(false), marginLeft: "auto" }}
+            onClick={printBoard}
+            title="A monochrome one-pager for the clipboard wall — the warnings survive a photocopier."
+          >
+            ⎙ Print board
+          </button>
+        )}
       </div>
 
-      {onShift.length === 0 && events.length === 0 && (
+      {tomorrowMode && next && asOfMs !== null && (
+        <TomorrowBoard
+          identity={identity}
+          vesselId={vesselId}
+          hullLabel={hullLabel}
+          clock={currentClock()}
+          shift={next}
+          asOfMs={asOfMs}
+          activities={activities}
+          spacesNow={spaces}
+          verdictsOk={verdictsOk}
+          zone={zoneFocus}
+          role={role}
+          scheduleSource={source}
+          onOpenSpace={onOpenSpace}
+          onOpenJob={onOpenJob}
+        />
+      )}
+
+      {!tomorrowMode && onShift.length === 0 && events.length === 0 && (
         <p style={{ color: C.dim, fontSize: 12.5 }}>
           Nothing is planned at this instant. Scrub the time control into the
           availability to see a shift.
         </p>
       )}
 
-      {events.length > 0 && (
+      {!tomorrowMode && events.length > 0 && (
         <div style={{ marginBottom: 14, padding: "8px 12px", border: `1px solid rgba(61,107,255,0.35)`, borderRadius: 8, background: "rgba(61,107,255,0.05)" }}>
           <div style={{ fontSize: 10, letterSpacing: 0.8, textTransform: "uppercase", color: C.accent, marginBottom: 4 }}>
             Key events in window
@@ -350,8 +426,8 @@ export default function DailyOps({
         </div>
       )}
 
-      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(430px,1fr))", alignItems: "start" }}>
-        {byTrade.map((g) => (
+      <div style={{ display: tomorrowMode ? "none" : "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(430px,1fr))", alignItems: "start" }}>
+        {!tomorrowMode && byTrade.map((g) => (
           <section key={g.trade} style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.panel }}>
             <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "8px 12px", borderBottom: `1px solid ${C.line}` }}>
               <b style={{ fontSize: 13 }}>{g.trade}</b>

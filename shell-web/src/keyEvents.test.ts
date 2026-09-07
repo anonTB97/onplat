@@ -120,7 +120,7 @@ describe("weekBoard", () => {
     const w = new Map(board.rows.map((r) => [r.a.code, r.word]));
     expect(w.get("MISS_WIN")).toBe("MISSES THE EVENT");
     expect(board.rows.find((r) => r.a.code === "MISS_WIN")?.why).toContain("after the event");
-    expect(board.rows.find((r) => r.a.code === "MISS_GATE")?.why).toContain("clears on verification");
+    expect(board.rows.find((r) => r.a.code === "MISS_GATE")?.why).toContain("until the authority verifies");
     expect(board.rows.find((r) => r.a.code === "MISS_NONE")?.why).toContain("served no window");
     expect(w.get("SLIDE")).toBe("SLIDES · still makes it (+3 d)");
     expect(w.get("UNDATED")).toBe("CANNOT BE ASSESSED");
@@ -201,7 +201,9 @@ describe("keyEventSheet", () => {
     expect(sheet.scope).toBe("M1 review · 10/02 (30 d) · all zones");
     expect(sheet.sections[0]?.heading).toBe("Work gating M1 M1 review — 10/02");
     expect(sheet.sections[0]?.note).toContain("1 miss the event");
-    expect(sheet.sections[0]?.rows[0]?.[0]).toContain("MISSES THE EVENT — clears on verification");
+    expect(sheet.sections[0]?.rows[0]?.[0]).toBe("MISSES THE EVENT");
+    expect(sheet.sections[0]?.rows[0]?.[7]).toBe("R07 · Bus 3-SG-2 energised at 3-148-2-E · isolation authority · clears on verification · no date can honestly be promised until the authority verifies");
+    expect(sheet.sections[0]?.rows[1]?.[7]).toBe("—");
     expect(sheet.sections[0]?.rows[0]?.[9]).toBe("#2 OPEN → 09/08–09/11 · makes it");
     expect(sheet.sections[1]?.heading).toBe("The seven days ahead");
     expect(sheet.sections[2]?.rows[0]?.[0]).toBe("M2");

@@ -48,6 +48,7 @@ import LeverageBoard from "./LeverageBoard";
 import Reports from "./Reports";
 import SequenceBoard from "./SequenceBoard";
 import { fmtInstant, isProjection, TimeControl, type Horizon } from "./TimeControl";
+import WeekAhead from "./WeekAhead";
 import WorkOrders from "./WorkOrders";
 import { setYardClock } from "./clock";
 import { C } from "./theme";
@@ -62,6 +63,7 @@ import { C } from "./theme";
 // emptiness as broken data.
 const MODULES: ModuleDef[] = [
   { group: "Today", label: "Daily Ops", id: "dailyOps", icon: "dailyOps", built: true },
+  { group: "", label: "Week Ahead", id: "week", icon: "week", built: true },
   { group: "", label: "Deck Explorer", id: "deckExplorer", icon: "deckExplorer", built: true },
   { group: "Plan", label: "Sequence Board", id: "sequenceBoard", icon: "sequenceBoard", built: true },
   { group: "", label: "Work Orders", id: "workOrders", icon: "workOrders", built: true },
@@ -76,7 +78,7 @@ const MODULES: ModuleDef[] = [
 ];
 
 const byId = (id: string): ModuleDef =>
-  MODULES.find((m) => m.id === id && m.built) ?? (MODULES[1] as ModuleDef);
+  MODULES.find((m) => m.id === id && m.built) ?? (MODULES.find((m) => m.id === "deckExplorer") as ModuleDef);
 const DECK_EXPLORER = byId("deckExplorer");
 const PORTFOLIO = byId("portfolio");
 const INITIAL_ROLE = loadRole();
@@ -636,6 +638,22 @@ export default function App() {
               zoneFocus={zoneFocus}
               role={persona.name}
               onOpenSpace={jump}
+            />
+          )}
+
+          {idn && selected && module.id === "week" && (
+            <WeekAhead
+              identity={idn}
+              vesselId={selected}
+              hullLabel={hullLabel}
+              asOf={asOf}
+              clockEpoch={clockEpoch}
+              spaces={rows}
+              zoneFocus={zoneFocus}
+              onZoneFocus={setZoneFocus}
+              role={persona.name}
+              onOpenSpace={jump}
+              onOpenJob={setJobCode}
             />
           )}
 

@@ -175,7 +175,7 @@ function tierOf(a: Activity, alt: AlternativeRow | undefined, altsKnown: boolean
         return { tier: 0, word: "MISSES THE EVENT", why: `the engine's window ends ${fmtDay(w.end)}, after the event` };
       }
       case "verification_gated":
-        return { tier: 0, word: "MISSES THE EVENT", why: "clears on verification — no date can honestly be promised" };
+        return { tier: 0, word: "MISSES THE EVENT", why: "no date can honestly be promised until the authority verifies" };
       case "no_window":
         return { tier: 0, word: "MISSES THE EVENT", why: `no window before the horizon (${fmtDay(alt.alternative.horizon)})` };
     }
@@ -272,17 +272,17 @@ export function keyEventSheet(board: WeekBoard, cut: ReportCut, zone: string | n
   const gating: ReportSection = {
     heading: `Work gating ${board.event.code} ${board.event.name} — ${fmtDay(board.event.at)}`,
     note: `${board.totals.gating} activities · ${Math.round(board.totals.mhLeft).toLocaleString()} MH left · ${board.totals.misses} miss the event · ${board.totals.slides} slide and still make it · ${board.totals.unassessed} cannot be assessed · ${board.totals.proposalsOpen} proposals open`,
-    columns: ["Reads", "Activity", "Name", "Space", "Trade", "Planned", "MH left", "The hold", "Margin (d)", "Proposal"],
+    columns: ["Reads", "Activity", "Name", "Space", "Trade", "Planned", "MH left", "The hold · why", "Margin (d)", "Proposal"],
     numeric: [6, 8],
     rows: board.rows.map((r) => [
-      r.why ? `${r.word} — ${r.why}` : r.word,
+      r.word,
       r.a.code,
       r.a.name,
       r.a.compartment_no ?? "not located",
       r.a.trade,
       r.a.planned ? `${fmtDay(r.a.planned.start)} → ${fmtDay(r.a.planned.end)}` : "undated",
       Math.round(r.a.remaining_hours).toLocaleString(),
-      r.hold,
+      [r.hold === "—" ? "" : r.hold, r.why].filter(Boolean).join(" · ") || "—",
       r.marginDays === null ? "—" : String(r.marginDays),
       r.proposal?.text ?? "—",
     ]),

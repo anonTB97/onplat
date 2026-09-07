@@ -61,7 +61,7 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
         title="How to run this tool"
         stats={[
           { value: "5", label: "import doors", title: "Schedule (P6 XER), zone chart, budget book, manning book, geometry register (CSV) — each with a dry run, a confirm, and a revert." },
-          { value: "5", label: "reports", title: "Shift sheet, zone day sheet, compartment card, conflict log, field-condition register — dated cuts that print and export." },
+          { value: "7", label: "reports", title: "Shift sheet, zone day sheet, compartment card, conflict log, field-condition register, Tomorrow's board, key-event readiness — dated cuts that print and export." },
           { value: "4", label: "location grades", title: "Authored · derived (≈) · WBS zone hint · unlocated. Guessing is allowed because it is graded and reported; guessing silently is forbidden." },
           { value: "1", label: "ledger", title: "Every decision a person records lands in one tamper-evident, hash-chained ledger that names who recorded it." },
         ]}
@@ -210,6 +210,25 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
             screen is the yard&apos;s own wall clock, and the strip names the zone once; until a
             yard clock is loaded in Data Sources every time carries a <code>Z</code> and the strip
             is amber, because the tool says &quot;no yard clock&quot; rather than guess one.
+          </p>
+          <p style={{ margin: "0 0 8px" }}>
+            <span style={dt}>The morning meeting:</span> on{" "}
+            <Go to="dailyOps" label="Daily Ops" onOpenModule={onOpenModule} /> the{" "}
+            <b>Tomorrow</b> chip is the next of the yard&apos;s shifts after the instant on the
+            clock, its work evaluated by the engine <i>at the shift&apos;s start</i> under the field
+            conditions on record now. The holds in front of it split three ways — <b>clearable
+            tonight</b> (one action opens it: who, what, where, and what the platform is
+            assuming), <b>clears on its own</b> (a clock runs out before, during or after the
+            shift), <b>needs a plan</b> (no clock and no single action) — then the sendable work
+            per trade. It is a projection and the strip says so; overnight tag-outs are not on it.{" "}
+            <Go to="week" label="Week Ahead" onOpenModule={onOpenModule} /> is keyed to the next
+            key event the schedule&apos;s own logic ties work to: every activity that must finish
+            first, worst first — <b>misses the event</b> when the engine&apos;s window ends after
+            it or no date can be promised, <b>slides · still makes it</b>, <b>cannot be
+            assessed</b>, <b>planned past the event</b>, <b>on plan</b> with its margin — the
+            hold on the row, the proposal already headed to P6 read against the event date
+            (<i>makes it</i> / <i>misses it</i>), a seven-day strip, and the inspector to propose
+            from the row. Both print as sheets with the cut and every figure&apos;s layer.
           </p>
           <p style={{ margin: 0 }}>
             <span style={dt}>The one discipline to keep:</span> the instant <i>marks</i> rows in or

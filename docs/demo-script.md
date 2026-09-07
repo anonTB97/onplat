@@ -8,8 +8,9 @@ the walk can be rehearsed and it lands the same way each time. Times are
 relative to the moment the API booted (the log is stamped "this morning"),
 so read the clocks on screen rather than off this page.
 
-Twenty minutes at a steady pace. The order follows the working day: the
-crew's shift, the zone, the schedule, the conflicts, the record.
+Twenty-five minutes at a steady pace. The order follows the working day: the
+crew's shift and the next one, the zone and its key event, the schedule,
+the conflicts, the record.
 
 Before starting: `scripts/dev.sh`, open <http://localhost:5173>, and pick
 the hull **CVN-73 · PIA-26** in the hull dropdown if it is not already
@@ -26,7 +27,7 @@ the server thinks you are, the roles, and *may: …* — the doors your role
 opens. Behind the yard's proxy the same menu shows the person the CAC
 session asserted, read-only (`docs/identity-proxy-contract.md`).
 
-## 1. Foreman — "what is my crew doing at 0700?" (3 min)
+## 1. Foreman — "what is my crew doing at 0700, and what does the next shift walk into?" (5 min)
 
 Role menu → **Foreman**. The front door is **Daily Ops**, the shift board;
 the role button reads *Demo Foreman (Y-1006) · Foreman*.
@@ -57,8 +58,36 @@ the role button reads *Demo Foreman (Y-1006) · Foreman*.
   (schedule of record, engine, or shell estimate). A zone filter cuts it to a
   zone; the sheet is otherwise complete on purpose, because a print-out with
   rows missing is a print-out that lies.
+- The fourth chip is **Tomorrow** — the next of the yard's shifts after the
+  instant on the clock, named the yard's way (`Tomorrow · Mids 0000–0700 ·
+  09/07`; it reads `Next shift · Days 0700–1530 · 09/06` when the next shift
+  is still today). The board re-evaluates that shift's work against the
+  engine *at the shift's start*, and the amber strip says so: `PROJECTED ·
+  evaluated by the engine at 09/07 00:00 under the field conditions recorded
+  as of 09/06 20:38 · overnight tag-outs are not on this board · NOT AN
+  AUTHORIZATION`. Read the headline left to right — activities and MH on the
+  shift · **clearable tonight** · **clears on its own** · **needs a plan** ·
+  **sendable** — then the sections. *Clearable tonight* is one card per
+  action: the clearing authority as the badge (`ISOLATION AUTHORITY`,
+  `ISSUING AUTHORITY`), the hazard (*Bus live · Switchgear Room No. 1 — no
+  verified zero-energy state*), the origin as a link to the plate, *frees 9
+  spaces · 33 activities · 157 MH on the shift*, the trades, and `ASSUMES
+  ATTENDANCE` — the platform re-evaluated the effect; whether the authority
+  comes is not something it knows. On the reference hull this morning the
+  three energised buses and the two weapons stop-works are the phone calls.
+  *Clears on its own* lists the curing coats: `✓ CURED BEFORE THE SHIFT`
+  with the time (their work is sendable), `⏳ CLEARS DURING THE SHIFT ·
+  clears at 04:28 — send the crew after`. *Needs a plan* is the forward pump
+  room and its like: no clock, no single action, `open the options panel`.
+  *Sendable* is the shift board's own trade columns with no HELD word on
+  them — nothing in that section is held at the start, which is the point.
+  **⎙ Print sheet** cuts *Tomorrow's board*: the projection note first in
+  the footer, a section per clearing action with its work, the two hold
+  sections with their work codes, the trades, and each figure's layer. Kill
+  the API and reopen the chip: one amber *Projection unavailable* block, no
+  sections, no zero counts.
 
-## 2. Zone Manager — "my zone, and what is next door" (5 min)
+## 2. Zone Manager — "my zone, what is next door, and what is between us and the key event" (7 min)
 
 Role menu → **Zone Manager**. The front door is **Deck Explorer** with the
 role's zone in focus. Put **Z4** in focus if it is not (the focus bar above
@@ -88,6 +117,31 @@ hull this morning.
   The past does not change because somebody acted in the present; both
   stores keep it that way. Switch back to **Zone Manager** for the sheet.
 - **Reports** → *Zone day sheet* for Z4, the same cut on paper.
+- **Week Ahead**, with Z4 still in focus: *"What stands between us and
+  Light-off assessment"* — the next key event the schedule's own logic ties
+  Z4 work to (the Z1 and Z3 close-out reviews come first on the calendar
+  but gate nothing in Z4; leave focus and the board keys to the Z1 review).
+  The stats read the date and days away, the gating activities and MH left
+  in them, **miss the event** in red, **slide and still make it**, **cannot
+  be assessed**, **proposals open**. The picker lists every upcoming
+  milestone; the production reviews, crew certification, fast cruise and
+  end of availability are dimmed, and the line under the picker says why:
+  *no logic ties work to them*. The seven-day strip counts starts and
+  refusals per yard day over the gating set. The table is worst first: six
+  Z4 activities `MISSES THE EVENT` — the megger test on lighting circuit 8A
+  in the fan room and the overhead coating in Switchgear Room No. 3, each
+  with the hold on the row (*R07 · Bus live · Switchgear Room No. 3 — no
+  verified zero-energy state at 4-180-2-E · isolation authority · clears on
+  verification*) and the margin the schedule of record has against the
+  event; then `on plan · margin 109 d` rows in green. **Inspect →** opens
+  the same inspector the Sequence Board uses; *Propose to P6* is grey for a
+  Zone Manager with the server's sentence. As **Planner** the proposal lands
+  in the ledger and the row's *Proposal* column reads `#n OPEN → …· makes
+  it` or `misses it` against the event date; withdrawing on the Sequence
+  Board's Proposals view turns it back to `—`. **⎙ Print sheet** is the
+  key-event readiness sheet: the cut, the gating work with the hold and the
+  why in one column, the seven days, the events without logic, and the
+  layer of every figure.
 
 ## 3. Planner — "fix the schedule and tell P6" (5 min)
 
@@ -149,7 +203,10 @@ Role menu → **Safety**. The front door is **Conflicts & Risk**.
 
 Role menu → **Ship Super**. The front door is the **Deck Explorer** at ship
 altitude, all zones, worst first; the zone lanes show where the held spaces
-concentrate (Z4, then Z5). **Portfolio** for the Project Manager: every hull
+concentrate (Z4, then Z5). **Week Ahead** with no zone in focus keys to the
+Z1 close-out review on 12/19 — the earliest key event with logic — and the
+picker flips to the Z4 review or the light-off assessment in one click; the
+Ship Super's question is which key event the buses are about to cost. **Portfolio** for the Project Manager: every hull
 the reader is assigned, class, availability and confidence (CVN-73 reads
 *At Risk*), and the hull the reader is not assigned refuses with the
 reason, which is the row-level security story in one click. The role menu

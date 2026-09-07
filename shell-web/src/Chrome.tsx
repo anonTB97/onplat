@@ -181,6 +181,8 @@ const ic = (d: string) => (
 
 export const ICONS: Record<string, React.ReactNode> = {
   dailyOps: ic("M12 7v5l3 2|M12 3a9 9 0 100 18 9 9 0 000-18z"),
+  // A week on a calendar page, with the key event marked.
+  week: ic("M4 6h16v14H4z|M4 10h16|M8 3v4|M16 3v4|M15 14l1.5 1.5L19 13"),
   // The prototype's own Deck Explorer glyph: stacked decks.
   deckExplorer: ic("M12 3l9 5-9 5-9-5 9-5z|M3 12l9 5 9-5|M3 16l9 5 9-5"),
   sequenceBoard: ic("M4 5h10|M4 12h16|M4 19h7|M18 3v4|M8 10v4|M14 17v4"),

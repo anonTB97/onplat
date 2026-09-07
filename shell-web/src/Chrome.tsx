@@ -43,7 +43,16 @@ const LINE = C.line;
  */
 export const MARKING_H = 18;
 
-export function ClassificationBanner({ edge, markings }: { edge: "top" | "bottom"; markings: string[] | null }) {
+export function ClassificationBanner({
+  edge,
+  markings,
+  stamp,
+}: {
+  edge: "top" | "bottom";
+  markings: string[] | null;
+  /** The release stamp (`<commit> · schema <NNNN> · <backend>`), bottom band only. */
+  stamp?: string | null;
+}) {
   const missing = markings === null || markings.length === 0;
   return (
     <div
@@ -78,6 +87,21 @@ export function ClassificationBanner({ edge, markings }: { edge: "top" | "bottom
             {m}
           </span>
         ))
+      )}
+      {edge === "bottom" && stamp && (
+        <span
+          title="the served binary's release stamp, from /health"
+          style={{
+            position: "absolute",
+            right: 10,
+            textTransform: "none",
+            letterSpacing: 0.3,
+            fontWeight: 500,
+            color: C.faint,
+          }}
+        >
+          {stamp}
+        </span>
       )}
     </div>
   );

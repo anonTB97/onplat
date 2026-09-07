@@ -117,11 +117,25 @@ export async function listVessels(id: Identity): Promise<VesselSummary[]> {
   return (await res.json()) as VesselSummary[];
 }
 
-/** `/health`, read before anything is asserted: which trust boundary is armed. */
-export async function health(): Promise<{ identity_mode: string; status: string }> {
+/**
+ * `/health`: which trust boundary is armed, and the release stamp — the
+ * commit, its instant and the migration set the binary was built against,
+ * beside the store's own migration state. `version`, `schema_state` and
+ * `store` are optional so an older server still boots the shell.
+ */
+export interface Health {
+  status: string;
+  identity_mode: string;
+  version?: { git: string; built_at: string; schema: string; document_schema: number };
+  schema_state?: string;
+  store?: { backend: string; reachable: boolean; schema_version: string | null };
+}
+
+/** `/health`, read before anything is asserted (no identity headers: it is unscoped). */
+export async function health(): Promise<Health> {
   const res = await fetch("/health");
   if (!res.ok) throw new Error(`GET /health → ${res.status}`);
-  return (await res.json()) as { identity_mode: string; status: string };
+  return (await res.json()) as Health;
 }
 
 /**

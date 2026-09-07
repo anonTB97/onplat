@@ -189,6 +189,76 @@ jobs:
             | grep -q '3-160-2-Q'
           kill %1
 
+  production-path:
+    name: the production path — bootstrap, load-docs, the suites on PostgreSQL, the drill, /health
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # actions/checkout is shallow and untagged, so the stamp comes from the
+      # event's sha — the same twelve characters `git describe --always` would
+      # fall back to.
+      - name: stamp the build with the commit
+        run: echo "WADL_GIT=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+      - name: build the CLI and the server with the postgres feature
+        run: cargo build --locked -p wadl-cli -p wadl-api --bin wadl --bin serve --features wadl-api/postgres
+      - name: wadl migrate
+        run: ./target/debug/wadl migrate
+      # The hull-row statement from the DBA's session — no hand SQL — must
+      # create the four rows on an empty database.
+      - name: wadl bootstrap-hull
+        run: |
+          ./target/debug/wadl bootstrap-hull --statement reference/cvn73/CVN73-hull.json | tee bootstrap.log
+          test "$(grep -c ' created ' bootstrap.log)" -ge 4
+      - name: wadl load-docs (the reference hull and export, through the doors' own loader)
+        run: |
+          ./target/debug/wadl load-docs --dir reference/cvn73 --xer reference/p6-sample/CVN73-PIA26-full.xer \
+            --org 00000000-0000-0000-0000-000000000001 --vessel 00000000-0000-0000-0000-000000000073
+      # The reference-hull suites on PostgreSQL, each test on its own
+      # bootstrapped hull (tests/support); the seed-world suites on memory as
+      # always. The support module prints `backend: postgresql` once per binary.
+      - name: the API suites on PostgreSQL
+        run: cargo test --locked -p wadl-api --features postgres
+      - name: the CLI against the database
+        run: cargo test --locked -p wadl-cli --test database
+      # Back up, drop, restore, verify, serve, 476 spaces, the stamp on /health.
+      - name: the restore drill
+        run: WADL_BIN=target/debug/wadl WADL_SERVE_BIN=target/debug/serve scripts/restore-drill.sh | tee drill.log
+      - name: serve, assert /health, write the support bundle
+        run: |
+          ./target/debug/serve &
+          for i in $(seq 1 50); do
+            curl -sf http://127.0.0.1:8080/health >/dev/null && break
+            sleep 0.2
+          done
+          curl -sf http://127.0.0.1:8080/health | tee health.json | jq -e \
+            '.version.git != "unknown" and .schema_state == "current" and (.version.schema|tonumber) == (.store.schema_version|tonumber)'
+          mkdir -p evidence
+          ./target/debug/wadl support-bundle --out evidence/support-bundle.json --base http://127.0.0.1:8080
+          kill %1
+          test "$(jq '.migrations.pending | length' evidence/support-bundle.json)" = 0
+          ! grep -Eq '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' evidence/support-bundle.json
+          ! grep -q 'postgres://' evidence/support-bundle.json
+          mv drill.log health.json bootstrap.log evidence/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wadl-production-path-evidence
+          path: evidence/
+
   supply-chain:
     name: cargo-deny
     runs-on: ubuntu-latest

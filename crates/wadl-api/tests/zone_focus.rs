@@ -11,6 +11,8 @@
     clippy::indexing_slicing
 )]
 
+mod support;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -101,20 +103,9 @@ async fn next_door_to_a_zone_says_why_and_what_state_it_is_in() {
 /// The reference hull, loaded through the doors: zone blocks stacked on
 /// decks and couplings that cross zone boundaries, which the seed lacks.
 async fn reference_app() -> (axum::Router, DemoWorld) {
-    let (store, world) = InMemoryStore::demo_at(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/cvn73");
-    wadl_api::documents::load_demo_docs(
-        &store,
-        &world.yard_scope(),
-        world.cvn73,
-        &dir,
-        DEMO_ANCHOR_MS,
-    )
-    .await
-    .expect("the reference hull loads");
-    let clock = TestClock::new(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
-    let state = wadl_api::AppState::new(Arc::new(store), Arc::new(clock));
-    (wadl_api::build_router(state), world)
+    // On whichever store `DATABASE_URL` selects — a fresh hull on PostgreSQL.
+    let tw = support::reference_hull().await;
+    (tw.app, tw.world)
 }
 
 #[tokio::test]

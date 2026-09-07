@@ -13,6 +13,7 @@ import {
   type Timeframe,
   type WhoAmI,
 } from "./api";
+import { stampOf } from "./stamp";
 import {
   ClassificationBanner,
   loadRole,
@@ -174,6 +175,9 @@ export default function App() {
   // so the epoch is what makes a board re-derive its shift windows and
   // re-render its times). Passed down with the frame.
   const [clockEpoch, setClockEpoch] = useState(0);
+  // The release stamp the bottom band wears: what the served binary says it
+  // is, or the honest fallback when it cannot say.
+  const [stamp, setStamp] = useState<string | null>(null);
 
   // Boot: the trust mode first. Nothing is asserted until the server has
   // said whether it is the shim that would trust it.
@@ -181,10 +185,13 @@ export default function App() {
     let stale = false;
     health()
       .then((h) => {
-        if (!stale) setIdentity(identityFromHealth(h.identity_mode, INITIAL_ROLE.code));
+        if (stale) return;
+        setIdentity(identityFromHealth(h.identity_mode, INITIAL_ROLE.code));
+        setStamp(stampOf(h));
       })
       .catch((e: unknown) => {
         if (stale) return;
+        setStamp(stampOf(null));
         setError(String(e));
         setWhoState("failed");
       });
@@ -798,7 +805,7 @@ export default function App() {
         </main>
       </div>
 
-      <ClassificationBanner edge="bottom" markings={who?.markings ?? null} />
+      <ClassificationBanner edge="bottom" markings={who?.markings ?? null} stamp={stamp} />
     </div>
     </IdentityContext.Provider>
   );

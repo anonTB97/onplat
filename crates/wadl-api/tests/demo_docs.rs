@@ -13,71 +13,40 @@
     clippy::indexing_slicing
 )]
 
+mod support;
+
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use serde_json::Value;
-use tower::ServiceExt;
-use wadl_api::documents::LoadedDocuments;
-use wadl_domain::time::{TestClock, Timestamp};
-use wadl_store::memory::{DemoWorld, InMemoryStore, DEMO_ANCHOR_MS};
-use wadl_store::{Actor, Repositories};
+use support::Backend;
+use wadl_domain::time::Timestamp;
+use wadl_store::memory::{InMemoryStore, DEMO_ANCHOR_MS};
+use wadl_store::Actor;
 
 fn docs_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/cvn73")
 }
 
-/// The reference hull booted the way `serve` boots it: through the boot
-/// loader, on the binary's own account (`system:boot`).
-async fn booted() -> (axum::Router, DemoWorld, Arc<InMemoryStore>, LoadedDocuments) {
-    let (store, world) = InMemoryStore::demo_at(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
-    let store = Arc::new(store);
-    let boot_scope = world.yard_scope().with_actor(Actor::system("boot"));
-    let loaded = wadl_api::documents::load_demo_docs(
-        store.as_ref(),
-        &boot_scope,
-        world.cvn73,
-        &docs_dir(),
-        DEMO_ANCHOR_MS,
-    )
-    .await
-    .expect("the reference hull loads through the doors");
+/// The reference hull through the loader on whichever store `DATABASE_URL`
+/// selects (`support::reference_hull`), with every document accounted for.
+async fn booted() -> support::TestWorld {
+    let tw = support::reference_hull().await;
+    let loaded = &tw.loaded;
     assert!(loaded.register.is_some(), "{loaded:?}");
     assert!(loaded.zones.is_some(), "{loaded:?}");
     assert!(loaded.couplings.is_some(), "{loaded:?}");
     assert!(loaded.geometry.is_some(), "{loaded:?}");
     assert!(loaded.hazards.is_some(), "{loaded:?}");
-    let clock = TestClock::new(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
-    let repos: Arc<dyn Repositories> = store.clone();
-    let state = wadl_api::AppState::new(repos, Arc::new(clock));
-    (wadl_api::build_router(state), world, store, loaded)
-}
-
-async fn get(app: &axum::Router, world: &DemoWorld, path: &str) -> (StatusCode, Value) {
-    let request = Request::builder()
-        .uri(format!("/api/vessels/{}{path}", world.cvn73.as_uuid()))
-        .header("x-org-id", world.yard_org.as_uuid().to_string())
-        .header("x-assigned-vessels", world.cvn73.as_uuid().to_string())
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), 1 << 24)
-        .await
-        .unwrap();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
+    tw
 }
 
 #[tokio::test]
 async fn the_reference_hull_is_served_at_scale_with_a_clean_zone_audit() {
-    let (app, w, _, _) = booted().await;
+    let tw = booted().await;
 
-    let (status, register) = get(&app, &w, "/register").await;
+    let (status, register) = tw.get("/register").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(register["served"], "ingested", "{register}");
     let spaces = register["spaces_served"].as_u64().unwrap();
@@ -85,7 +54,7 @@ async fn the_reference_hull_is_served_at_scale_with_a_clean_zone_audit() {
     assert_eq!(register["decks_served"], 12);
 
     // Every deck in the register carries spaces, in the hull's order.
-    let (_, decks) = get(&app, &w, "/decks").await;
+    let (_, decks) = tw.get("/decks").await;
     let ordinals: Vec<i64> = decks
         .as_array()
         .unwrap()
@@ -103,7 +72,7 @@ async fn the_reference_hull_is_served_at_scale_with_a_clean_zone_audit() {
 
     // The chart partitions every deck: no space is outside its zone's blocks,
     // every zone the register uses is bounded, every bound names a zone in use.
-    let (_, zones) = get(&app, &w, "/zones").await;
+    let (_, zones) = tw.get("/zones").await;
     assert_eq!(zones["source"], "CVN73-zones.csv");
     assert_eq!(
         zones["audit"]["out_of_bounds"].as_array().unwrap().len(),
@@ -129,7 +98,7 @@ async fn the_reference_hull_is_served_at_scale_with_a_clean_zone_audit() {
         .all(|b| b["top_deck"].is_string() && b["bottom_deck"].is_string()));
 
     // Couplings: the authored rows plus derived deck penetrations, walked.
-    let (_, couplings) = get(&app, &w, "/couplings").await;
+    let (_, couplings) = tw.get("/couplings").await;
     assert_eq!(couplings["served"], "ingested");
     assert!(
         couplings["register"]["derived"].as_u64().unwrap() > 100,
@@ -140,17 +109,20 @@ async fn the_reference_hull_is_served_at_scale_with_a_clean_zone_audit() {
             > couplings["register"]["authored"].as_u64().unwrap()
     );
 
-    // The morning's log is live, and the seeded facts survived alongside it.
-    let (_, hazards) = get(&app, &w, "/hazards").await;
+    // The morning's log is live — and on the demo store the seeded facts
+    // survived alongside it (a bootstrapped hull has no seed to survive).
+    let (_, hazards) = tw.get("/hazards").await;
     let live = hazards["hazards"].as_array().unwrap();
     assert!(live.len() >= 25, "{}", live.len());
-    assert!(live.iter().any(|h| h["origin"] == "3-160-2-Q"));
+    if tw.backend == Backend::Memory {
+        assert!(live.iter().any(|h| h["origin"] == "3-160-2-Q"));
+    }
 }
 
 #[tokio::test]
 async fn the_served_hull_evaluates_every_space_and_rolls_up_by_zone() {
-    let (app, w, _, _) = booted().await;
-    let (status, verdicts) = get(&app, &w, "/deck-states").await;
+    let tw = booted().await;
+    let (status, verdicts) = tw.get("/deck-states").await;
     assert_eq!(status, StatusCode::OK);
     let rows = verdicts.as_array().unwrap();
     assert!(rows.len() >= 400);
@@ -161,7 +133,7 @@ async fn the_served_hull_evaluates_every_space_and_rolls_up_by_zone() {
         "nothing refused"
     );
 
-    let (_, rollup) = get(&app, &w, "/readiness").await;
+    let (_, rollup) = tw.get("/readiness").await;
     let zones: Vec<&str> = rollup["zones"]
         .as_array()
         .unwrap()
@@ -203,14 +175,35 @@ async fn a_document_the_doors_would_refuse_refuses_the_boot() {
 /// ledger opens with one `DOCUMENT_REPLACED` row per document the boot
 /// loader carried, in door order, each `via: boot` under the binary's own
 /// account — the truth about where the served hull came from, verifiable.
+/// Booted exactly as `serve` boots the demo store (`load_demo_docs` on
+/// `system:boot`); the store-generic loader is pinned in `production_path`.
 #[tokio::test]
 async fn the_boot_path_ledgers_every_document_it_loaded_via_boot() {
-    let (app, w, _, loaded) = booted().await;
-    let (status, ledger) = get(&app, &w, "/ledger").await;
+    let (store, world) = InMemoryStore::demo_at(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
+    let store: Arc<dyn wadl_store::Repositories> = Arc::new(store);
+    let boot_scope = world.yard_scope().with_actor(Actor::system("boot"));
+    let loaded = wadl_api::documents::load_demo_docs(
+        store.as_ref(),
+        &boot_scope,
+        world.cvn73,
+        &docs_dir(),
+        DEMO_ANCHOR_MS,
+    )
+    .await
+    .expect("the reference hull boots");
+    let clock = wadl_domain::time::TestClock::new(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
+    let tw = support::TestWorld {
+        app: wadl_api::build_router(wadl_api::AppState::new(store.clone(), Arc::new(clock))),
+        world,
+        store,
+        backend: Backend::Memory,
+        loaded,
+    };
+    let (status, ledger) = tw.get("/ledger").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ledger["verified"], true, "{ledger}");
 
-    let kinds: Vec<&str> = loaded.ledger.iter().map(|l| l.kind.as_str()).collect();
+    let kinds: Vec<&str> = tw.loaded.ledger.iter().map(|l| l.kind.as_str()).collect();
     assert_eq!(
         kinds,
         [
@@ -229,23 +222,22 @@ async fn the_boot_path_ledgers_every_document_it_loaded_via_boot() {
         .iter()
         .filter(|e| e["action"] == "DOCUMENT_REPLACED")
         .collect();
-    assert_eq!(documents.len(), loaded.ledger.len(), "{ledger}");
+    assert_eq!(documents.len(), tw.loaded.ledger.len(), "{ledger}");
     for entry in &documents {
         assert_eq!(entry["actor_id"], "system:boot", "{entry}");
         let detail: Value = serde_json::from_str(entry["detail"].as_str().unwrap()).unwrap();
         assert_eq!(detail["via"], "boot", "{detail}");
         let seq = entry["seq"].as_i64().unwrap();
-        let line = loaded
+        let line = tw
+            .loaded
             .ledger
             .iter()
             .find(|l| l.seq == seq)
-            .unwrap_or_else(|| panic!("seq {seq} is not one the loader reported: {loaded:?}"));
+            .unwrap_or_else(|| panic!("seq {seq} is not one the loader reported"));
         assert_eq!(detail["kind"], line.kind, "{detail}");
         assert_eq!(detail["label"], line.label, "{detail}");
         assert!(detail["counts"].is_object(), "{detail}");
     }
-    // The document rows are the only rows the loader writes on its own
-    // account besides the hazards the log raised.
     assert!(
         entries
             .iter()

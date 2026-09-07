@@ -161,13 +161,49 @@ sentence, and the dry run still works.
 
 **Data Sources** is the home of the documents the hull *is*: the compartment
 register, the coupling register (derived deck penetrations marked
-*derived*), the zone chart, the geometry, the hazard log, the schedule of
-record. Each door has a dry run, a mapping report and a revert, and each
-commit is a ledger entry under the person who committed it. Committing
-needs a **Planner** (the card says *anyone may dry-run; committing needs
-Planner* for any other role); re-import the morning's hazard log as any
-role that may raise: rows already live are skipped and say so; raise one
-from the log and watch the plate.
+*derived*), the zone chart, the geometry, the hazard log, the P6 field map,
+the schedule of record. Each door has a dry run, a mapping report and a
+revert, and each commit is a ledger entry under the person who committed
+it. Committing needs a **Planner** (the card says *anyone may dry-run;
+committing needs Planner* for any other role).
+
+The line under the hull in the top bar reads *reading CVN73-PIA26-full.xer
+· imported … by org …0001 (no person on record) · at boot* — whose export
+every screen is on, and since when. The schedule card says the same with
+*run #1*.
+
+As Planner, upload `reference/p6-sample/CVN73-PIA26-yardshape.xer` on the
+schedule card — an export shaped the way a yard's P6 actually writes one.
+The staged panel reads *11 activities · 6 edges · 1 key events · projects
+served: CVN73-PIA26, CVN73-DSRA27* and *0 of 10 authored*: this file
+carries no UDF named `compartment`. The **Field map** panel says so and
+offers what the file does carry — *UDF: COMPT — Location placard (8 rows)*,
+*Activity code: LOC*. Pick COMPT: the dry run re-runs and the line moves to
+*7 of 8 authored · 1 read from task names* once you also untick
+**CVN73-DSRA27** under *Projects served*. The **Quarantine** fold lists
+three rows with their line and reason — line 44 an unparseable date, line
+45 a width error, and the DSRA predecessor as cross-project logic; the
+**Excluded** line reads *3 level-of-effort (A9001, A9002, A9003) · 1 WBS
+summary (Z6-SUM) · 2 in project CVN73-DSRA27*; **Hours** says *1 material
+and 1 equipment assignments not in anyone's man-hours*. Confirm. The crumb
+now reads *reading CVN73-PIA26-yardshape.xer · imported … by Demo Planner
+(Y-1001)*; the Decisions Ledger has the field map (`DOCUMENT_REPLACED
+p6_field_map`) and the run (`SCHEDULE_REPLACED`, `quarantined: 3`) under
+the Planner's name.
+
+Open **Runs**: *#2 SERVED* and *#1 CVN73-PIA26-full.xer*. *diff vs served*
+on #1 renders the delta in the door's words (*+5706 new · −9 gone · ⚠ 414
+newly NOT executable …*). *serve this run…* on #1 asks once — *a revert to
+a prior import, ledgered as SCHEDULE_REPLACED naming both runs* — and the
+whole product steps back to the reference export: the crumb flips, the
+Sequence Board re-renders 5,706 rows with the same activity ids as before.
+Switch to Foreman and stage the same file: the dry run runs, the Confirm
+and serve buttons are disabled, and the card says *Foreman may not commit
+or revert a document — commit_document is held by Planner*.
+
+Re-import the morning's hazard log as any role that may raise: rows
+already live are skipped and say so; raise one from the log and watch the
+plate.
 
 ## What to say when asked
 

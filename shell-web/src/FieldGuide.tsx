@@ -97,10 +97,25 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
           <p style={{ margin: "0 0 8px" }}>
             <span style={dt}>Nothing lands blind.</span> Every upload stages a server-side{" "}
             <b>dry run</b> — activity and edge counts, the location-mapping report, the hours
-            reconciliation — behind one Confirm/Cancel bar. Imports are{" "}
+            reconciliation — behind one Confirm/Cancel bar. The CSV doors are{" "}
             <b>all-or-nothing</b>: one rejected line refuses the file with every reason listed at
             once. And every door has a <b>revert</b>: taking a document back out is one click, and
             the screens return to what the tool can honestly serve without it.
+          </p>
+          <p style={{ margin: "0 0 8px" }}>
+            <span style={dt}>The schedule door survives the yard&apos;s own export.</span> The file is
+            decoded in the browser (UTF-8, or Windows-1252 as P6 writes it from Windows) and the
+            card says which. The yard&apos;s conventions are a <b>field map</b> — which UDF or
+            activity code carries the compartment, the work item, the work type and the trade;
+            which projects to serve — chosen on the card from the fields the file itself carries,
+            and every change re-runs the dry run so the located count moves before anything is
+            stored. Rows the parser cannot honestly accept are <b>quarantined</b> with their line
+            and reason rather than refusing the file; level-of-effort, WBS-summary and
+            other-project rows are listed as excluded, not lost; only labor assignments are
+            man-hours. Every commit is a <b>run</b>: the Runs fold lists them newest first with the
+            served one marked, any run diffs against the served one, and <i>serve this run</i>{" "}
+            brings a prior import back, ledgered. The line under the hull in the top bar reads
+            whose export every screen is on and since when.
           </p>
           <p style={{ margin: 0, ...dim }}>
             A realistic hull ships in the repo as documents: <span style={mono}>reference/cvn73/</span>{" "}

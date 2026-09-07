@@ -1699,6 +1699,7 @@ impl Repositories for PgStore {
                     kind: hazard_kind(&row.get::<String, _>("kind"))?,
                     since: ts(row.get("raised_at")),
                     label: row.get("label"),
+                    ended: None,
                 })
             })
             .collect()
@@ -1743,6 +1744,7 @@ impl Repositories for PgStore {
                     kind: hazard_kind(&row.get::<String, _>("kind"))?,
                     since: ts(row.get("raised_at")),
                     label: row.get("label"),
+                    ended: None,
                 })
             })
             .collect()
@@ -1781,6 +1783,7 @@ impl Repositories for PgStore {
             kind,
             since: Timestamp::from_epoch_millis(since_ms),
             label: label.to_owned(),
+            ended: None,
         })
     }
 

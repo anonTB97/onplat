@@ -108,6 +108,7 @@ fn hazards() -> Vec<Hazard> {
                 kind: kinds[i % kinds.len()],
                 since: Timestamp::from_epoch_millis(T0 - ((i as i64 % 6) * HOUR)),
                 label: format!("H{i:02} · synthetic"),
+                ended: None,
             }
         })
         .collect()

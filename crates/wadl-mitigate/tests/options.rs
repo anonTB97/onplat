@@ -32,7 +32,10 @@ use wadl_domain::ids::{CouplingTypeId, RuleVersionId};
 use wadl_domain::time::Timestamp;
 use wadl_domain::units::{HopDepth, ManHours, Minutes};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
-use wadl_engine::{AdjacencyGraph, Applies, DecisionState, Hazard, HazardKind, RuleEntry, RuleSet};
+use wadl_engine::{
+    AdjacencyGraph, Applies, DecisionState, Hazard, HazardKind, HoldFrom, RuleBinding, RuleEntry,
+    RuleSet,
+};
 use wadl_mitigate::{assess, leverage, triage, Action, Confidence, SpaceLoad, World};
 
 const T0: i64 = 1_778_649_300_000;
@@ -97,6 +100,7 @@ fn coating() -> Hazard {
         kind: HazardKind::CoatingOpen,
         since: at(T0),
         label: "CT-3160-4 · final coat, curing".to_owned(),
+        ended: None,
     }
 }
 
@@ -106,6 +110,7 @@ fn energised_bus() -> Hazard {
         kind: HazardKind::EnergisedBus,
         since: at(T0),
         label: "Bus 3-SG-2 energised".to_owned(),
+        ended: None,
     }
 }
 
@@ -244,13 +249,13 @@ fn a_verification_hold_offers_no_wait_at_any_instant() {
 /// straight into a bus being energised for testing, so the option must report what
 /// it shuts as well as what it opens. An upside-only tool recommends this.
 ///
-/// Note which hazard this uses. A hot-work hazard will not do, and finding out why
-/// was worth the detour: hot work carries a thirty-minute fire-watch hold, so the
-/// engine treats it as live for thirty minutes from its start and it has expired
-/// again long before an eight-hour cure ends. Only a hold that does not elapse —
-/// one gated on a verification, like an energised bus — is still there when the
-/// wait finishes. Which is the same asymmetry the whole feature turns on, arriving
-/// from the other direction.
+/// Note which hazard this uses. An energised bus is the plain case of a hold that
+/// does not elapse: gated on a verification, it is still there when the wait
+/// finishes. Hot work is the same shape today for a different reason — its
+/// fire-watch hold is anchored at the permit's close, so with no `HAZARD_CLEARED`
+/// row it has no clock at all and is never offered as a wait either — but the bus
+/// says it without the anchor getting in the way. The asymmetry the whole feature
+/// turns on, arriving from the other direction.
 #[test]
 fn waiting_reports_the_space_it_would_shut() {
     let bus_energised_later = Hazard {
@@ -258,6 +263,7 @@ fn waiting_reports_the_space_it_would_shut() {
         kind: HazardKind::EnergisedBus,
         since: at(T0 + 5 * HOUR),
         label: "Bus 3-SG-2 energised for testing".to_owned(),
+        ended: None,
     };
     let f = Fixture::new(vec![coating(), bus_energised_later]);
     let world = f.world(T0);
@@ -338,6 +344,7 @@ fn a_compound_hold_names_everything_that_must_be_addressed() {
         kind: HazardKind::StopWork,
         since: at(T0),
         label: "STOP WORK · Fire Marshal".to_owned(),
+        ended: None,
     };
     let f = Fixture::new(vec![coating(), stop_work]);
     let world = f.world(T0);
@@ -366,6 +373,7 @@ fn a_compound_hold_is_priced_as_one_cheapest_plan() {
         kind: HazardKind::StopWork,
         since: at(T0),
         label: "STOP WORK · Fire Marshal".to_owned(),
+        ended: None,
     };
     let f = Fixture::new(vec![coating(), stop_work]);
     let world = f.world(T0);
@@ -503,6 +511,8 @@ fn an_untimed_warn_does_not_suppress_a_working_wait() {
             clearing_authority: "marine_chemist".to_owned(),
             hold: Some(Minutes::new(480)),
             waivable: false,
+            binding: RuleBinding::default(),
+            hold_from: HoldFrom::Raise,
         },
         // Flags a condition in the same space, with no clock on it. Permits work.
         RuleEntry {
@@ -515,6 +525,8 @@ fn an_untimed_warn_does_not_suppress_a_working_wait() {
             clearing_authority: "qa".to_owned(),
             hold: None,
             waivable: true,
+            binding: RuleBinding::default(),
+            hold_from: HoldFrom::Raise,
         },
     ]);
     let f = Fixture {
@@ -556,12 +568,14 @@ fn a_coupling_cut_has_one_identity_whichever_way_it_is_named() {
             kind: HazardKind::StopWork,
             since: at(T0),
             label: "STOP WORK · one side".to_owned(),
+            ended: None,
         },
         Hazard {
             origin: CompartmentNo::new("3-148-0-L"),
             kind: HazardKind::StopWork,
             since: at(T0),
             label: "STOP WORK · other side".to_owned(),
+            ended: None,
         },
     ]);
     let world = f.world(T0);
@@ -611,6 +625,7 @@ fn any_hazard() -> impl Strategy<Value = Hazard> {
         kind: kinds[k],
         since: at(T0 + hours * HOUR),
         label: format!("H{p}{k} · generated"),
+        ended: None,
     })
 }
 

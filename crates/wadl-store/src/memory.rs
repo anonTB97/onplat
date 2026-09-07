@@ -877,6 +877,7 @@ impl InMemoryStore {
                 kind: h.kind,
                 since: self.at_minutes(h.since_min),
                 label: h.label.to_owned(),
+                ended: None,
             })
             .chain(
                 raised
@@ -887,6 +888,7 @@ impl InMemoryStore {
                         kind: h.kind,
                         since: Timestamp::from_epoch_millis(h.since_ms),
                         label: h.label.clone(),
+                        ended: None,
                     }),
             )
             .collect())
@@ -2948,6 +2950,7 @@ impl Repositories for InMemoryStore {
             kind,
             since: Timestamp::from_epoch_millis(since_ms),
             label: label.to_owned(),
+            ended: None,
         })
     }
 

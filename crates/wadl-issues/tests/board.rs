@@ -75,6 +75,7 @@ fn coating(origin: &str, since: i64) -> Hazard {
         kind: HazardKind::CoatingOpen,
         since: at(since),
         label: format!("CT-{origin} · curing"),
+        ended: None,
     }
 }
 
@@ -84,6 +85,7 @@ fn bus(origin: &str, since: i64) -> Hazard {
         kind: HazardKind::EnergisedBus,
         since: at(since),
         label: format!("Bus {origin} energised"),
+        ended: None,
     }
 }
 

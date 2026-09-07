@@ -25,6 +25,27 @@ expression: "decide(\"4-164-2-Q\")"
       "clearing_authority": "marine_chemist",
       "earliest_clear": 1778678100000,
       "reason": "CT-3160-4 · final coat, curing in 3-160-2-Q — reached via exhaust_trunk → exhaust_trunk (2 hops)."
+    },
+    {
+      "rule_code": "R09",
+      "rule_version": "00000000-0000-0000-0000-000000000902",
+      "state": "WARN",
+      "source": "3-160-2-Q",
+      "hazard": "CT-3160-4 · final coat, curing",
+      "depth": 2,
+      "path": [
+        "3-160-2-Q",
+        "3-164-2-Q",
+        "4-164-2-Q"
+      ],
+      "via": [
+        "exhaust_trunk",
+        "exhaust_trunk"
+      ],
+      "authority": "NSTM Ch. 074; NFPA 306",
+      "clearing_authority": "marine_chemist",
+      "earliest_clear": 1778678100000,
+      "reason": "CT-3160-4 · final coat, curing in 3-160-2-Q — reached via exhaust_trunk → exhaust_trunk (2 hops)."
     }
   ],
   "earliest_clear": 1778678100000

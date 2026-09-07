@@ -65,6 +65,7 @@ fn coating_hazard() -> Vec<Hazard> {
         kind: HazardKind::CoatingOpen,
         since: Timestamp::from_epoch_millis(COAT_OPENED_AT),
         label: "CT-3160-4 · final coat, curing".to_owned(),
+        ended: None,
     }]
 }
 

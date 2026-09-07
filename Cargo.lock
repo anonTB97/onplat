@@ -2225,6 +2225,7 @@ dependencies = [
  "insta",
  "proptest",
  "serde",
+ "serde_json",
  "uuid",
  "wadl-domain",
 ]

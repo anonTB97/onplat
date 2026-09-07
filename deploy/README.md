@@ -15,11 +15,17 @@ cd shell-web && npm ci && npx vite build && cd ..
 cargo build --locked --release -p wadl-api --bin serve --features postgres
 ```
 
-Prepare the database once (`DATABASE_URL` set): `wadl migrate && wadl seed`
-(or your own data load). At runtime, `DATABASE_URL` in the unit's environment
-selects the PostgreSQL store — row-level security armed per request — and its
-absence falls back to the in-memory demo world, which the startup banner
-states plainly.
+Prepare the database once, from the DBA's session (`DATABASE_URL` set):
+`wadl migrate && wadl bootstrap-hull --statement <hull-row statement>.json`,
+then the documents through `wadl load-docs` on data-load day — the whole
+order, with the lines each command prints, is `docs/runbook.md` §1.
+(`wadl seed` installs the **demo world** and is for a demo database only;
+a yard's tenant is never seeded.) At runtime, `DATABASE_URL` in the unit's
+environment selects the PostgreSQL store — row-level security armed per
+request — and its absence falls back to the in-memory demo world, which the
+startup banner states plainly. The binary refuses to serve a database behind
+its migration set (`run: wadl migrate`); backup, restore, the drill, upgrade
+and roll-back are `docs/runbook.md` §3–§6.
 
 The deployable set is exactly two things: `target/release/serve` and
 `shell-web/dist/`. Checksum both at build time and verify at install.

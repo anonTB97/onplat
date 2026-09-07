@@ -39,21 +39,26 @@ and `#` comments are skipped in every shape.
 | Y10 | Manning book | `trade,headcount` per watch (the shell's `parseManningCsv`; the door body is `{ label, crews: [{ trade, headcount }] }`) | none committed; the door test `crates/wadl-api/tests/manning.rs` shows the body | Manning door dry run: `register_trades_with_no_manning_line` is empty or accepted |
 | Y11 | Rule table | The safety authority's rows, through the rule door (S14) after the sitting; until then the seed | `handoff/01-rule-table.csv`; brief in `docs/briefs/safety-authority-sitting.md` | Every row in force has a signed golden trace, or the signed hot-work-only fallback is on file |
 | Y12 | Identity-proxy contract | The header contract, signed by the proxy owner | `docs/briefs/proxy-owner-contract.md` | The staging test in that brief passes: `whoami` reports `proxy-asserted` and (after S12) a person |
-| Y13 | PostgreSQL host | Version 16, a DBA, a backup policy, who applies migrations, who owns `wadl_app` | `deploy/README.md`; runbook and restore drill are S15 | `wadl migrate` applied by the DBA; a restore drilled from a backup before data-load day |
+| Y13 | PostgreSQL host | Version 16, a DBA, a backup policy (the cadence is the RPO), who applies migrations, who owns `wadl_app` | `deploy/README.md`; `docs/runbook.md` §3–§4 | `wadl migrate` applied by the DBA; `scripts/restore-drill.sh` run against the yard's staging host before data-load day, its `drill: PASS in <s> s` line (the RTO) on the record |
 | Y14 | ATO vehicle | In writing from the ISSO or AO: IATT, or a change to the enclave's ATO, and the FIPS 199 level and marking | `docs/ato-package.md` | The vehicle names the pilot; the marking string is set as `WADL_MARKINGS` (S12) |
 | Y15 | Named users, devices, the room | The 5–15 people by role (the eight role codes in `docs/programme/s12-person-in-the-ledger.md`), the tablets, the wall display, and the spreadsheet the morning meeting runs off today | the role cards (S20) | Every named person has logged in through the proxy once before week 1 |
 
 Two items the checklist cannot make honest by itself:
 
-- **The hull row.** No door and no route creates the organisation, class,
-  vessel or availability rows on PostgreSQL; only `crates/wadl-store/src/pg_seed.sql`
-  (the demo world, applied by `wadl seed`) does. The pilot hull is bootstrapped
-  by the DBA from a written statement (org uuid, class, hull number, name,
-  availability code and bounds) that is filed with the data-load record and
-  read back through `GET /api/vessels` before any door is opened. This is the
-  one write on data-load day that is not a door; it is recorded as such, and
-  it is the reason S15/S16 should add a `load-docs`-shaped bootstrap. Until
-  they do, this paragraph is the procedure.
+- **The hull row.** No HTTP door creates the organisation, class, vessel or
+  availability rows on PostgreSQL, on purpose (a tenant-creating route
+  reachable from the proxy is a larger surface than an owner-session
+  command). The pilot hull is bootstrapped by the DBA from the written
+  statement — `reference/cvn73/CVN73-hull.json` is the template: org uuid,
+  class, hull number, name, availability code and bounds, ids included —
+  with `wadl bootstrap-hull --statement <file>.json` from the DBA's session
+  (`--dry-run` first prints `would create` per row without a database), one
+  transaction, idempotent, refused whole on a clash under another id, and
+  ledgered `HULL_BOOTSTRAPPED` as the hull's `seq` 1. The statement is filed
+  with the data-load record and the hull read back through `GET
+  /api/vessels` before any door is opened. The documents then go through
+  the doors or through `wadl load-docs` — the same loader, ledgered `via:
+  cli` — per `docs/runbook.md` §1.
 - **The survey the yard mails back.** The charter asks the yard to run an
   `ingest-xer` survey on its own export and return UDF names, encoding and
   counts with no schedule content. That is
@@ -238,7 +243,7 @@ Each is true or false at the exit review, with the evidence named.
 | M9 | `self-assessment.sh` against the instance had no FAIL and no WARN at data load and at exit | the two outputs on the record |
 | M10 | Every pilot user completed their role's tasks (§3) unaided by week 2 | the training sign-off (S20 role cards) |
 | M11 | A proposal made in the tool was reflected by a later P6 export and the delta said so | the `proposals_reflected` line of a run |
-| M12 | A backup was taken weekly and a restore was drilled once during the pilot on the yard's PostgreSQL | the runbook's drill line (S15) |
+| M12 | A backup was taken weekly and a restore was drilled once during the pilot on the yard's PostgreSQL | the backup manifests and `scripts/restore-drill.sh`'s `drill: PASS in <s> s` log (`docs/runbook.md` §3–§4) |
 
 ## 6. The exit review
 

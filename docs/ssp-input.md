@@ -177,7 +177,9 @@ Status vocabulary: **Implemented** (in this tree, verified), **Hybrid**
   `wadl_api::hardening::harden`; `identity` integration tests read the
   person back off the ledger.
 - **AU-9 / AU-10 (Hybrid).** The hash-chained ledger is verifiable with
-  `wadl-cli verify-ledger` (non-repudiation of recorded decisions). From
+  `wadl verify-ledger` — every hull's chain from the live database as the
+  owner, or an export offline — and `scripts/backup.sh` verifies it before
+  every dump (non-repudiation of recorded decisions). From
   migration 0017 every row is chain format 2: the acting person's id and
   display name are inside the row's hash, so a row cannot be re-attributed
   without breaking the chain; rows from before are format 1 and verify in

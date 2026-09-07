@@ -28,7 +28,7 @@ crates/
   wadl-store/    Repositories + read models; the tenant scope; the PostgreSQL seam.
   wadl-api/      axum router, the caller/scope extractor, problem+json errors.
   wadl-ingest/   Provenance-stamped P6 ingest.
-  wadl-cli/      wadl {migrate, seed, verify-ledger, support-bundle}.
+  wadl-cli/      wadl {migrate, seed, bootstrap-hull, load-docs, verify-ledger, support-bundle, version}.
 xtask/           gen-leak-tests: generates the cross-tenant leak test from the route inventory.
 scripts/dev.sh   Runs the API and the shell together — the one command to see it working.
 .devcontainer/   Codespaces setup, so the above works with nothing installed locally.

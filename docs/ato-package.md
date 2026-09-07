@@ -128,45 +128,50 @@ plan; the engineer writes it from the charter's row.
 
 ### 2.6 Configuration management plan — A11
 
-**Partial.** In the repository: the pinned toolchain
+**Partial → the inputs exist.** In the repository: the pinned toolchain
 (`rust-toolchain.toml`); `--locked` on every CI cargo invocation against
 committed `Cargo.lock` and `shell-web/package-lock.json`; forward-only
-migrations (`migrations/0001…0015`, numbers 0016 onward reserved in
-`docs/programme/programme.md`) with the applied count and the document
-schema version reported by `/health`; the lint gate as CI's gate
+migrations (`migrations/0001…0018`) with the applied count and the document
+schema version reported by `/health`, beside the binary's own **release
+stamp** (`version { git, built_at, schema }` and `schema_state`, S15 — a
+database behind the binary refuses to boot, one ahead is served with a
+warning); the lint gate as CI's gate
 (`Cargo.toml` `[lints]`: `unsafe_code = "forbid"`, `unwrap_used`/`expect_used`
 denied; `clippy.toml` `disallowed-methods` for wall-clock access); the
 security impact analysis per change in §2.14; the commit discipline in
 `docs/programme/implementer-contract.md` (gates run before every commit,
 checkpoint commits named as such); the dependency admission test in
 `docs/production-posture.md` Pillar 1 with the reason for any new dependency
-in the commit message. Missing: the cadence, the rollback stance for
-migrations (forward-only is stated; what an operator does when a migration
-must be undone is not), release tagging and who cuts a release, the
-approver of a change to a deployed instance, and the configuration items
-list (the environment variables enumerated in `serve.rs`'s header are the
-list; the unit file's values at the yard are the yard's). S15 (run it in
-production) writes the runbook these come from; the engineer writes the CM
-plan from S15's packet and the implementer contract.
+in the commit message; the **rollback policy** and the per-migration
+additive table, the upgrade order and the tagging step in `docs/runbook.md`
+§1, §5, §6 (S15). Missing: the cadence, who cuts a release and who approves
+a change to a deployed instance (two names the yard supplies), and the
+configuration items list (the environment variables enumerated in
+`serve.rs`'s header are the list; the unit file's values at the yard are
+the yard's). The engineer writes the CM plan from the runbook and the
+implementer contract.
 
 ### 2.7 Contingency plan, backup and restore — A12
 
-**Missing.** Nothing in the tree backs up or restores; `wadl migrate` is
-idempotent and forward-only, which is the precondition for a restore drill,
-not the drill. S15 delivers the procedure and the drilled restore on the
-yard's PostgreSQL (pilot-ready item 7). The plan states: what is backed up
-(the database; the deployable set is rebuilt from the tag), the RPO and RTO
-the yard accepts, the restore procedure and the drill record, and the
-fallback while the tool is down (the morning meeting runs on the last
-printed shift and zone sheets — `docs/demo-script.md` §1–2 — which is why
-the sheets are complete on purpose). The engineer writes the procedure; the
-yard's IT owns the host half; the drill record is a line on the pilot
-record.
+**Exists; the yard's numbers pending.** `scripts/backup.sh` (ledger
+verified first, `pg_dump` custom format, sha256 sidecar, a manifest with no
+uuid and no URL), `scripts/restore.sh` (checksum, two refusals, `pg_restore`,
+`wadl migrate`, `wadl verify-ledger`, counts against the manifest) and
+`scripts/restore-drill.sh` (bootstrap → load → back up → drop → restore →
+the ledger verifies → 476 spaces answer → `/health` reads the stamp;
+`drill: PASS in <s> s`) — `docs/runbook.md` §3–§4 — with the procedure, the
+empty-cluster case and the fallback while the tool is down (the morning
+meeting runs on the last printed shift and zone sheets —
+`docs/demo-script.md` §1–2 — which is why the sheets are complete on
+purpose). Still the yard's: the cadence (RPO), the drill timed on their host
+(RTO), and where dumps live (Y13). The drill log is the drill record; the
+same script runs in CI (S16) and on the yard's staging host.
 
 ### 2.8 Incident response procedure — A13
 
-**Missing.** Write it against what the system gives a responder, all of
-which exists:
+**Partial.** `docs/runbook.md` §7 is the collection order and what counts;
+the ISSO fits it to the enclave's plan. Written against what the system
+gives a responder, all of which exists:
 
 - The HTTP audit stream: one JSON object per `/api` request and per non-2xx
   anywhere, on stdout into the journal (`hardening.rs` `audited`);
@@ -174,10 +179,16 @@ which exists:
   (`deploy/README.md`). Refusals are as loud as successes.
 - Backend errors as `{"event":"backend_error",…}` on stderr.
 - The ledger: `GET /api/vessels/:id/ledger` re-verifies the chain on every
-  read and answers `verified`; `wadl verify-ledger --input <export>` verifies
-  an export offline (`crates/wadl-cli/src/main.rs`).
-- `wadl support-bundle --out <file>`: a redacted bundle (schema version,
-  migration inventory; "no secrets, no PII, no tenant identifiers").
+  read and answers `verified`; `wadl verify-ledger --database-url` reads
+  every hull's chain from the live database as the owner and names the
+  first break's `seq`; `--input <export>` verifies an export offline
+  (`crates/wadl-cli/src/verify.rs`).
+- `wadl support-bundle --out <file> --database-url … --base …`: the release
+  stamp, the served `/health`, migrations embedded vs applied, every hull's
+  ledger verdict, the document inventory, which variables are set (names
+  only), the recent audit lines — redacted by one tested function (every
+  uuid `<uuid>`, every URL `<url>`, identity fields `redacted`;
+  `crates/wadl-cli/src/bundle.rs`).
 - The proxy's access log for who was logged in (the yard's).
 
 The procedure names: what counts as an incident here (a chain verify that
@@ -296,7 +307,8 @@ Until S17's evidence bundle exists, this is the procedure; when it does,
 the bundle is what this list becomes, generated by CI and never edited.
 
 1. Tag the release; record the tag and commit; `GET /health` on the built
-   binary for the version and schema fields (S15 adds `version`).
+   binary for `version` and `schema_state`; `wadl support-bundle` against
+   the served instance, filed with the run.
 2. `cargo run -p xtask -- gen-ssp --check` and `gen-leak-tests --check`
    green at the tag; copy `docs/ssp-input.md` and
    `crates/wadl-api/tests/generated_leak_test.rs` (with its test count).
@@ -333,10 +345,10 @@ close it:
   must be dispatched at the tag.
 - The charter's A18 counts the critique passes as the review record; no
   `critique-<lens>.md` exists yet.
-- `deploy/README.md` says "prepare the database once: `wadl migrate && wadl
-  seed`"; `wadl seed` installs the demo world (`pg_seed.sql`), which a yard
-  must not do. The pilot's bootstrap is the hull-row statement in
-  `docs/pilot-playbook.md` §1 until S15/S16 give it a door.
+- ~~`deploy/README.md` says "prepare the database once: `wadl migrate &&
+  wadl seed`"~~ — closed by S15: the README says `wadl migrate && wadl
+  bootstrap-hull`, `wadl seed` is demoted to the demo database, and the
+  hull-row statement is a command (`docs/runbook.md` §1).
 - The charter names the CLI data-load door `wadl import --kind …`;
   `docs/programme/programme.md` names it `wadl load-docs`. One name before
   S16 builds it.

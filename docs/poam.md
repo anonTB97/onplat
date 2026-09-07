@@ -126,3 +126,18 @@ acceptable behind compensating controls, time-boxed; **Low** is tracked.
   directory-backed `person` row (`by_person uuid`) waits for a directory. A
   proxy that cannot map groups makes every user the `WADL_DEFAULT_ROLES`
   role — a deployment decision the yard signs, visible in the SSP.
+
+## POAM-7 — The seed-dependent API suites run on the memory store only
+
+- **Weakness.** Nine API suites (`clear_loop`, `as_of`, `clear_history`,
+  `mitigations`, `proposals`, `raise_loop`, `budgets`, `geometry`,
+  `ship_doors`) assert on the 24-space seed world, which `pg_seed.sql`
+  anchors on a different instant from the memory store's `DEMO_ANCHOR_MS`;
+  they cannot run on PostgreSQL until one seed is generated from the other.
+  Severity: **Low** — the store paths they exercise are covered on
+  PostgreSQL by `pg_rls.rs`, and the reference hull runs on PostgreSQL end
+  to end (`crates/wadl-cli/tests/database.rs`, the restore drill).
+- **Closure.** Generate `pg_seed.sql` from the in-memory world (a store
+  slice of its own), then run the nine suites on both backends through the
+  test-support module (S16). Trigger: the first defect found on PostgreSQL
+  that a memory-store suite would have caught.

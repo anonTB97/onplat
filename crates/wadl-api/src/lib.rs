@@ -30,6 +30,7 @@ pub mod roles;
 pub mod routes;
 pub mod schedule;
 mod schedule_door;
+pub mod version;
 pub mod yard_clock;
 
 use std::sync::Arc;

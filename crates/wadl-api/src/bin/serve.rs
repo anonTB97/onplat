@@ -54,6 +54,8 @@ use std::time::Duration;
 use wadl_api::hardening::{self, Limits};
 use wadl_domain::Clock;
 use wadl_store::clock::SystemClock;
+#[cfg(feature = "postgres")]
+use wadl_store::Repositories as _;
 use wadl_store::{Actor, InMemoryStore};
 
 /// Builds the store: the database-backed one when the binary carries the `postgres`
@@ -73,6 +75,7 @@ async fn build_store(
             eprintln!("cannot connect to DATABASE_URL: {e}");
             std::io::Error::other("database connection failed")
         })?;
+        refuse_a_database_behind(&store).await?;
         if std::env::var("WADL_SCHEDULE_XER").is_ok() {
             // The boot loader is a demo-store affordance; a database's schedule
             // arrives through the import door, with identity and a ledger entry.
@@ -160,6 +163,52 @@ async fn build_store(
         boot_schedule(&store, world.cvn73, &path, clock.now().epoch_millis())?;
     }
     Ok((Arc::new(store), "in-memory demo world"))
+}
+
+/// The schema rule: a database behind this binary's migration set is not
+/// served (`wadl migrate` first — the runbook's upgrade order is backup,
+/// migrate, then start the new binary); a database ahead of it is served
+/// with a warning, because every migration is additive and a newer release
+/// wrote it. A database the migration probe cannot read is treated as
+/// behind: it has most likely never been migrated.
+#[cfg(feature = "postgres")]
+async fn refuse_a_database_behind(store: &wadl_store::pg::PgStore) -> std::io::Result<()> {
+    let stamp = wadl_api::version::current();
+    let health = store.health().await;
+    let database = health
+        .schema_version
+        .as_deref()
+        .map_or_else(|| "no migration".to_owned(), |v| format!("{v:0>4}"));
+    if !health.reachable || health.schema_version.is_none() {
+        eprintln!(
+            "database is at {database}, this binary needs {} — run: wadl migrate{}",
+            stamp.schema,
+            health
+                .detail
+                .as_deref()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default()
+        );
+        return Err(std::io::Error::other("database behind this binary"));
+    }
+    match wadl_api::version::schema_state(stamp.schema, health.schema_version.as_deref()) {
+        "database_behind" => {
+            eprintln!(
+                "database is at {database}, this binary needs {} — run: wadl migrate",
+                stamp.schema
+            );
+            Err(std::io::Error::other("database behind this binary"))
+        }
+        "database_ahead" => {
+            println!(
+                "WARNING: database is at {database}, this binary was built for {} — \
+                 a newer release wrote this database",
+                stamp.schema
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Loads the P6 export at `path` as the hull's schedule of record and prints
@@ -278,6 +327,10 @@ async fn main() -> std::io::Result<()> {
     // The seeded identity below is identical in both stores by construction —
     // `wadl seed` writes the same world the demo store builds in memory.
     println!("Shipyard AI Onboard — API on http://{bind}:{port}");
+    println!(
+        "  release:             {}",
+        wadl_api::version::current().banner()
+    );
     println!("  store:               {store_banner}");
     println!("  identity trust:      {identity}");
     println!("  x-org-id:            00000000-0000-0000-0000-000000000001");

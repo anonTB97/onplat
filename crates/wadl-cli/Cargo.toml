@@ -15,6 +15,11 @@ path = "src/main.rs"
 wadl-domain.workspace = true
 wadl-engine.workspace = true
 wadl-ingest.workspace = true
+# The document parsers, the loader the boot path uses, and the release stamp
+# live in wadl-api; `load-docs` and `version` are those functions with a
+# command line in front, so the CLI takes the crate rather than copying them.
+# Internal path dependency — no new external crate enters the tree.
+wadl-api.workspace = true
 # The CLI is a deployment tool — it is the thing that opens databases, so it
 # is one of the two places allowed to pull the postgres feature (with tests).
 wadl-store = { workspace = true, features = ["postgres"] }

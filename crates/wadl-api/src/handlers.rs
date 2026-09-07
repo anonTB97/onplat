@@ -106,11 +106,13 @@ impl AsOf {
 /// `GET /health` — whether this process can answer, and whether its store
 /// can. A load balancer reads the status code; an operator reads the body:
 /// which backend, whether a round trip just succeeded, the migration the
-/// database is at, the document shape this build writes, and which identity
+/// database is at, the document shape this build writes, which identity
 /// boundary is armed (the shell reads `identity_mode` before it decides
-/// whether to send dev headers at all). Unreachable store → 503, so a pool
-/// that lost its database drops out of rotation instead of serving 500s to
-/// every screen.
+/// whether to send dev headers at all), and the release stamp — the commit,
+/// its instant and the migration set this binary was built for — with
+/// `schema_state` judging that set against the database's. Unreachable
+/// store → 503, so a pool that lost its database drops out of rotation
+/// instead of serving 500s to every screen.
 pub(crate) async fn health(State(state): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
     let store = state.store.health().await;
     let status = if store.reachable {
@@ -118,12 +120,17 @@ pub(crate) async fn health(State(state): State<AppState>) -> (axum::http::Status
     } else {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     };
+    let version = crate::version::current();
+    let schema_state =
+        crate::version::schema_state(version.schema, store.schema_version.as_deref());
     (
         status,
         Json(json!({
             "status": if store.reachable { "ok" } else { "degraded" },
             "decision_support_only": true,
             "identity_mode": crate::auth::identity_mode(),
+            "version": version,
+            "schema_state": schema_state,
             "store": store,
             "now": state.clock.now(),
         })),

@@ -1,11 +1,12 @@
 //! `wadl` — the operator CLI.
 //!
-//! Five commands, each one an operator will reach for on an air-gapped node:
-//! `migrate` applies the forward-only schema, `seed` prints the demo world,
+//! Commands an operator will reach for on an air-gapped node: `migrate`
+//! applies the forward-only schema, `seed` prints or applies the demo world,
 //! `verify-ledger` re-hashes the audit chain and reports the first break,
 //! `ingest-xer` reads a P6 export (`--survey` for the mail-back that carries
-//! no schedule content), and `support-bundle` collects what you would
-//! otherwise never get off a production box into one redacted file.
+//! no schedule content), `support-bundle` collects what you would otherwise
+//! never get off a production box into one redacted file, and `version`
+//! prints the release stamp this tree was built with.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::doc_markdown)]
@@ -75,6 +76,12 @@ enum Command {
         #[arg(long, default_value = "migrations")]
         migrations_dir: PathBuf,
     },
+    /// Print this build's release stamp: commit, commit instant, migration set.
+    Version {
+        /// Print the stamp as JSON (for scripts: `.git`, `.built_at`, `.schema`).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -92,7 +99,24 @@ async fn main() -> Result<()> {
             out,
             migrations_dir,
         } => support_bundle(&out, &migrations_dir),
+        Command::Version { json } => version(json),
     }
+}
+
+/// The release stamp, the same one `serve` prints and `/health` serves: the
+/// CLI is built from the same tree.
+fn version(json: bool) -> Result<()> {
+    let stamp = wadl_api::version::current();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&stamp)?);
+    } else {
+        println!(
+            "wadl {} · document schema {}",
+            stamp.banner(),
+            stamp.document_schema
+        );
+    }
+    Ok(())
 }
 
 /// The field map a `--field-map` file names, or the default convention.

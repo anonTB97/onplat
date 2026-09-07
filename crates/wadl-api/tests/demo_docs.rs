@@ -20,20 +20,24 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
+use wadl_api::documents::LoadedDocuments;
 use wadl_domain::time::{TestClock, Timestamp};
 use wadl_store::memory::{DemoWorld, InMemoryStore, DEMO_ANCHOR_MS};
-use wadl_store::Repositories;
+use wadl_store::{Actor, Repositories};
 
 fn docs_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference/cvn73")
 }
 
-async fn booted() -> (axum::Router, DemoWorld, Arc<InMemoryStore>) {
+/// The reference hull booted the way `serve` boots it: through the boot
+/// loader, on the binary's own account (`system:boot`).
+async fn booted() -> (axum::Router, DemoWorld, Arc<InMemoryStore>, LoadedDocuments) {
     let (store, world) = InMemoryStore::demo_at(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
     let store = Arc::new(store);
+    let boot_scope = world.yard_scope().with_actor(Actor::system("boot"));
     let loaded = wadl_api::documents::load_demo_docs(
         store.as_ref(),
-        &world.yard_scope(),
+        &boot_scope,
         world.cvn73,
         &docs_dir(),
         DEMO_ANCHOR_MS,
@@ -48,7 +52,7 @@ async fn booted() -> (axum::Router, DemoWorld, Arc<InMemoryStore>) {
     let clock = TestClock::new(Timestamp::from_epoch_millis(DEMO_ANCHOR_MS));
     let repos: Arc<dyn Repositories> = store.clone();
     let state = wadl_api::AppState::new(repos, Arc::new(clock));
-    (wadl_api::build_router(state), world, store)
+    (wadl_api::build_router(state), world, store, loaded)
 }
 
 async fn get(app: &axum::Router, world: &DemoWorld, path: &str) -> (StatusCode, Value) {
@@ -71,7 +75,7 @@ async fn get(app: &axum::Router, world: &DemoWorld, path: &str) -> (StatusCode, 
 
 #[tokio::test]
 async fn the_reference_hull_is_served_at_scale_with_a_clean_zone_audit() {
-    let (app, w, _) = booted().await;
+    let (app, w, _, _) = booted().await;
 
     let (status, register) = get(&app, &w, "/register").await;
     assert_eq!(status, StatusCode::OK);
@@ -145,7 +149,7 @@ async fn the_reference_hull_is_served_at_scale_with_a_clean_zone_audit() {
 
 #[tokio::test]
 async fn the_served_hull_evaluates_every_space_and_rolls_up_by_zone() {
-    let (app, w, _) = booted().await;
+    let (app, w, _, _) = booted().await;
     let (status, verdicts) = get(&app, &w, "/deck-states").await;
     assert_eq!(status, StatusCode::OK);
     let rows = verdicts.as_array().unwrap();
@@ -192,5 +196,60 @@ async fn a_document_the_doors_would_refuse_refuses_the_boot() {
     assert!(
         err.contains("bad-register.csv") && err.contains("9th"),
         "{err}"
+    );
+}
+
+/// The boot path is ledgered like every other path: the served hull's
+/// ledger opens with one `DOCUMENT_REPLACED` row per document the boot
+/// loader carried, in door order, each `via: boot` under the binary's own
+/// account — the truth about where the served hull came from, verifiable.
+#[tokio::test]
+async fn the_boot_path_ledgers_every_document_it_loaded_via_boot() {
+    let (app, w, _, loaded) = booted().await;
+    let (status, ledger) = get(&app, &w, "/ledger").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ledger["verified"], true, "{ledger}");
+
+    let kinds: Vec<&str> = loaded.ledger.iter().map(|l| l.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "yard_clock",
+            "p6_field_map",
+            "compartment_register",
+            "zone_register",
+            "geometry_register",
+            "coupling_register",
+            "hazard_log",
+        ]
+    );
+
+    let entries = ledger["entries"].as_array().unwrap();
+    let documents: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["action"] == "DOCUMENT_REPLACED")
+        .collect();
+    assert_eq!(documents.len(), loaded.ledger.len(), "{ledger}");
+    for entry in &documents {
+        assert_eq!(entry["actor_id"], "system:boot", "{entry}");
+        let detail: Value = serde_json::from_str(entry["detail"].as_str().unwrap()).unwrap();
+        assert_eq!(detail["via"], "boot", "{detail}");
+        let seq = entry["seq"].as_i64().unwrap();
+        let line = loaded
+            .ledger
+            .iter()
+            .find(|l| l.seq == seq)
+            .unwrap_or_else(|| panic!("seq {seq} is not one the loader reported: {loaded:?}"));
+        assert_eq!(detail["kind"], line.kind, "{detail}");
+        assert_eq!(detail["label"], line.label, "{detail}");
+        assert!(detail["counts"].is_object(), "{detail}");
+    }
+    // The document rows are the only rows the loader writes on its own
+    // account besides the hazards the log raised.
+    assert!(
+        entries
+            .iter()
+            .all(|e| e["action"] == "DOCUMENT_REPLACED" || e["action"] == "HAZARD_RAISED"),
+        "{ledger}"
     );
 }

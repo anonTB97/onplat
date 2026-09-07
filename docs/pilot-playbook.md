@@ -82,8 +82,9 @@ shim.
 2. `scripts/self-assessment.sh` against the instance (through the proxy):
    no FAIL; the only WARN permitted is none. WADL-SA-05 must read
    `proxy-asserted`.
-3. `GET /api/vessels/:id/ledger` reads `verified: true` on an empty or
-   bootstrap-only chain.
+3. `GET /api/vessels/:id/ledger` reads `verified: true` on the
+   bootstrap-only chain: one `HULL_BOOTSTRAPPED` row, `seq` 1, written by
+   `wadl bootstrap-hull` — the chain never opens empty.
 4. The data-load record (§2.5) is open with the hull-row statement filed.
 
 ### 2.2 The order of the doors
@@ -138,9 +139,12 @@ the door could not do.
 ### 2.4 Rehearsal
 
 The whole of §2.2 is rehearsed on the reference hull through the same doors
-(`WADL_DEMO_DOCS=reference/cvn73` is that rehearsal run by the boot loader;
-the manual rehearsal drives the cards) and once on a copy of the yard's files
-on a staging instance, before the day. The rehearsal's timings go on the
+(`WADL_DEMO_DOCS=reference/cvn73` is that rehearsal run by the boot loader,
+ledgered `via: boot`; `wadl load-docs --dir reference/cvn73 --xer … --org …
+--vessel …` is the same loader from the DBA's session against PostgreSQL,
+ledgered `via: cli`, with `--dry-run` to validate the files first; the manual
+rehearsal drives the cards) and once on a copy of the yard's files on a
+staging instance, before the day. The rehearsal's timings go on the
 record; a step that took longer than fifteen minutes in rehearsal is
 rehearsed again.
 

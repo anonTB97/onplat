@@ -197,7 +197,15 @@ Role menu → **Safety**. The front door is **Conflicts & Risk**.
   reads *⚙ system:…*; a row from before people were asserted reads
   *— before format 2* and still verifies.) Every clearance,
   document commit, proposal and acknowledgement is in this one chain, and
-  every row names who answered — the name a board of inquiry gets.
+  every row names who answered — the name a board of inquiry gets. Scroll
+  to the bottom: the chain does not open empty. Its oldest rows are the
+  boot itself — seven `DOCUMENT_REPLACED` rows (`yard_clock`,
+  `p6_field_map`, `compartment_register`, `zone_register`,
+  `geometry_register`, `coupling_register`, `hazard_log`) and the export's
+  `SCHEDULE_REPLACED`, each `via: boot` under *⚙ system:boot* — the truth
+  about where the served hull came from, written by the same loader
+  `wadl load-docs` runs from the DBA's session on data-load day (then the
+  rows read `via: cli`).
 
 ## 5. Ship Super and Project Manager — "the hull, worst first" (2 min)
 

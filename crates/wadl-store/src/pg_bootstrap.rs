@@ -26,10 +26,13 @@ use crate::scope::{Actor, TenantScope};
 /// The ledger action a hull-row statement writes on the hull it created.
 pub const HULL_BOOTSTRAPPED: &str = "HULL_BOOTSTRAPPED";
 
-/// The coupling types every tenant starts with — `pg_seed.sql`'s three rows
-/// and the memory store's `seeded_coupling_types`, one list: code, label,
-/// directional, what it carries, default reach in hops.
-pub const BASELINE_COUPLING_TYPES: [(&str, &str, bool, &[&str], i32); 3] = [
+/// The coupling types every tenant starts with — the memory store's
+/// `seeded_coupling_types` and `pg_seed.sql`'s rows, one list: code, label,
+/// directional, what it carries, default reach in hops. The reference hull's
+/// coupling register names these codes, so a tenant without one of them
+/// refuses that register at the door; a unit test pins this list to the
+/// memory store's so the two backends cannot drift apart again.
+pub const BASELINE_COUPLING_TYPES: [(&str, &str, bool, &[&str], i32); 4] = [
     (
         "deck_penetration",
         "Deck penetration",
@@ -45,6 +48,7 @@ pub const BASELINE_COUPLING_TYPES: [(&str, &str, bool, &[&str], i32); 3] = [
         2,
     ),
     ("exhaust_trunk", "Exhaust trunk", true, &["vapour"], 3),
+    ("electrical_bus", "Electrical bus", false, &["energy"], 1),
 ];
 
 /// A stable id for a tenant's baseline row: `sha256("wadl:" ‖ tag ‖ ":" ‖
@@ -75,7 +79,12 @@ fn derived_id(org: Uuid, tag: &str, key: &[u8]) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-/// Installs [`BASELINE_COUPLING_TYPES`] for a tenant that has none.
+/// Installs the [`BASELINE_COUPLING_TYPES`] a tenant is missing, by natural
+/// key `(org_id, code)`: a tenant with none gets them all, a tenant seeded
+/// with a subset (the demo seed before it carried `electrical_bus`) is
+/// topped up, a tenant with every code is left alone. A type the tenant
+/// already has is never rewritten — its id and semantics are the tenant's.
+/// `created` when any row was written, `existed` when none was missing.
 ///
 /// # Errors
 /// [`StoreError::Backend`] on any statement failure.
@@ -84,17 +93,22 @@ pub(crate) async fn install_baseline_coupling_types(
     org: Uuid,
     dry_run: bool,
 ) -> Result<RowOutcome, StoreError> {
-    let present: i64 = sqlx::query_scalar("SELECT count(*) FROM coupling_type WHERE org_id = $1")
-        .bind(org)
-        .fetch_one(&mut **tx)
-        .await?;
-    if present > 0 {
+    let present: Vec<String> =
+        sqlx::query_scalar("SELECT code FROM coupling_type WHERE org_id = $1")
+            .bind(org)
+            .fetch_all(&mut **tx)
+            .await?;
+    let missing: Vec<_> = BASELINE_COUPLING_TYPES
+        .iter()
+        .filter(|(code, ..)| !present.iter().any(|p| p == code))
+        .collect();
+    if missing.is_empty() {
         return Ok(RowOutcome::Existed);
     }
     if dry_run {
         return Ok(RowOutcome::WouldCreate);
     }
-    for (code, label, directional, propagates, hops) in BASELINE_COUPLING_TYPES {
+    for (code, label, directional, propagates, hops) in missing {
         let carries: Vec<String> = propagates.iter().map(|p| (*p).to_owned()).collect();
         sqlx::query(
             "INSERT INTO coupling_type
@@ -108,7 +122,7 @@ pub(crate) async fn install_baseline_coupling_types(
         .bind(label)
         .bind(directional)
         .bind(&carries)
-        .bind(hops)
+        .bind(*hops)
         .execute(&mut **tx)
         .await?;
     }
@@ -256,6 +270,17 @@ impl PgStore {
             )));
         }
         let mut tx = self.pool().begin().await?;
+        // One bootstrap of a tenant at a time: each row is "look, then
+        // insert", and two first-time statements for the same organisation
+        // racing each other would both look, both insert, and one would die
+        // on the primary key instead of reading `existed`. A transaction-
+        // scoped advisory lock on the tenant serialises them and releases
+        // itself with the transaction — the device 0018 uses per hull for a
+        // run's `seq`.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('wadl:bootstrap'), hashtext($1))")
+            .bind(statement.organization.org_id.to_string())
+            .execute(&mut *tx)
+            .await?;
         let organization = organization_row(&mut tx, statement, dry_run).await?;
         let class = class_row(&mut tx, statement, dry_run).await?;
         let vessel = vessel_row(&mut tx, statement, dry_run).await?;
@@ -527,4 +552,47 @@ async fn availability_row(
 fn civil_date(text: &str) -> Result<chrono::NaiveDate, StoreError> {
     chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d")
         .map_err(|e| StoreError::Conflict(format!("{text:?} is not a YYYY-MM-DD date: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The baseline a bootstrapped tenant gets is the memory store's seeded
+    /// list, code for code, carrying the same things the same distance — so
+    /// a coupling register the demo accepts is one a pilot tenant accepts.
+    #[test]
+    fn the_baseline_coupling_types_are_the_memory_stores() {
+        let memory = crate::memory::seeded_coupling_types();
+        assert_eq!(memory.len(), BASELINE_COUPLING_TYPES.len());
+        for (code, _label, _directional, propagates, hops) in BASELINE_COUPLING_TYPES {
+            let seeded = memory
+                .iter()
+                .find(|t| t.code == code)
+                .unwrap_or_else(|| panic!("the memory store does not seed {code}"));
+            let carries: Vec<&str> = seeded.propagates.iter().map(String::as_str).collect();
+            assert_eq!(carries, propagates, "{code}");
+            assert_eq!(i32::from(seeded.max_reach), hops, "{code}");
+        }
+    }
+
+    /// Two tenants never share a baseline row; the same tenant always gets
+    /// the same id, which is what makes the installer idempotent by key.
+    #[test]
+    fn derived_ids_are_stable_per_tenant_and_distinct_across_tenants() {
+        let a = Uuid::from_u128(0x01);
+        let b = Uuid::from_u128(0x02);
+        assert_eq!(
+            derived_id(a, "coupling_type", b"exhaust_trunk"),
+            derived_id(a, "coupling_type", b"exhaust_trunk")
+        );
+        assert_ne!(
+            derived_id(a, "coupling_type", b"exhaust_trunk"),
+            derived_id(b, "coupling_type", b"exhaust_trunk")
+        );
+        assert_ne!(
+            derived_id(a, "coupling_type", b"exhaust_trunk"),
+            derived_id(a, "rule", b"exhaust_trunk")
+        );
+    }
 }

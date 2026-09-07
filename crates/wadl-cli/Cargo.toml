@@ -32,5 +32,12 @@ tokio.workspace = true
 # database tests bootstrap. Already in the tree (store, api, ingest).
 uuid = { workspace = true, features = ["v7"] }
 
+[dev-dependencies]
+# The database test drives the built `wadl` binary against PostgreSQL and
+# reads the hull back through the API's router in process, as the shell
+# would: axum for the request types, tower for `oneshot`. Test-only.
+axum.workspace = true
+tower = { workspace = true, features = ["util"] }
+
 [lints]
 workspace = true

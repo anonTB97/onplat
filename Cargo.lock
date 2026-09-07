@@ -2194,10 +2194,12 @@ name = "wadl-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "uuid",
  "wadl-api",
  "wadl-domain",

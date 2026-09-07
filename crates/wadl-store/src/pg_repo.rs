@@ -536,7 +536,11 @@ fn run_report_json(
 }
 
 /// The columns every run read selects; `$1` is the hull. `served` is
-/// whether the hull's schedule-of-record document points at the run.
+/// whether the hull's schedule-of-record document points at the run. A
+/// schedule run is an `ingest_run` row with a `seq` — assigned per hull at
+/// commit (0018); the table also carries provenance rows that are not runs
+/// (`wadl bootstrap-hull`'s, with no `seq`, no `report`, no `doc`), and a
+/// run read must never see one.
 const RUN_SELECT: &str = "SELECT r.run_id, r.seq, r.label, r.encoding, r.decoded_by, r.imported_by,
                 r.field_map, r.report, r.schema_version,
                 (EXTRACT(EPOCH FROM r.started_at) * 1000)::bigint AS imported_at_ms,
@@ -544,13 +548,19 @@ const RUN_SELECT: &str = "SELECT r.run_id, r.seq, r.label, r.encoding, r.decoded
                          WHERE d.vessel_id = r.vessel_id AND d.kind = 'schedule_of_record'
                            AND d.run_id = r.run_id) AS served
            FROM ingest_run r
-          WHERE r.vessel_id = $1";
+          WHERE r.vessel_id = $1 AND r.seq IS NOT NULL";
 
 /// One `ingest_run` row to a summary.
 fn run_summary(row: &sqlx::postgres::PgRow) -> Result<ScheduleRunSummary, StoreError> {
     let err =
         |what: &str, e: serde_json::Error| StoreError::Backend(format!("ingest_run {what}: {e}"));
-    let report: serde_json::Value = row.get("report");
+    // Null-tolerant: a row without a report is read as empty counts, never
+    // a panic inside a read.
+    let report: serde_json::Value = row
+        .try_get::<Option<serde_json::Value>, _>("report")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let field = |name: &str| report.get(name).cloned().unwrap_or_default();
     Ok(ScheduleRunSummary {
         run_id: row.get("run_id"),
@@ -1154,13 +1164,15 @@ impl Repositories for PgStore {
     ) -> Result<ScheduleRunSummary, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         let mut tx = self.with_tenant(scope.org).await?;
-        let row =
-            sqlx::query("SELECT label, doc FROM ingest_run WHERE vessel_id = $1 AND run_id = $2")
-                .bind(vessel.as_uuid())
-                .bind(run_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .ok_or(StoreError::NotFound)?;
+        let row = sqlx::query(
+            "SELECT label, doc FROM ingest_run
+                  WHERE vessel_id = $1 AND run_id = $2 AND seq IS NOT NULL",
+        )
+        .bind(vessel.as_uuid())
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::NotFound)?;
         let label: Option<String> = row.get("label");
         let doc: Option<serde_json::Value> = row.get("doc");
         let Some(doc) = doc else {

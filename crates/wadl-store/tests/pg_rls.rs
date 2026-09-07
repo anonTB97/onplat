@@ -1355,9 +1355,12 @@ async fn a_bootstrapped_hull_is_invisible_to_the_other_tenant() {
     assert_eq!(first.class, RowOutcome::Existed);
     assert_eq!(first.vessel, RowOutcome::Created);
     assert_eq!(first.availability, RowOutcome::Created);
-    // The seed already gave the yard its coupling types and rules.
-    assert_eq!(first.coupling_types, RowOutcome::Existed);
+    // The seed already gave the yard its rules; its coupling types too,
+    // unless this database was seeded before the seed carried every baseline
+    // code, in which case the bootstrap tops the tenant up once — either
+    // way the second application below changes nothing.
     assert_eq!(first.rules, RowOutcome::Existed);
+    assert_ne!(first.coupling_types, RowOutcome::WouldCreate);
     assert!(first.ledger_seq.is_some(), "{first:?}");
 
     let again = store

@@ -283,6 +283,58 @@ export function fieldMapSummary(m: FieldMap): string {
   );
 }
 
+/**
+ * A field-map document as the boot loader reads it (`*-fieldmap.json`),
+ * parsed for the door. The shape is checked here so a wrong file is refused
+ * with a line the reader can act on; the server validates the meaning
+ * (a resource outside the trade, a blank name, a duplicate project) and
+ * refuses whole with every reason.
+ */
+export function parseFieldMapJson(text: string): FieldMap {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("field map refused: the file is not JSON");
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("field map refused: expected one JSON object with compartment, work_item, work_type, trade, projects, placards_from_names");
+  }
+  const o = raw as Record<string, unknown>;
+  const slot = (name: FieldSlot): FieldSource => {
+    const s = o[name];
+    if (typeof s !== "object" || s === null) throw new Error(`field map refused: "${name}" must be { "source": udf|activity_code|resource|none, "name"? }`);
+    const src = (s as Record<string, unknown>).source;
+    const nm = (s as Record<string, unknown>).name;
+    switch (src) {
+      case "udf":
+      case "activity_code":
+        if (typeof nm !== "string") throw new Error(`field map refused: "${name}" with source ${src} needs a "name"`);
+        return { source: src, name: nm };
+      case "resource":
+        return { source: "resource" };
+      case "none":
+        return { source: "none" };
+      default:
+        throw new Error(`field map refused: "${name}" has source ${JSON.stringify(src)} — udf, activity_code, resource or none`);
+    }
+  };
+  const projects = o.projects ?? [];
+  if (!Array.isArray(projects) || !projects.every((p) => typeof p === "string")) {
+    throw new Error('field map refused: "projects" must be a list of proj_short_names (empty = every project)');
+  }
+  const placards = o.placards_from_names ?? true;
+  if (typeof placards !== "boolean") throw new Error('field map refused: "placards_from_names" must be true or false');
+  return {
+    compartment: slot("compartment"),
+    work_item: slot("work_item"),
+    work_type: slot("work_type"),
+    trade: slot("trade"),
+    projects: projects as string[],
+    placards_from_names: placards,
+  };
+}
+
 /** One option of a field-map select. `key` round-trips through `sourceFromChoice`. */
 export interface FieldChoice {
   key: string;

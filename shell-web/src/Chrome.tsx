@@ -9,8 +9,9 @@
 // screenshot in the wrong hands or a decision taken against the wrong hull.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DeckStateRow, Identity, Issue, VesselSummary, WhoAmI } from "./api";
+import type { DeckStateRow, Identity, Issue, ScheduleRunSummary, VesselSummary, WhoAmI } from "./api";
 import { deedsOf, ROLE_WORDS, type RoleCode, type WhoState } from "./identity";
+import { scheduleCrumb } from "./ingest";
 import { claim, fixSpace, KIND } from "./IssuesBoard";
 import type { Horizon } from "./TimeControl";
 import {
@@ -275,12 +276,17 @@ export function TopBar({
   verdictsOk,
   legendOpen,
   onLegendOpened,
+  scheduleRun,
 }: {
   onCollapse: () => void;
   hulls: HullChoice[];
   selected: string;
   onSelectVessel: (id: string) => void;
   hullLabel: string;
+  /** The run the served schedule of record came from, as `/timeframe`
+   *  serves it: null for the generated register, "unavailable" when the
+   *  timeframe read failed. The crumb under the hull reads it. */
+  scheduleRun: ScheduleRunSummary | null | "unavailable";
   persona: Persona;
   onPersona: (p: Persona) => void;
   rows: DeckStateRow[];
@@ -531,6 +537,30 @@ export function TopBar({
               {hullLabel}
               {outOfScope && <span style={{ width: 6, height: 6, borderRadius: 3, background: C.danger }} />}
             </span>
+            {/* Whose schedule every screen is reading, and since when. Amber
+                until a person is on the run (a boot run has none) or when
+                the timeframe read failed — never blank. */}
+            {(() => {
+              const crumb = scheduleCrumb(scheduleRun);
+              return (
+                <span
+                  style={{
+                    display: "block", fontSize: 10.5, fontWeight: 400, maxWidth: 420,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    color: crumb.tone === "warn" ? C.warn : crumb.tone === "ok" ? C.ok : DIM,
+                  }}
+                  title={
+                    scheduleRun === "unavailable"
+                      ? "The timeframe read failed, so the shell cannot say which import the screens are reading."
+                      : scheduleRun === null
+                        ? "No export has been imported for this hull: every screen reads the generated demo register."
+                        : `Run #${scheduleRun.seq} · ${scheduleRun.counts.served.toLocaleString()} rows served · ${scheduleRun.counts.quarantined} quarantined · ${scheduleRun.encoding} (decoded by the ${scheduleRun.decoded_by}) · via ${scheduleRun.imported_by.via}${scheduleRun.imported_by.person ? "" : " — no person on the run until the identity hop asserts one"}`
+                  }
+                >
+                  {crumb.text}
+                </span>
+              );
+            })()}
           </span>
           <Chevron />
         </button>

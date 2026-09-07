@@ -9,6 +9,7 @@ import {
   type DeckStateRow,
   type Identity,
   type Issue,
+  type ScheduleRunSummary,
   type Timeframe,
   type WhoAmI,
 } from "./api";
@@ -139,6 +140,10 @@ export default function App() {
   // and the ship board would disagree about what is held, and neither would be
   // wrong. Held here for the same reason the altitude is.
   const [frame, setFrame] = useState<Timeframe | null>(null);
+  /** The served schedule run for the breadcrumb: null = the generated
+   *  register, "unavailable" = the timeframe read failed. Re-read with the
+   *  frame on `dataEpoch`, so an import in Data Sources reaches the crumb. */
+  const [scheduleRun, setScheduleRun] = useState<ScheduleRunSummary | null | "unavailable">(null);
   const [asOf, setAsOf] = useState<AsOf>(BOOT.asOf ?? null);
   const [horizon, setHorizon] = useState<Horizon>(INITIAL_ROLE.horizon);
   const [playing, setPlaying] = useState(false);
@@ -294,12 +299,14 @@ export default function App() {
         setYardClock(f.yard_clock);
         setClockEpoch((n) => n + 1);
         setFrame(f);
+        setScheduleRun(f.schedule_run ?? null);
       })
       .catch(() => {
         if (stale) return;
         setYardClock(null);
         setClockEpoch((n) => n + 1);
         setFrame(null);
+        setScheduleRun("unavailable");
       });
     return () => {
       stale = true;
@@ -398,6 +405,7 @@ export default function App() {
         selected={selected}
         onSelectVessel={pickHull}
         hullLabel={hullLabel}
+        scheduleRun={scheduleRun}
         who={who}
         whoState={whoState}
         identity={identity}

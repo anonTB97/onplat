@@ -28,17 +28,20 @@ import {
   type RegisterInfo,
   getZoneChart,
   importBudgetBook,
-  importSchedule,
   importZoneChart,
   listActivities,
-  previewSchedule,
   revertBudgetBook,
-  revertSchedule,
   revertZoneChart,
   type ActivityRegister,
   type AsOf,
   type Identity,
   type ZoneChart,
+  DEFAULT_FIELD_MAP,
+  getFieldMap,
+  importFieldMap,
+  revertFieldMap,
+  type FieldMap,
+  type FieldMapInfo,
   getGeometry,
   getManningBook,
   importGeometry,
@@ -55,18 +58,19 @@ import {
 import { fmtStamp, type YardClockInfo } from "./clock";
 import { useIdentity, type Capability } from "./identity";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
+import { ScheduleDoor } from "./ScheduleDoor";
 import { SourceCard } from "./SourceCard";
 import {
-  decodeXerFile,
+  fieldMapSummary,
   fmtBytes,
   parseBudgetCsv,
   parseCouplingCsv,
+  parseFieldMapJson,
   parseGeometryCsv,
   parseHazardLogCsv,
   parseManningCsv,
   parseRegisterCsv,
   parseZoneCsv,
-  deltaSummary,
 } from "./ingest";
 import { Loading } from "./Loading";
 import { ModuleHeader } from "./ModuleHeader";
@@ -122,6 +126,9 @@ export default function SourcesBoard({
   /** The hull's clock in effect, as the door serves it: the document or the
    *  honest UTC default. Null only while the read is failing. */
   const [yardClock, setYardClockInfo] = useState<(YardClockInfo & { now_local: string; offset_now: string }) | null>(null);
+  /** The P6 field map in effect — the stored document or today's default —
+   *  and the served run's survey of its file. Null while the read is failing. */
+  const [fieldMap, setFieldMap] = useState<FieldMapInfo | null>(null);
   /** Whether the coupling door should propose deck penetrations from deck
    *  order and frame overlap. On by default: a register without vertical
    *  paths lets heat go nowhere, which is a lie the trace would then tell. */
@@ -131,40 +138,43 @@ export default function SourcesBoard({
   const [busy, setBusy] = useState<string | null>(null);
   const { can, refusal } = useIdentity();
 
-  // The three doors. Each stages a server-side dry run: everything the import
+  // The doors. Each stages a server-side dry run: everything the import
   // would say, nothing it would do. Confirm commits; Cancel costs nothing.
-  const stageSchedule = (file: File) => {
+  // The schedule of record has a door of its own — ScheduleDoor.tsx — because
+  // its preview is a panel (a field map, a quarantine, a run history), not a
+  // line.
+
+  // The P6 field map as a document: the JSON the boot loader reads
+  // (reference/cvn73/CVN73-fieldmap.json's shape). The server refuses it
+  // whole with every reason; findings against the served run's survey (a
+  // named field the file does not carry) warn without refusing.
+  const stageFieldMap = (file: File) => {
     setMsg(null);
-    setBusy(`reading ${file.name} (${fmtBytes(file.size)})…`);
-    decodeXerFile(file)
-      .then(({ xer, encoding }) =>
-        previewSchedule(identity, vesselId, file.name, xer, { encoding }).then((p) => {
-        setBusy(null);
-        const m = p.mapping;
-        setStaged({
-          kind: "Schedule of record",
-          label: file.name,
-          sizeBytes: file.size,
-          summary:
-            `${p.activities} activities · ${p.edges} edges · ${m.milestones} key events — ` +
-            `Confirm replaces the current register (${register?.activities.length ?? "?"} activities) on every screen · ` +
-            `location: ${m.located_authored} authored` +
-            (m.located_derived.length > 0 ? ` / ${m.located_derived.length} from task names` : "") +
-            (m.unlocated.length > 0 ? ` / ${m.unlocated.length} unlocated` : "") +
-            (p.reconciliation.mismatches.length > 0
-              ? ` · hours disagree on ${p.reconciliation.mismatches.map((x) => x.code).join(", ")}`
-              : " · hours reconcile") +
-            ` — ${deltaSummary(p.delta)}`,
-          commit: () =>
-            importSchedule(identity, vesselId, file.name, xer, { encoding }).then(
-              (r) => `✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`,
-            ),
+    setBusy(`reading ${file.name}…`);
+    file
+      .text()
+      .then((text) => {
+        const map: FieldMap = parseFieldMapJson(text);
+        return importFieldMap(identity, vesselId, file.name, map, true).then((r) => {
+          setBusy(null);
+          setStaged({
+            kind: "P6 field map",
+            label: file.name,
+            sizeBytes: file.size,
+            summary:
+              fieldMapSummary(r.map) +
+              (r.findings.length > 0 ? ` · ⚠ ${r.findings.join(" · ")}` : " · every named field is in the served export") +
+              " — Confirm makes this the map the next import reads through; the served schedule is not re-read until then",
+            commit: () =>
+              importFieldMap(identity, vesselId, file.name, map, false).then(
+                (x) => `✓ ${x.label}: the next import reads through this map — ${fieldMapSummary(x.map)}`,
+              ),
+          });
         });
-        }),
-      )
+      })
       .catch((e: unknown) => {
         setBusy(null);
-        setMsg(String(e));
+        setMsg(errText(e));
       });
   };
 
@@ -499,8 +509,9 @@ export default function SourcesBoard({
       getCouplings(identity, vesselId).catch(() => null),
       listHazards(identity, vesselId, asOf).catch(() => []),
       getYardClock(identity, vesselId).catch(() => null),
+      getFieldMap(identity, vesselId).catch(() => null),
     ])
-      .then(([r, z, m, g, sr, cp, hz, yc]) => {
+      .then(([r, z, m, g, sr, cp, hz, yc, fm]) => {
         if (stale) return;
         setRegister(r);
         setZones(z);
@@ -510,6 +521,7 @@ export default function SourcesBoard({
         setCouplings(cp);
         setHazards(hz);
         setYardClockInfo(yc);
+        setFieldMap(fm);
       })
       .catch((e: unknown) => {
         if (stale) return;
@@ -547,7 +559,6 @@ export default function SourcesBoard({
   if (error) return <p style={{ color: C.danger }}>Sources unavailable ({error}).</p>;
   if (!register || !zones) return <Loading label="Reading what this hull is built from…" />;
 
-  const m = register.mapping;
   const mismatches = register.reconciliation.mismatches;
   const oob = zones.audit.out_of_bounds;
 
@@ -558,7 +569,15 @@ export default function SourcesBoard({
         title="What this hull is built from"
         stats={[
           { value: shipRegister?.served ?? "seeded", label: "compartment register" },
-          { value: register.schedule_source ? "ingested" : "generated", label: "schedule of record" },
+          {
+            value: register.schedule_run ? `run #${register.schedule_run.seq}` : register.schedule_source ? "ingested" : "generated",
+            label: "schedule of record",
+            title: register.schedule_run
+              ? `${register.schedule_run.label}, imported ${fmtStamp(register.schedule_run.imported_at_ms)} via ${register.schedule_run.imported_by.via}.`
+              : register.schedule_source
+                ? `${register.schedule_source} — set outside the run history.`
+                : "The generated demo register — no export has been imported.",
+          },
           { value: zones.source ? "authored" : "inferred", label: "zone chart" },
           { value: register.reconciliation.source ? "ingested" : "seeded", label: "budget book" },
           { value: yardClock?.source === "document" ? yardClock.clock.zone : "UTC", label: "yard clock", title: yardClock?.source === "document" ? `Every clock on screen is ${yardClock.clock.zone}'s wall clock, from ${yardClock.label}.` : "No yard clock loaded — every time on screen is a UTC instant marked Z." },
@@ -705,66 +724,59 @@ export default function SourcesBoard({
           }
         />
 
+        <ScheduleDoor
+          identity={identity}
+          vesselId={vesselId}
+          register={register}
+          fieldMap={fieldMap}
+          nonce={nonce}
+          onMutated={() => {
+            setNonce((n) => n + 1);
+            onMutated();
+          }}
+          onOpenModule={onOpenModule}
+        />
+
         <SourceCard
-          kind="Schedule of record"
-          status={register.schedule_source ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "GENERATED", tone: "#94a3b8" }}
-          name={register.schedule_source ?? "built from the seeded work orders and packages"}
+          kind="P6 field map"
+          status={fieldMap?.source === "document" ? { label: "INGESTED", tone: "#3D6BFF" } : { label: "DEFAULT", tone: "#94a3b8" }}
+          name={
+            fieldMap
+              ? fieldMap.source === "document"
+                ? (fieldMap.label ?? "the hull's stored map")
+                : "today's default convention — no map on file"
+              : "field map unavailable"
+          }
           lines={[
             {
-              text: `${register.activities.length} activities · ${register.edges.length} edges · ${m.milestones} key events`,
-            },
-            {
-              text:
-                `location: ${m.located_authored} of ${m.work_activities} authored` +
-                (m.located_derived.length > 0 ? ` · ${m.located_derived.length} read from task names` : "") +
-                (m.unlocated.length > 0
-                  ? ` · ${m.unlocated.length} unlocated${
-                      m.unlocated.some((u) => u.zone_hint)
-                        ? ` (${m.unlocated.filter((u) => u.zone_hint).length} with a WBS zone hint)`
-                        : ""
-                    }`
-                  : ""),
-              tone: m.unlocated.length > 0 ? C.danger : m.located_derived.length > 0 ? C.warn : C.ok,
+              text: fieldMap ? fieldMapSummary(fieldMap.map) : "the read failed, so no map is shown rather than the default",
+              tone: fieldMap ? undefined : C.danger,
               gloss:
-                m.located_derived.length > 0
-                  ? `Read from task names: ${m.located_derived.slice(0, 8).map((d) => `${d.activity} → ${d.compartment}`).join(", ")}${m.located_derived.length > 8 ? ` … +${m.located_derived.length - 8} more` : ""} — graded guesses, marked ≈ wherever they appear.`
-                  : "Every located row is authored by the schedule.",
+                "Which XER field carries the compartment, the work item, the work type and the trade; which projects to serve; whether placards are read out of task names when the field is silent. The next import reads through it. The default IS today's behaviour, so a hull with no map keeps working.",
             },
-            ...(m.unknown_spaces.length > 0
-              ? [{
-                  text: `located to spaces this register does not carry: ${m.unknown_spaces.map((u) => u.compartment).join(", ")}`,
-                  tone: C.danger,
-                }]
-              : []),
             {
-              text: mismatches.length > 0
-                ? `hours do not reconcile: ${mismatches.map((x) => x.code).join(", ")}`
-                : "hours reconcile with the work items",
-              tone: mismatches.length > 0 ? C.warn : C.ok,
-              gloss: register.schedule_source
-                ? "For an ingested schedule this is a report, not a property — the honest account of what the export covers."
-                : "True by construction for the generated register; a test pins it.",
+              text: fieldMap?.fields_seen
+                ? `the served export carries UDFs ${fieldMap.fields_seen.udfs.map((u) => u.name).join(", ") || "none"} · activity codes ${fieldMap.fields_seen.activity_code_types.map((t) => t.name).join(", ") || "none"} · projects ${fieldMap.fields_seen.projects.map((p) => p.short_name).join(", ") || "none"}`
+                : "no export is served, so there is no survey to check the map against — stage an XER on the schedule card and the map is chosen there from the file's own fields",
+              tone: C.dim,
+              gloss: "The survey of the served run's file, no schedule content — what the map's names are checked against.",
             },
-            ...(register.reconciliation.unmapped_budget_hours > 0
-              ? [{ text: `${mh(register.reconciliation.unmapped_budget_hours)} mapped to no work item`, tone: C.dim }]
-              : []),
           ]}
           upload={{
-            label: "⭱ Upload P6 XER",
-            accept: ".xer,text/plain",
+            label: "⭱ Upload field-map JSON",
+            accept: ".json,application/json,text/plain",
             title:
-              "Ingest a Primavera P6 XER export as this hull's schedule of record — full multi-year exports included; the door takes files in the hundreds of megabytes. All-or-nothing: one rejected line refuses the file, with every reason listed.",
-            onFile: stageSchedule,
+              "Store the yard's P6 conventions as a document (the JSON the boot loader reads: compartment, work_item, work_type, trade each { source: udf|activity_code|resource|none, name }, projects, placards_from_names). Refused whole for a resource outside the trade, a blank name or a duplicate project; a field the served export does not carry is a finding, not a refusal. The map applies to the NEXT import — stage an XER to see it take effect first.",
+            onFile: stageFieldMap,
           }}
-          importHint="Also on the Sequence Board"
-          onOpenHome={() => onOpenModule("sequenceBoard")}
+          revertTitle={`Back to today's default convention — ${fieldMapSummary(DEFAULT_FIELD_MAP)}. The served schedule is not re-read; the next import is.`}
           onRevert={
-            register.schedule_source
+            fieldMap?.source === "document"
               ? () => {
-                  setMsg("⏳ discarding the ingested schedule…");
-                  void revertSchedule(identity, vesselId)
+                  setMsg("⏳ discarding the field map…");
+                  void revertFieldMap(identity, vesselId)
                     .then(() => {
-                      setMsg("✓ back to the generated register");
+                      setMsg("✓ back to the default convention — the next import reads the default names");
                       setNonce((n) => n + 1);
                     })
                     .catch((e: unknown) => setMsg(errText(e)));

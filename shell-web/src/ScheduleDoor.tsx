@@ -457,7 +457,7 @@ function StagedPanel({
                 ? refusal
                 : !p
                   ? "Waiting on the dry run."
-                  : `Store this export as the schedule of record, as run #${"n"} of this hull, read through the map shown. Reversible: Discard brings the generated register back, and any run can be served again from the history.`.replace("#n", "the next number")
+                  : "Store this export as the schedule of record — the next run in this hull's history, read through the map shown. Reversible: Discard brings the generated register back, and any run can be served again from the history."
             }
             style={mayCommit && p ? commitBtnStyle : { ...commitBtnStyle, cursor: "not-allowed", color: C.faint, border: `1px solid ${C.line}`, background: "transparent", opacity: 0.7 }}
           >

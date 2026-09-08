@@ -38,6 +38,7 @@ use crate::error::ApiError;
 use crate::handlers::{
     ledger_document, mapping_report, proposal_rows, read_import_body, reconcile, same_days, DryRun,
 };
+use crate::rule_table::{engine_inputs, EngineInputs, RuleScopes};
 use crate::schedule::{self, ParsedSchedule, RunInputs};
 use crate::AppState;
 
@@ -114,19 +115,16 @@ async fn delta_between(
     // The constraint half: executability under the SAME hull inputs, before
     // and after — so any shift is the schedule's doing, not the hazards'.
     // "Same inputs" means the hazards live now, on the wall clock.
-    let graph = state.store.adjacency_graph(scope, vessel).await?;
-    let hazards = state
-        .store
-        .live_hazards(scope, vessel, state.clock.now())
-        .await?;
-    let rules = state.store.rules_in_force(scope, vessel).await?;
-    let hull = wadl_issues::Hull {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-    };
-    let before = refused_by_code(&hull, current);
-    let after = refused_by_code(&hull, incoming);
+    let inputs = engine_inputs(state, scope, vessel, state.clock.now()).await?;
+    let compartments = state.store.list_compartments(scope, vessel).await?;
+    let scopes = RuleScopes::new(
+        &inputs.rules,
+        inputs.at,
+        &compartments,
+        current.iter().chain(incoming),
+    );
+    let before = refused_by_code(&inputs, &scopes, current);
+    let after = refused_by_code(&inputs, &scopes, incoming);
     let before_keys: BTreeSet<&String> = before.keys().collect();
     let after_keys: BTreeSet<&String> = after.keys().collect();
 
@@ -209,14 +207,17 @@ fn proposal_activity(p: &Value) -> Option<&str> {
 
 /// The activities a hull refuses as planned, by code, with the space and
 /// the governing rule — one side of the re-import delta's constraint half.
+/// Each activity is judged by the rows bound to its work type in its space.
 fn refused_by_code(
-    hull: &wadl_issues::Hull<'_>,
+    inputs: &EngineInputs,
+    scopes: &RuleScopes<'_>,
     acts: &[ActivitySummary],
 ) -> std::collections::BTreeMap<String, (String, String)> {
     acts.iter()
         .filter(|a| !a.is_milestone)
         .filter_map(|a| {
-            match wadl_issues::executability(hull, a.compartment_no.as_ref(), a.planned) {
+            let hull = inputs.hull_under(scopes.for_activity(a));
+            match wadl_issues::executability(&hull, a.compartment_no.as_ref(), a.planned) {
                 wadl_issues::Executability::NotExecutable(r) => Some((
                     a.code.clone(),
                     (

@@ -28,6 +28,7 @@ mod handlers;
 pub mod hardening;
 pub mod roles;
 pub mod routes;
+mod rule_table;
 pub mod schedule;
 mod schedule_door;
 pub mod version;

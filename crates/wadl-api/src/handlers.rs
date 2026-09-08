@@ -10,7 +10,7 @@ use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::VesselId;
 use wadl_domain::time::Timestamp;
 use wadl_domain::units::ManHours;
-use wadl_engine::{evaluate, Decision, EvaluationRequest};
+use wadl_engine::Decision;
 use wadl_plan::governing_constraint;
 use wadl_plan::readiness::{roll_up, Readiness, SpaceReadiness};
 
@@ -257,14 +257,8 @@ pub(crate) async fn list_activities(
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let activities = state.store.list_activities(&scope, vessel).await?;
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let hull = wadl_issues::Hull {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-    };
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let rules_served = crate::rule_table::rules_served(&state, &scope, vessel).await?;
     let source = state.store.schedule_source(&scope, vessel).await?;
     // The run the served register came from — label, when, by whom — so the
     // breadcrumb can say whose export this is without a second read.
@@ -277,15 +271,21 @@ pub(crate) async fn list_activities(
     // learn to disagree.
     let compartments = state.store.list_compartments(&scope, vessel).await?;
     let mapping = mapping_report(&activities, &compartments);
+    // Each row is judged by the rows bound to its work type in its space —
+    // a cold-work inspection above a curing coat is executable while the
+    // weld beside it is refused — and says how many rows bind to it.
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, &activities);
     let rows: Vec<Value> = activities
         .into_iter()
         .map(|a| {
+            let hull = inputs.hull_under(scopes.for_activity(&a));
             let exec = wadl_issues::executability(&hull, a.compartment_no.as_ref(), a.planned);
             let mut row = json!(a);
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("in_window".to_owned(), json!(a.booked_at(at)));
                 obj.insert("remaining_hours".to_owned(), json!(a.remaining_hours()));
                 obj.insert("executability".to_owned(), json!(exec));
+                obj.insert("rules_bound".to_owned(), json!(scopes.rules_bound(&a)));
             }
             row
         })
@@ -294,6 +294,7 @@ pub(crate) async fn list_activities(
         "as_of": at,
         "schedule_source": source,
         "schedule_run": schedule_run,
+        "rules": rules_served,
         "reconciliation": reconciliation,
         "mapping": mapping,
         "edges": schedule_edges,
@@ -329,14 +330,9 @@ pub(crate) async fn schedule_alternatives(
         .availability
         .map_or_else(|| Timestamp::from_epoch_millis(i64::MAX / 2), |w| w.end);
     let activities = state.store.list_activities(&scope, vessel).await?;
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let hull = wadl_issues::Hull {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-    };
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, &activities);
     let edges = state.store.list_schedule_edges(&scope, vessel).await?;
     let start_of: std::collections::BTreeMap<&str, i64> = activities
         .iter()
@@ -348,6 +344,7 @@ pub(crate) async fn schedule_alternatives(
         let (Some(compartment), Some(planned)) = (a.compartment_no.as_ref(), a.planned) else {
             continue;
         };
+        let hull = inputs.hull_under(scopes.for_activity(a));
         let exec = wadl_issues::executability(&hull, Some(compartment), Some(planned));
         let wadl_issues::Executability::NotExecutable(refusal) = exec else {
             continue;
@@ -727,9 +724,8 @@ pub(crate) async fn deck_states(
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let mut compartments = state.store.list_compartments(&scope, vessel).await?;
     overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
     // The deck board is an array of rows; the hours source rides on the
     // readiness rollup, which is the object the tiles read.
     let (orders, _hours_source) = booked_orders(&state, &scope, vessel).await?;
@@ -739,13 +735,10 @@ pub(crate) async fn deck_states(
     let rows: Vec<Value> = compartments
         .into_iter()
         .map(|compartment| {
-            let decision = evaluate(&EvaluationRequest {
-                subject: &compartment.compartment_no,
-                graph: &graph,
-                rules: &rules,
-                hazards: &hazards,
-                at,
-            });
+            let decision = inputs.decide(
+                &compartment.compartment_no,
+                scopes.for_compartment(&compartment),
+            );
             let work = booked_work(
                 &compartment.compartment_no,
                 &orders,
@@ -803,9 +796,8 @@ pub(crate) async fn readiness(
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let compartments = state.store.list_compartments(&scope, vessel).await?;
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
     let (orders, hours_source) = booked_orders(&state, &scope, vessel).await?;
     // Distributed packages book their hours per *segment*, so a compartment in a
     // package footprint has no work order of its own. Without this the rollup
@@ -838,13 +830,10 @@ pub(crate) async fn readiness(
     let spaces: Vec<SpaceReadiness> = compartments
         .into_iter()
         .map(|compartment| {
-            let decision = evaluate(&EvaluationRequest {
-                subject: &compartment.compartment_no,
-                graph: &graph,
-                rules: &rules,
-                hazards: &hazards,
-                at,
-            });
+            let decision = inputs.decide(
+                &compartment.compartment_no,
+                scopes.for_compartment(&compartment),
+            );
             let work = booked_work(
                 &compartment.compartment_no,
                 &orders,
@@ -956,10 +945,14 @@ async fn mitigation_inputs(
     vessel: VesselId,
     at: Timestamp,
 ) -> Result<MitigationInputs, ApiError> {
+    // The every-work set, deliberately: an option is never priced more
+    // permissively than the deck plan reads (S18 revisits with the trade
+    // taxonomy).
+    let engine = crate::rule_table::engine_inputs(state, scope, vessel, at).await?;
     Ok(MitigationInputs {
-        graph: state.store.adjacency_graph(scope, vessel).await?,
-        hazards: state.store.live_hazards(scope, vessel, at).await?,
-        rules: state.store.rules_in_force(scope, vessel).await?,
+        graph: engine.graph,
+        hazards: engine.hazards,
+        rules: engine.rules,
         compartments: state.store.list_compartments(scope, vessel).await?,
         orders: booked_orders(state, scope, vessel).await?.0,
         packages: packages_with_footprints(state, scope, vessel).await?,
@@ -2025,24 +2018,17 @@ pub(crate) async fn zone_adjacent(
     if inside.is_empty() {
         return Err(ApiError::NotFound);
     }
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let via = adjacency_reasons(&compartments, &inside, &graph);
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
+    let via = adjacency_reasons(&compartments, &inside, &inputs.graph);
 
     let mut adjacent: Vec<Value> = compartments
         .iter()
         .filter_map(|c| {
             let ways = via.get(c.compartment_no.as_str())?;
-            let decision = evaluate(&EvaluationRequest {
-                subject: &c.compartment_no,
-                graph: &graph,
-                rules: &rules,
-                hazards: &hazards,
-                at,
-            });
-            let live: Vec<Value> = hazards
-                .iter()
+            let decision = inputs.decide(&c.compartment_no, scopes.for_compartment(c));
+            let live: Vec<Value> = inputs
+                .live()
                 .filter(|h| h.origin == c.compartment_no)
                 .map(|h| json!({ "kind": h.kind, "label": h.label }))
                 .collect();
@@ -3653,15 +3639,13 @@ pub(crate) async fn propose_schedule_change(
     let at = AsOf { as_of: body.as_of }.resolve(&state, &hull_row)?;
 
     // The engine's word on the proposed window, under the hazards live at the
-    // instant: a proposal is never sent blind.
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let hull = wadl_issues::Hull {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-    };
+    // instant and the rows bound to this activity's work: a proposal is never
+    // sent blind.
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let scopes =
+        crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, std::iter::once(a));
+    let hull = inputs.hull_under(scopes.for_activity(a));
     let verdict =
         window.map(|w| wadl_issues::executability(&hull, a.compartment_no.as_ref(), Some(w)));
     // Knock-on, read finish-to-start off the schedule's own logic.
@@ -3826,18 +3810,16 @@ pub(crate) async fn get_package(
     let package = state.store.get_package(&scope, vessel, &code).await?;
     let analysis = package.analyse();
 
-    // The engine's inputs, loaded once for the whole footprint.
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    // The engine's inputs, loaded once for the whole footprint; each space
+    // is read under the rows bound to its register category.
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
     let decide_space = |compartment: &CompartmentNo| {
-        evaluate(&EvaluationRequest {
-            subject: compartment,
-            graph: &graph,
-            rules: &rules,
-            hazards: &hazards,
-            at,
-        })
+        inputs.decide(
+            compartment,
+            scopes.get(None, scopes.category_of(Some(compartment))),
+        )
     };
 
     // Authorization as a distribution over the footprint.
@@ -3902,17 +3884,14 @@ async fn decide(
     at: Timestamp,
 ) -> Result<Decision, ApiError> {
     // Scope is enforced by each store call; the first failure short-circuits.
-    let graph = state.store.adjacency_graph(scope, vessel).await?;
-    let hazards = state.store.live_hazards(scope, vessel, at).await?;
-    let rules = state.store.rules_in_force(scope, vessel).await?;
+    let inputs = crate::rule_table::engine_inputs(state, scope, vessel, at).await?;
+    let compartments = state.store.list_compartments(scope, vessel).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
     let subject = CompartmentNo::new(compartment);
-    Ok(evaluate(&EvaluationRequest {
-        subject: &subject,
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-        at,
-    }))
+    Ok(inputs.decide(
+        &subject,
+        scopes.get(None, scopes.category_of(Some(&subject))),
+    ))
 }
 
 /// How a scheduled activity participates in a work-on-work conflict, judged

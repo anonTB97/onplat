@@ -205,6 +205,18 @@ old snapshot stays and keeps verifying against the old version, the new one
 gets its own. `cargo insta review` shows the authority exactly what changed
 between the two. Nothing in a signed snapshot is edited.
 
+The scenario table the authority writes the expectation into is
+`crates/wadl-engine/tests/fixtures/rule-scenarios.csv` — one row per
+scenario, expectation first (state, who may clear, the earliest clear), in
+their words; `crates/wadl-engine/tests/golden_rule_table.rs` runs every row
+and pins the engine's answer as one snapshot per row, named
+`rule-ordinal-scenario`, the row's fields in the snapshot header. Sixteen
+rows cover the eight rule ids in force today. The CSV row is what the
+authority signs; the snapshot is the engine's answer to it. The signature on
+the table itself goes through the rule door's sign route (S14, sitting C):
+recorded on the document and in the ledger under the signer's person,
+invalidated by any later commit.
+
 The sign-off table lives in this file's companion
 `docs/briefs/rule-signoff.md` once the sitting produces rows; until then
 there are no signatures to record and this section is the procedure.
@@ -213,34 +225,54 @@ there are no signatures to record and this section is the procedure.
 
 - **Both stores serve the seed.** `rules_in_force` returns
   `RuleSet::seed_usn_hot_work()` in memory and the rows `wadl seed` wrote
-  from it on PostgreSQL. Every decision's trace carries the seed's version
-  id, so a decision made under the seed stays explainable after the table
-  replaces it.
-- **Every row applies to every activity** regardless of work type, until
-  S14 binds by the field map's work type. Cold work in a coated space's
-  neighbourhood is refused as hot work would be. Planners should read a
-  refusal of non-hot work as "the rule is broader than the yard's" and say
-  so in the weekly triage (`docs/pilot-playbook.md` §4.2); it becomes a
-  document change at the sitting, not a code change.
-- **The signed hot-work-only fallback** (the review's B11 minimum) is the
-  text below, ready for signature if the sitting slips. It takes effect
-  when S14 lands, because restricting evaluation by work type is S14's
-  binding; before that it is a statement of intent on file and the seed
-  runs unrestricted.
+  from it on PostgreSQL (a re-seed brings an older database up to the
+  seed's current reading and retires `…0401`). Every decision's trace
+  carries the seed's version id, so a decision made under the seed stays
+  explainable after the table replaces it. The seed exported in the table's
+  own layout is `reference/cvn73/CVN73-rule-table.csv`, proved equal to the
+  seed by test — what the sitting starts from.
+- **The seed is audited against the table and binds by work type** (S14
+  sitting A). The bindings are written into the seed and are the fallback
+  in force:
+
+  | Entry | Binding | Reading |
+  |---|---|---|
+  | R03 `…0300` same-space, `…0301` deck_penetration | `hot_work` | cold work in or above a coated space is no longer refused |
+  | R04 `…0402` (replaces `…0401`) | any work; fire watch of 30 min anchored at the permit's **close** | the space below is suspended until the permit closes, then for the fire watch |
+  | R06 `…0601` WARN, shared_bulkhead | `hot_work` | **left with the authority (D1)**: the bulkhead case the table has no row for |
+  | R07 `…0700`, `…0701` | any work | matches the table |
+  | R09 `…0901` SUSPEND, exhaust_trunk | `hot_work` | the table's own note: grinding, cutting, torch refused |
+  | R09 `…0902` WARN, exhaust_trunk | any work | the table's WARN for every other work class |
+  | R13 `…1301` | `hot_work` | ignition risk; the closed-but-unsecured stow stays D7 |
+  | R22 `…2201` | any work | matches the table |
+
+  An activity with no work type on the schedule (the field map carries
+  none, or a compartment-level board) is judged by every row — the
+  conservative reading. Planners should read a refusal of cold work under a
+  hot-work row as a field-map gap, not a rule, and say so in the weekly
+  triage (`docs/pilot-playbook.md` §4.2); it becomes a document change at
+  the sitting, not a code change.
+- **The signed fallback** (the review's B11 minimum) is the text below,
+  ready for signature if the sitting slips. It is in force as coded: the
+  bindings above are the seed's.
 
 > Until the yard's rule table is authored through the rule door, the
-> development seed (nine entries, versions `…0300`, `…0301`, `…0401`,
-> `…0601`, `…0700`, `…0701`, `…0901`, `…1301`, `…2201`) is in force as
-> transcribed, with the two departures from `handoff/01-rule-table.csv`
-> (R06 WARN, R09 SUSPEND) acknowledged. Evaluation binds these rows to
-> activities whose work type is hot work; activities of any other work type
-> receive ALLOW with a trace line stating that no rule is in force for the
-> work type. Every clearance is recorded with its basis under a person.
-> Signed by the safety authority's representative (person id) and the
-> pilot's yard lead (person id).
+> development seed (ten entries, versions `…0300`, `…0301`, `…0402`,
+> `…0601`, `…0700`, `…0701`, `…0901`, `…0902`, `…1301`, `…2201`) is in
+> force as transcribed and exported in `reference/cvn73/CVN73-rule-table.csv`,
+> with the departures from `handoff/01-rule-table.csv` written into its
+> open-question cells (R06 WARN on the bulkhead; R09 split into SUSPEND for
+> hot work and WARN for the rest; R03's same-space row). R03, R06, R09's
+> SUSPEND and R13 bind to activities whose work type is hot work; R04, R07,
+> R09's WARN and R22 bind to any work; an activity whose work type the
+> schedule does not carry is judged by every row. R04's fire watch runs
+> from the permit's close. Every clearance is recorded with its basis under
+> a person. Signed by the safety authority's representative (person id) and
+> the pilot's yard lead (person id).
 
-- **The two contradictions stand as seeded** until D1 is decided; the
-  pilot record notes them on day one so nobody discovers them from a trace.
+- **R06 stands as seeded** until D1 is decided; the pilot record notes it
+  on day one so nobody discovers it from a trace. R09 is resolved by the
+  split above.
 
 ## 7. What each side brings
 

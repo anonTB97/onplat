@@ -38,7 +38,7 @@ use sqlx::Row as _;
 use uuid::Uuid;
 use wadl_domain::ids::{OrgId, VesselId};
 use wadl_domain::time::Timestamp;
-use wadl_store::memory::{GeometryRegister, ManningBook, YardClockDoc};
+use wadl_store::memory::{GeometryRegister, ManningBook, RuleTableDoc, SignOff, YardClockDoc};
 use wadl_store::model::{
     DeckCoverageSummary, HullStatement, ManningCrewSummary, RowOutcome, SpaceGeometrySummary,
 };
@@ -349,13 +349,14 @@ async fn engine_inputs_come_back_typed_with_rejection_paths_unused() {
     assert!(origins.contains(&"3-148-2-E"));
 
     // The stored rule payloads must round-trip the engine's own seed exactly —
-    // the 0011 contract, asserted at the byte level entry by entry.
+    // the 0011 contract, asserted at the byte level entry by entry — with the
+    // bindings and the end-anchored hold the seed audit wrote.
     let rules = store.rules_in_force(&scope, vessel(CVN73)).await.unwrap();
     let expected = wadl_engine::RuleSet::seed_usn_hot_work();
     assert_eq!(
         rules.entries().len(),
         expected.entries().len(),
-        "every seeded entry is served"
+        "every seeded entry is served, and only those"
     );
     for want in expected.entries() {
         assert!(
@@ -365,6 +366,216 @@ async fn engine_inputs_come_back_typed_with_rejection_paths_unused() {
             want.rule_version
         );
     }
+    let ids: Vec<String> = rules
+        .entries()
+        .iter()
+        .map(|e| e.rule_version.to_string())
+        .collect();
+    assert!(
+        ids.iter().any(|id| id.ends_with("0402")),
+        "R04 from the close"
+    );
+    assert!(
+        ids.iter().any(|id| id.ends_with("0902")),
+        "R09's WARN reading"
+    );
+    assert!(
+        !ids.iter().any(|id| id.ends_with("0401")),
+        "…0401 is retired"
+    );
+}
+
+/// A hull-row statement for a brand-new tenant: its own organisation and
+/// class, so the test may rewrite that tenant's rule rows without touching
+/// the seed world the other tests read.
+fn fresh_tenant_statement() -> HullStatement {
+    let tag = &Uuid::now_v7().simple().to_string()[24..];
+    serde_json::from_value(serde_json::json!({
+        "organization": { "org_id": Uuid::now_v7(), "kind": "shipbuilder", "name": format!("T-Yard-{tag}"), "country": "USA" },
+        "class": { "class_id": Uuid::now_v7(), "code": format!("T-{tag}"), "name": "Test class", "hull_type": "CVN", "frame_min": 1, "frame_max": 260 },
+        "vessel": { "vessel_id": Uuid::now_v7(), "hull_no": format!("T-{tag}"), "name": "Test hull" },
+        "availability": { "availability_id": Uuid::now_v7(), "code": "T-26", "kind": "PIA", "location": "Test dock", "start_on": "2026-01-05", "end_on": "2026-09-30" }
+    }))
+    .unwrap()
+}
+
+/// Puts a tenant's R04 and R07 back the way a pre-S14 `wadl seed` wrote
+/// them — under the raw seed uuids that seed used, which is what a database
+/// from before S15's derived ids carries: R04 as `…0401` alone (version 1,
+/// the raise-anchored payload, in force), R07's same-space row with the old
+/// payload shape and a `hot_work` binding.
+async fn regress_to_pre_s14(pool: &sqlx::PgPool, org: Uuid) {
+    let r04: Uuid =
+        sqlx::query_scalar("SELECT rule_id FROM rule WHERE org_id = $1 AND code = 'R04'")
+            .bind(org)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM rule_version WHERE rule_id = $1")
+        .bind(r04)
+        .execute(pool)
+        .await
+        .unwrap();
+    let old_r04 = serde_json::json!({
+        "rule_code": "R04", "rule_version": "00000000-0000-0000-0000-000000000401",
+        "hazard": "hot_work_live",
+        "applies": { "Coupled": { "code": "deck_penetration", "max_hops": 1 } },
+        "state": "SUSPEND", "authority": "NSTM Ch. 074 Vol.1 para 074-13; MIL-STD-1689A",
+        "clearing_authority": "fire_marshal", "hold": 30, "waivable": false
+    });
+    // The raw seed uuid is shared across tenants' tables only in a test; a
+    // v7 tail keeps two tenants in one database apart.
+    let raw_0401 = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO rule_version (rule_version_id, rule_id, version_no, effective_from,
+             trigger_expr, max_hops, result_state, clearing_expr, clearing_authority, waivable)
+         VALUES ($1, $2, 1, timestamptz '2026-01-01 00:00Z', $3, 1, 'SUSPEND', '{}', 'fire_marshal', false)",
+    )
+    .bind(raw_0401)
+    .bind(r04)
+    .bind(&old_r04)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO rule_binding (rule_version_id, class_id, work_type, category)
+         VALUES ($1, NULL, 'hot_work', NULL)",
+    )
+    .bind(raw_0401)
+    .execute(pool)
+    .await
+    .unwrap();
+    let old_r07 = serde_json::json!({
+        "rule_code": "R07", "rule_version": "00000000-0000-0000-0000-000000000700",
+        "hazard": "energised_bus", "applies": "SameSpace", "state": "BLOCK",
+        "authority": "NSTM Ch. 300; NAVSEA S9086-KC-STM-010",
+        "clearing_authority": "isolation_authority", "hold": null, "waivable": false
+    });
+    sqlx::query(
+        "UPDATE rule_version rv SET trigger_expr = $2
+           FROM rule r
+          WHERE r.rule_id = rv.rule_id AND r.org_id = $1
+            AND rv.trigger_expr->>'rule_version' = '00000000-0000-0000-0000-000000000700'",
+    )
+    .bind(org)
+    .bind(&old_r07)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE rule_binding b SET work_type = 'hot_work'
+           FROM rule_version rv JOIN rule r ON r.rule_id = rv.rule_id
+          WHERE b.rule_version_id = rv.rule_version_id AND r.org_id = $1
+            AND rv.trigger_expr->>'rule_version' = '00000000-0000-0000-0000-000000000700'",
+    )
+    .bind(org)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A seed version's row under `org`, found by its payload's `rule_version`:
+/// version number, binding work type, retired, payload carries a binding.
+async fn version_row(
+    pool: &sqlx::PgPool,
+    org: Uuid,
+    seed_version: u128,
+) -> (i32, Option<String>, bool, bool) {
+    let row = sqlx::query(
+        "SELECT rv.version_no, b.work_type, rv.effective_to IS NOT NULL AS retired,
+                rv.trigger_expr ? 'binding' AS has_binding
+           FROM rule_version rv
+           JOIN rule r ON r.rule_id = rv.rule_id
+           LEFT JOIN rule_binding b ON b.rule_version_id = rv.rule_version_id
+          WHERE r.org_id = $1 AND rv.trigger_expr->>'rule_version' = $2",
+    )
+    .bind(org)
+    .bind(Uuid::from_u128(seed_version).to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (
+        row.get("version_no"),
+        row.get("work_type"),
+        row.get("retired"),
+        row.get("has_binding"),
+    )
+}
+
+/// `wadl seed` / `wadl bootstrap-hull` on a tenant seeded before this slice:
+/// `…0402` arrives as R04's version 2 (0004's `UNIQUE (rule_id, version_no)`
+/// honoured), bound to any work; `…0401` is retired and no longer served;
+/// a kept id has its payload and binding rewritten to what the seed means;
+/// the outcome says `updated` and is ledgered; a third run changes nothing.
+#[tokio::test]
+async fn a_reseed_retires_the_raise_anchored_r04_and_rewrites_the_binding_it_means() {
+    let store = require_db!();
+    let statement = fresh_tenant_statement();
+    let org = statement.organization.org_id;
+    let hull = VesselId::from_uuid(statement.vessel.vessel_id);
+    let scope = TenantScope::new(OrgId::from_uuid(org), [hull]);
+    let now_ms = 1_780_000_000_000;
+    let first = store
+        .bootstrap_hull(&statement, "test-hull.json", false, now_ms)
+        .await
+        .unwrap();
+    assert_eq!(first.rules, RowOutcome::Created);
+
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    regress_to_pre_s14(&pool, org).await;
+    let before = store.rules_in_force(&scope, hull).await.unwrap();
+    let ids = |set: &wadl_engine::RuleSet| -> Vec<String> {
+        set.entries()
+            .iter()
+            .map(|e| e.rule_version.to_string())
+            .collect()
+    };
+    assert!(ids(&before).iter().any(|id| id.ends_with("0401")));
+    assert!(!ids(&before).iter().any(|id| id.ends_with("0402")));
+
+    let again = store
+        .bootstrap_hull(&statement, "test-hull.json", false, now_ms + 1)
+        .await
+        .unwrap();
+    assert_eq!(again.rules, RowOutcome::Updated, "{again:?}");
+    assert!(
+        again.ledger_seq.is_some(),
+        "the update is on the hull's record"
+    );
+
+    let (v0402_no, v0402_binding, v0402_retired, _) = version_row(&pool, org, 0x0402).await;
+    assert_eq!(v0402_no, 2, "numbered after the version already there");
+    assert_eq!(v0402_binding, None, "R04 binds to any work below");
+    assert!(!v0402_retired);
+    let (_, _, v0401_retired, _) = version_row(&pool, org, 0x0401).await;
+    assert!(v0401_retired, "…0401 retired");
+    let (_, v0700_binding, _, v0700_has_binding) = version_row(&pool, org, 0x0700).await;
+    assert_eq!(v0700_binding, None, "R07 binds to any work again");
+    assert!(
+        v0700_has_binding,
+        "the kept id's payload carries its binding"
+    );
+
+    let served = store.rules_in_force(&scope, hull).await.unwrap();
+    let seed = wadl_engine::RuleSet::seed_usn_hot_work();
+    assert_eq!(served.entries().len(), seed.entries().len());
+    for want in seed.entries() {
+        assert!(
+            served.entries().contains(want),
+            "{} did not round-trip",
+            want.rule_version
+        );
+    }
+    assert!(!ids(&served).iter().any(|id| id.ends_with("0401")));
+
+    let third = store
+        .bootstrap_hull(&statement, "test-hull.json", false, now_ms + 2)
+        .await
+        .unwrap();
+    assert_eq!(third.rules, RowOutcome::Existed);
+    assert!(!third.changes_anything(), "{third:?}");
 }
 
 #[tokio::test]
@@ -467,6 +678,226 @@ async fn ingested_documents_are_all_or_nothing_and_tenant_scoped() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn the_rule_table_round_trips_stays_in_tenant_and_rules_in_force_switch_to_it_and_back() {
+    let store = require_db!();
+    let scope = yard_scope();
+    // CVN-75: the CVN-73 rules read elsewhere must keep seeing the seed.
+    let hull = vessel(CVN75);
+    let seed = wadl_engine::RuleSet::seed_usn_hot_work();
+
+    store.clear_rule_table(&scope, hull).await.unwrap();
+    assert!(store.rule_table(&scope, hull).await.unwrap().is_none());
+    let from_seed = store.rules_in_force(&scope, hull).await.unwrap();
+    assert_eq!(from_seed.entries().len(), seed.entries().len());
+
+    // A table with R22 alone in force replaces the seed whole.
+    let only_r22: Vec<wadl_engine::RuleEntry> = seed
+        .entries()
+        .iter()
+        .filter(|e| e.rule_code == "R22")
+        .cloned()
+        .collect();
+    let doc = RuleTableDoc {
+        label: "CVN75-rule-table.csv".to_owned(),
+        header: wadl_engine::rule_table::export_header(),
+        rows: vec![vec!["R22".to_owned(); 22]],
+        entries: only_r22.clone(),
+        table_hash: "deadbeef".to_owned(),
+        signoff: None,
+    };
+    store
+        .set_rule_table(&scope, hull, doc.clone())
+        .await
+        .unwrap();
+    let served = store.rule_table(&scope, hull).await.unwrap().unwrap();
+    assert_eq!(
+        served, doc,
+        "label, header, rows, entries, hash and signature intact"
+    );
+    assert_eq!(
+        store.rules_in_force(&scope, hull).await.unwrap(),
+        wadl_engine::RuleSet::new(only_r22)
+    );
+
+    // Another tenant cannot see, replace, sign or clear it — NotFound, all.
+    let foreign = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store.rule_table(&foreign, hull).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.set_rule_table(&foreign, hull, doc.clone()).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.clear_rule_table(&foreign, hull).await,
+        Err(StoreError::NotFound)
+    ));
+
+    // Signing writes the person onto the document; a hull without a table is
+    // NotFound.
+    let signoff = SignOff {
+        signed_at_ms: 1_780_000_000_000,
+        signer_id: "Y-2001".to_owned(),
+        signer_name: "R. Alvarez".to_owned(),
+        statement: "signed at the sitting".to_owned(),
+        table_hash: "deadbeef".to_owned(),
+        rows: vec!["00000000-0000-0000-0000-000000002201".to_owned()],
+        ledger_seq: 7,
+    };
+    let signed = store
+        .sign_rule_table(&scope, hull, signoff.clone())
+        .await
+        .unwrap();
+    assert_eq!(signed.signoff, Some(signoff.clone()));
+    assert_eq!(
+        store
+            .rule_table(&scope, hull)
+            .await
+            .unwrap()
+            .unwrap()
+            .signoff,
+        Some(signoff.clone())
+    );
+    assert!(matches!(
+        store.sign_rule_table(&foreign, hull, signoff.clone()).await,
+        Err(StoreError::NotFound)
+    ));
+    store.clear_rule_table(&scope, vessel(CVN71)).await.unwrap();
+    assert!(matches!(
+        store.sign_rule_table(&scope, vessel(CVN71), signoff).await,
+        Err(StoreError::NotFound)
+    ));
+
+    // Revert: the seed rows again.
+    store.clear_rule_table(&scope, hull).await.unwrap();
+    assert!(store.rule_table(&scope, hull).await.unwrap().is_none());
+    assert_eq!(
+        store
+            .rules_in_force(&scope, hull)
+            .await
+            .unwrap()
+            .entries()
+            .len(),
+        seed.entries().len()
+    );
+}
+
+#[tokio::test]
+async fn hazards_bearing_on_serves_the_fire_watch_tail_with_the_end_instant() {
+    let store = require_db!();
+    let scope = yard_scope();
+    let hull = vessel(CVN75);
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let raised_ms = 1_778_649_300_000;
+    let minute = |m: i64| Timestamp::from_epoch_millis(raised_ms + m * 60_000);
+    let raised_at = chrono::DateTime::from_timestamp_millis(raised_ms).unwrap();
+    sqlx::query("DELETE FROM hazard WHERE vessel_id = $1 AND compartment_no = '2-101-0-E'")
+        .bind(Uuid::from_u128(CVN75))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO hazard (org_id, vessel_id, compartment_no, kind, raised_at, label)
+         VALUES ($1, $2, '2-101-0-E', 'hot_work_live', $3, 'HW permit 2673 · weld repair')",
+    )
+    .bind(Uuid::from_u128(YARD_ORG))
+    .bind(Uuid::from_u128(CVN75))
+    .bind(raised_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let tail = wadl_domain::units::Minutes::new(30);
+    let permit = |set: &[wadl_engine::Hazard]| -> Option<wadl_engine::Hazard> {
+        set.iter()
+            .find(|h| h.origin.as_str() == "2-101-0-E")
+            .cloned()
+    };
+
+    // Live: served, no `ended`.
+    let open = store
+        .hazards_bearing_on(&scope, hull, minute(45), tail)
+        .await
+        .unwrap();
+    assert_eq!(permit(&open).map(|h| h.ended), Some(None));
+
+    // The permit closes at +60 with its basis.
+    store
+        .clear_hazard(
+            &scope,
+            hull,
+            "2-101-0-E",
+            wadl_engine::HazardKind::HotWorkLive,
+            "torch out, area walked",
+            minute(60).epoch_millis(),
+        )
+        .await
+        .unwrap();
+
+    // Read at +50: still served, `ended` set to the later instant (time-honest).
+    let scrubbed_back = store
+        .hazards_bearing_on(&scope, hull, minute(50), tail)
+        .await
+        .unwrap();
+    assert_eq!(
+        permit(&scrubbed_back).and_then(|h| h.ended),
+        Some(minute(60))
+    );
+    // Read at +70: inside the tail, served with `ended`; the live read is without it.
+    let in_tail = store
+        .hazards_bearing_on(&scope, hull, minute(70), tail)
+        .await
+        .unwrap();
+    assert_eq!(permit(&in_tail).and_then(|h| h.ended), Some(minute(60)));
+    let live = store.live_hazards(&scope, hull, minute(70)).await.unwrap();
+    assert!(permit(&live).is_none());
+    assert_eq!(
+        live,
+        store
+            .hazards_bearing_on(
+                &scope,
+                hull,
+                minute(70),
+                wadl_domain::units::Minutes::new(0)
+            )
+            .await
+            .unwrap(),
+        "a zero tail is the live read"
+    );
+    // At +90 the tail has run: half-open, gone at the instant.
+    assert!(permit(
+        &store
+            .hazards_bearing_on(&scope, hull, minute(89), tail)
+            .await
+            .unwrap()
+    )
+    .is_some());
+    assert!(permit(
+        &store
+            .hazards_bearing_on(&scope, hull, minute(90), tail)
+            .await
+            .unwrap()
+    )
+    .is_none());
+    // Another tenant: NotFound.
+    let foreign = TenantScope::new(org(NAVY_ORG), [hull]);
+    assert!(matches!(
+        store
+            .hazards_bearing_on(&foreign, hull, minute(70), tail)
+            .await,
+        Err(StoreError::NotFound)
+    ));
+
+    sqlx::query("DELETE FROM hazard WHERE vessel_id = $1 AND compartment_no = '2-101-0-E'")
+        .bind(Uuid::from_u128(CVN75))
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

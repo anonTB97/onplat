@@ -271,6 +271,7 @@ does not have.
 | 0013 manning book · 0014 geometry register · 0015 ship registers · 0016 yard clock | additive | each widens the `ingested_document.kind` check; every earlier kind stays valid |
 | 0017 ledger actor | additive | nullable actor columns and `chain_version` defaulting to 1; format-1 rows verify unchanged |
 | 0018 schedule runs and field map | additive | nullable columns on `ingest_run`, a nullable `run_id` on `ingested_document` |
+| 0019 rule table document | additive | widens the `ingested_document.kind` check by `rule_table`; every earlier kind stays valid |
 
 Nothing to date is `restore-only`; the procedure exists so the first one is
 not improvised.

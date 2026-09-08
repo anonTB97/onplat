@@ -208,6 +208,55 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<(), StoreError>;
 
+    /// The hull's rule table document — the safety authority's CSV, compiled
+    /// — or `None` while the seed is in force.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::RuleTableDoc>, StoreError>;
+
+    /// Replaces a hull's rule table. All-or-nothing at the caller: the door
+    /// compiles and refuses a malformed table whole. A commit clears any
+    /// signature — the caller passes the document with `signoff: None`.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: crate::memory::RuleTableDoc,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's rule table; the seed is in force again. A no-op
+    /// when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// Records the safety authority's signature on the hull's rule table and
+    /// returns the signed document. The signature is of a hash: the caller
+    /// has already checked `signoff.table_hash` against the document's.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope` or no rule
+    /// table is stored.
+    async fn sign_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        signoff: crate::memory::SignOff,
+    ) -> Result<crate::memory::RuleTableDoc, StoreError>;
+
     /// Records one schedule import AND serves it, as one write: the run
     /// gets its `run_id` and `seq` here (whatever the caller passed is
     /// overwritten), its document becomes the schedule of record, and the
@@ -538,6 +587,24 @@ pub trait Repositories: Send + Sync {
         at: wadl_domain::time::Timestamp,
     ) -> Result<Vec<Hazard>, StoreError>;
 
+    /// The hazards that still bear on a decision as of `at`: every recorded
+    /// hazard not cleared by `at`, **plus** those cleared within the last
+    /// `tail` minutes — the fire-watch tail, so an end-anchored hold
+    /// (`HoldFrom::End`) can run from the clearance the row already carries.
+    /// Each hazard carries `ended` = its `cleared_at`, which the engine
+    /// prices from. With `tail = 0` the set equals [`Self::live_hazards`].
+    /// The caller takes the tail from `RuleSet::longest_end_anchored_hold`.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn hazards_bearing_on(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        at: wadl_domain::time::Timestamp,
+        tail: wadl_domain::units::Minutes,
+    ) -> Result<Vec<Hazard>, StoreError>;
+
     /// Records a field condition raised on the hull — a coating ticket
     /// opened, a bus energised, hot work started, a stop-work posted — from
     /// `since_ms`, and returns it as the engine will see it. The caller has
@@ -580,9 +647,11 @@ pub trait Repositories: Send + Sync {
         cleared_at_ms: i64,
     ) -> Result<Vec<Hazard>, StoreError>;
 
-    /// The rules in force for the hull at the evaluation instant. Rules are
-    /// versioned data (ADR 0002); the engine is handed them, never hard-codes
-    /// them.
+    /// The rules in force for the hull, whole: the committed rule table's
+    /// entries when one is stored ([`Self::rule_table`]), else the seed.
+    /// Rules are versioned data (ADR 0002); the engine is handed them, never
+    /// hard-codes them. The caller narrows the set to the work in hand with
+    /// `RuleSet::bound_to` — the store does not read work types.
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.

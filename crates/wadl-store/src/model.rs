@@ -875,6 +875,11 @@ pub enum RowOutcome {
     Created,
     /// A row with this id was already there; nothing written.
     Existed,
+    /// The rows were there and were brought up to date — the baseline rule
+    /// set after the seed's reading changed (a new version, a rewritten
+    /// payload, a retired id). Counts as a change: the transaction commits
+    /// and the hull's ledger says so.
+    Updated,
     /// A dry run: the row would be written.
     WouldCreate,
 }
@@ -886,6 +891,7 @@ impl RowOutcome {
         match self {
             Self::Created => "created",
             Self::Existed => "existed",
+            Self::Updated => "updated",
             Self::WouldCreate => "would create",
         }
     }

@@ -235,12 +235,24 @@ pub(crate) async fn install_baseline_coupling_types(
 }
 
 /// Installs the baseline rule set — [`wadl_engine::RuleSet::seed_usn_hot_work`]
-/// — for a tenant that has no rules, per the 0011 payload contract:
-/// `trigger_expr` is the serde form of the engine's `RuleEntry`, so what
-/// `rules_in_force` deserializes is byte-identical to what the engine was
-/// written against. SQL literals would be a hand-copied shadow of that
-/// shape, and hand copies drift. The demo seed installs its rules through
-/// this same function.
+/// — for a tenant, per the 0011 payload contract: `trigger_expr` is the serde
+/// form of the engine's `RuleEntry`, so what `rules_in_force` deserializes is
+/// byte-identical to what the engine was written against. SQL literals would
+/// be a hand-copied shadow of that shape, and hand copies drift. The demo
+/// seed installs its rules through this same function.
+///
+/// Written even when the tenant already has rules: the seed is what the
+/// engine was written against, and a tenant seeded before a reading changed
+/// must pick up the change — a new version row for a new id, the payload
+/// (and so the binding) rewritten under a kept id, a retired id closed. Rows
+/// are found by the payload's own `rule_version` and the rule by `(org,
+/// code)`, never by primary key: a tenant seeded by an older `wadl seed`
+/// carries the raw seed uuids, one bootstrapped here the derived ones, and
+/// both must be brought up to date. Every statement is idempotent: on a
+/// current tenant nothing changes and the outcome is `Existed`; when
+/// something did, `Updated`, which the bootstrap commits and ledgers. (A dry
+/// run on an existing tenant runs the same statements to learn the answer;
+/// the caller rolls back.)
 ///
 /// # Errors
 /// [`StoreError::Backend`] on any statement failure or an unparseable code.
@@ -249,84 +261,177 @@ pub(crate) async fn install_baseline_rules(
     org: Uuid,
     dry_run: bool,
 ) -> Result<RowOutcome, StoreError> {
-    use wadl_engine::rules::Applies;
-
     let present: i64 = sqlx::query_scalar("SELECT count(*) FROM rule WHERE org_id = $1")
         .bind(org)
         .fetch_one(&mut **tx)
         .await?;
-    if present > 0 {
-        return Ok(RowOutcome::Existed);
-    }
-    if dry_run {
+    if dry_run && present == 0 {
         return Ok(RowOutcome::WouldCreate);
     }
+    let mut changed = false;
     let entries = wadl_engine::RuleSet::seed_usn_hot_work();
-    let mut version_no: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
     for entry in entries.entries() {
-        let rule_id = derived_id(org, "rule", entry.rule_code.as_bytes());
         sqlx::query(
             "INSERT INTO rule (rule_id, org_id, code, name, kind)
              VALUES ($1, $2, $3, $3, 'hazard_cascade')
-             ON CONFLICT (rule_id) DO NOTHING",
+             ON CONFLICT (org_id, code) DO NOTHING",
         )
-        .bind(rule_id)
+        .bind(derived_id(org, "rule", entry.rule_code.as_bytes()))
         .bind(org)
         .bind(&entry.rule_code)
         .execute(&mut **tx)
         .await?;
-
-        let version = version_no.entry(entry.rule_code.clone()).or_insert(0);
-        *version += 1;
-        let state = match entry.state {
-            wadl_engine::DecisionState::Allow => "ALLOW",
-            wadl_engine::DecisionState::Warn => "WARN",
-            wadl_engine::DecisionState::Block => "BLOCK",
-            wadl_engine::DecisionState::Suspend => "SUSPEND",
-        };
-        let max_hops: Option<i32> = match &entry.applies {
-            Applies::SameSpace => None,
-            Applies::Coupled { max_hops, .. } => Some(i32::from(max_hops.get())),
-        };
-        let trigger = serde_json::to_value(entry)
-            .map_err(|e| StoreError::Backend(format!("rule payload: {e}")))?;
-        let clearing = serde_json::json!({
-            "clearing_authority": entry.clearing_authority,
-            "hold_minutes": entry.hold.map(wadl_domain::units::Minutes::get),
-        });
-        let rule_version_id =
-            derived_id(org, "rule_version", entry.rule_version.as_uuid().as_bytes());
-        sqlx::query(
-            "INSERT INTO rule_version
-                (rule_version_id, rule_id, version_no, effective_from,
-                 trigger_expr, max_hops, result_state, clearing_expr,
-                 clearing_authority, waivable)
-             VALUES ($1, $2, $3, timestamptz '2026-01-01 00:00Z',
-                     $4, $5, $6::decision_state, $7, $8, $9)
-             ON CONFLICT (rule_version_id) DO NOTHING",
+        let rule_id: Uuid =
+            sqlx::query_scalar("SELECT rule_id FROM rule WHERE org_id = $1 AND code = $2")
+                .bind(org)
+                .bind(&entry.rule_code)
+                .fetch_one(&mut **tx)
+                .await?;
+        changed |= write_seed_version(tx, org, rule_id, entry).await?;
+    }
+    for retired in wadl_engine::RuleSet::seed_retired_versions() {
+        let closed = sqlx::query(
+            "UPDATE rule_version rv SET effective_to = now()
+               FROM rule r
+              WHERE r.rule_id = rv.rule_id AND r.org_id = $1
+                AND rv.trigger_expr->>'rule_version' = $2
+                AND rv.effective_to IS NULL",
         )
-        .bind(rule_version_id)
-        .bind(rule_id)
-        .bind(*version)
-        .bind(trigger)
-        .bind(max_hops)
-        .bind(state)
-        .bind(clearing)
-        .bind(&entry.clearing_authority)
-        .bind(entry.waivable)
+        .bind(org)
+        .bind(retired.to_string())
         .execute(&mut **tx)
         .await?;
+        changed |= closed.rows_affected() > 0;
+    }
+    Ok(match (present > 0, changed) {
+        (false, _) => RowOutcome::Created,
+        (true, true) => RowOutcome::Updated,
+        (true, false) => RowOutcome::Existed,
+    })
+}
 
+/// One seed entry as its `rule_version` row and the binding it means; `true`
+/// when a row was written or rewritten.
+///
+/// The row is found by the payload's `rule_version` under the tenant's rule.
+/// Absent, it is inserted under the derived id with the rule's next version
+/// number (so a tenant that already holds `…0401` as R04 v1 gets `…0402` as
+/// v2, under 0004's `UNIQUE (rule_id, version_no)`). Present with a stale
+/// payload, the payload is rewritten under the kept id — how a kept id gains
+/// its binding. The binding rows are replaced when they differ: `work_type`
+/// is the entry's first bound token, NULL for any work.
+async fn write_seed_version(
+    tx: &mut Transaction<'_, Postgres>,
+    org: Uuid,
+    rule_id: Uuid,
+    entry: &wadl_engine::RuleEntry,
+) -> Result<bool, StoreError> {
+    let trigger = serde_json::to_value(entry)
+        .map_err(|e| StoreError::Backend(format!("rule payload: {e}")))?;
+    let existing: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+        "SELECT rule_version_id, trigger_expr FROM rule_version
+          WHERE rule_id = $1 AND trigger_expr->>'rule_version' = $2",
+    )
+    .bind(rule_id)
+    .bind(entry.rule_version.to_string())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let (rule_version_id, version_changed) = if let Some((id, stored)) = existing {
+        let stale = stored != trigger;
+        if stale {
+            sqlx::query("UPDATE rule_version SET trigger_expr = $2 WHERE rule_version_id = $1")
+                .bind(id)
+                .bind(&trigger)
+                .execute(&mut **tx)
+                .await?;
+        }
+        (id, stale)
+    } else {
+        let id = derived_id(org, "rule_version", entry.rule_version.as_uuid().as_bytes());
+        insert_version(tx, rule_id, id, entry, trigger).await?;
+        (id, true)
+    };
+    let intended = vec![(
+        entry.binding.work_types.first().cloned(),
+        entry.binding.categories.first().cloned(),
+    )];
+    let bound: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT work_type, category FROM rule_binding
+          WHERE rule_version_id = $1 AND class_id IS NULL ORDER BY work_type, category",
+    )
+    .bind(rule_version_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let binding_changed = bound != intended;
+    if binding_changed {
+        sqlx::query("DELETE FROM rule_binding WHERE rule_version_id = $1")
+            .bind(rule_version_id)
+            .execute(&mut **tx)
+            .await?;
         sqlx::query(
             "INSERT INTO rule_binding (rule_version_id, class_id, work_type, category)
-             VALUES ($1, NULL, 'hot_work', NULL)
-             ON CONFLICT DO NOTHING",
+             VALUES ($1, NULL, $2, $3)",
         )
         .bind(rule_version_id)
+        .bind(entry.binding.work_types.first())
+        .bind(entry.binding.categories.first())
         .execute(&mut **tx)
         .await?;
     }
-    Ok(RowOutcome::Created)
+    Ok(version_changed || binding_changed)
+}
+
+/// Inserts one seed `rule_version` row as the rule's next version.
+async fn insert_version(
+    tx: &mut Transaction<'_, Postgres>,
+    rule_id: Uuid,
+    rule_version_id: Uuid,
+    entry: &wadl_engine::RuleEntry,
+    trigger: serde_json::Value,
+) -> Result<(), StoreError> {
+    use wadl_engine::rules::Applies;
+
+    let state = match entry.state {
+        wadl_engine::DecisionState::Allow => "ALLOW",
+        wadl_engine::DecisionState::Warn => "WARN",
+        wadl_engine::DecisionState::Block => "BLOCK",
+        wadl_engine::DecisionState::Suspend => "SUSPEND",
+    };
+    let max_hops: Option<i32> = match &entry.applies {
+        Applies::SameSpace => None,
+        Applies::Coupled { max_hops, .. } => Some(i32::from(max_hops.get())),
+    };
+    let clearing = serde_json::json!({
+        "clearing_authority": entry.clearing_authority,
+        "hold_minutes": entry.hold.map(wadl_domain::units::Minutes::get),
+        "hold_from": entry.hold_from,
+    });
+    let next_version: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version_no), 0) + 1 FROM rule_version WHERE rule_id = $1",
+    )
+    .bind(rule_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO rule_version
+            (rule_version_id, rule_id, version_no, effective_from,
+             trigger_expr, max_hops, result_state, clearing_expr,
+             clearing_authority, waivable)
+         VALUES ($1, $2, $3, timestamptz '2026-01-01 00:00Z',
+                 $4, $5, $6::decision_state, $7, $8, $9)",
+    )
+    .bind(rule_version_id)
+    .bind(rule_id)
+    .bind(next_version)
+    .bind(trigger)
+    .bind(max_hops)
+    .bind(state)
+    .bind(clearing)
+    .bind(&entry.clearing_authority)
+    .bind(entry.waivable)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// The `source_system` the provenance row carries.

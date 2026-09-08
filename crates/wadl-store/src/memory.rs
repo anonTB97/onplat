@@ -16,7 +16,7 @@ use wadl_domain::ids::{ActivityId, CouplingTypeId, OrgId, SegmentId, VesselId, W
 use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::{HopDepth, ManHours};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
-use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
+use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleEntry, RuleSet};
 use wadl_plan::{Package, Segment, SpaceWork};
 
 use crate::error::StoreError;
@@ -325,6 +325,9 @@ pub struct InMemoryStore {
     /// The P6 field map per hull. Absent, the default convention reads
     /// the hull's exports.
     field_map: std::sync::RwLock<BTreeMap<VesselId, FieldMapDoc>>,
+    /// The safety authority's rule table per hull, compiled. Absent, the
+    /// seed is in force.
+    rule_table: std::sync::RwLock<BTreeMap<VesselId, RuleTableDoc>>,
     /// Every schedule import per hull, oldest first; the document of the
     /// newest [`MAX_RUN_DOCS`] kept, older ones summary and report only.
     /// Lock order, where several are taken: runs, then the schedule of
@@ -403,6 +406,51 @@ pub struct FieldMapDoc {
     pub label: String,
     /// The map, in the shape `wadl_ingest::field_map::FieldMap` serializes.
     pub map: serde_json::Value,
+}
+
+/// The safety authority's rule table as a stored document: the CSV's cells
+/// as they arrived, the entries they compiled to, the hash the signature is
+/// of, and the signature when there is one. The entries are what
+/// `rules_in_force` serves; the cells are what the door exports back, so
+/// the yard reads its own words. Version ids are content-addressed by the
+/// door and travel inside `entries`; the 0004 rule tables keep serving the
+/// seed and are not mirrored (migration 0019's header says so).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuleTableDoc {
+    /// `CVN73-rule-table.csv`, or the door's label.
+    pub label: String,
+    /// The header cells, as parsed (12 handoff + compile columns + version).
+    #[serde(default)]
+    pub header: Vec<String>,
+    /// Every data row's cells, file order, padded to the header.
+    pub rows: Vec<Vec<String>>,
+    /// The compiled entries, file order — the set in force.
+    pub entries: Vec<RuleEntry>,
+    /// The hash of the table's text the door computed; a signature is of
+    /// this, and a commit that changes it clears the signature.
+    pub table_hash: String,
+    /// The safety authority's signature, once given.
+    #[serde(default)]
+    pub signoff: Option<SignOff>,
+}
+
+/// The safety authority's signature on a rule table: who, when, of what.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SignOff {
+    /// The wall-clock instant of the signature.
+    pub signed_at_ms: i64,
+    /// The signer's person id (the `x-wadl-person` the proxy asserts).
+    pub signer_id: String,
+    /// The signer's display name as asserted.
+    pub signer_name: String,
+    /// What they signed, in their words.
+    pub statement: String,
+    /// The `table_hash` at signing — the document's, or the signature is void.
+    pub table_hash: String,
+    /// The version ids signed (every entry in force when `rows` was `null`).
+    pub rows: Vec<String>,
+    /// The ledger seq of the `RULE_TABLE_SIGNED` row.
+    pub ledger_seq: i64,
 }
 
 /// How many runs the in-memory store keeps the DOCUMENT of. Every run keeps
@@ -849,6 +897,7 @@ impl InMemoryStore {
                     .collect(),
             ),
             field_map: std::sync::RwLock::new(BTreeMap::new()),
+            rule_table: std::sync::RwLock::new(BTreeMap::new()),
             schedule_runs: std::sync::RwLock::new(BTreeMap::new()),
             served_run: std::sync::RwLock::new(BTreeMap::new()),
             geometry: std::sync::RwLock::new(BTreeMap::new()),
@@ -1930,6 +1979,59 @@ impl InMemoryStore {
             .cloned()
     }
 
+    /// The hull's rule table document, unscoped — for boot wiring.
+    #[must_use]
+    pub fn rule_table_of(&self, vessel: VesselId) -> Option<RuleTableDoc> {
+        self.rule_table
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
+
+    /// The hazards bearing on a decision at `at`: not cleared by `at`, or
+    /// cleared within the last `tail` minutes, each carrying `ended` = its
+    /// clearance instant. The same read contract as the PostgreSQL store's
+    /// `cleared_at IS NULL OR cleared_at + tail > $at`: a hazard cleared by
+    /// the read instant (and past the tail) stops being served, and its
+    /// record lives on in the clearance list and the ledger. A read at an
+    /// instant before the clearance still sees it, `ended` set to the later
+    /// instant — the time control must be able to show what was really held
+    /// then, and the engine prices a clearance that has not happened yet as
+    /// no clearance.
+    fn bearing_on(
+        &self,
+        vessel: VesselId,
+        at: Timestamp,
+        tail: wadl_domain::units::Minutes,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        let cleared = self
+            .cleared_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
+        let at_ms = at.epoch_millis();
+        let tail_ms = tail.get().saturating_mul(MS_PER_MIN);
+        Ok(self
+            .all_hazards(vessel)?
+            .into_iter()
+            .filter_map(|mut h| {
+                let ended = cleared
+                    .iter()
+                    .find(|c| {
+                        c.vessel == vessel && c.origin == h.origin.as_str() && c.kind == h.kind
+                    })
+                    .map(|c| c.cleared_at_ms);
+                match ended {
+                    Some(e) if e.saturating_add(tail_ms) <= at_ms => None,
+                    _ => {
+                        h.ended = ended.map(Timestamp::from_epoch_millis);
+                        Some(h)
+                    }
+                }
+            })
+            .collect())
+    }
+
     /// Whether `run_id` is the served run on the hull.
     fn is_served_run(&self, vessel: VesselId, run_id: Uuid) -> bool {
         self.served_run
@@ -2320,6 +2422,58 @@ impl Repositories for InMemoryStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&vessel);
         Ok(())
+    }
+
+    async fn rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<RuleTableDoc>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.rule_table_of(vessel))
+    }
+
+    async fn set_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: RuleTableDoc,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.rule_table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc);
+        Ok(())
+    }
+
+    async fn clear_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.rule_table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn sign_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        signoff: SignOff,
+    ) -> Result<RuleTableDoc, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let mut tables = self
+            .rule_table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let doc = tables.get_mut(&vessel).ok_or(StoreError::NotFound)?;
+        doc.signoff = Some(signoff);
+        Ok(doc.clone())
     }
 
     async fn commit_schedule_run(
@@ -2900,28 +3054,18 @@ impl Repositories for InMemoryStore {
         at: Timestamp,
     ) -> Result<Vec<Hazard>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
-        // Same read contract as the PostgreSQL store's `cleared_at IS NULL OR
-        // cleared_at > $at`: a hazard cleared by the read instant stops being
-        // served, and its record lives on in the clearance list and the
-        // ledger. A read at an instant before the clearance still sees it —
-        // the time control must be able to show what was really held then.
-        let cleared = self
-            .cleared_hazards
-            .lock()
-            .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
-        let at_ms = at.epoch_millis();
-        Ok(self
-            .all_hazards(vessel)?
-            .into_iter()
-            .filter(|h| {
-                !cleared.iter().any(|c| {
-                    c.vessel == vessel
-                        && c.origin == h.origin.as_str()
-                        && c.kind == h.kind
-                        && c.cleared_at_ms <= at_ms
-                })
-            })
-            .collect())
+        self.bearing_on(vessel, at, wadl_domain::units::Minutes::new(0))
+    }
+
+    async fn hazards_bearing_on(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        at: Timestamp,
+        tail: wadl_domain::units::Minutes,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.bearing_on(vessel, at, tail)
     }
 
     async fn raise_hazard(
@@ -2998,11 +3142,12 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<RuleSet, StoreError> {
         self.scoped_vessel(scope, vessel)?;
-        // The development seed. In production this is a query over `rule_binding`
-        // joined to `rule_version`, filtered to the versions whose effective
-        // range covers the evaluation instant and bound to this hull's class,
-        // work type and compartment category.
-        Ok(RuleSet::seed_usn_hot_work())
+        // The committed rule table when the hull has one; the development
+        // seed until then. Served whole — the call site narrows by work type,
+        // category and instant with `RuleSet::bound_to`.
+        Ok(self
+            .rule_table_of(vessel)
+            .map_or_else(RuleSet::seed_usn_hot_work, |doc| RuleSet::new(doc.entries)))
     }
 }
 
@@ -3130,6 +3275,167 @@ mod tests {
                 .edge_count(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn hazards_bearing_on_serves_the_fire_watch_tail_with_the_end_instant() {
+        let (store, w) = InMemoryStore::demo();
+        let scope = w.yard_scope();
+        let tail = wadl_domain::units::Minutes::new(30);
+        let minute = |m: i64| store.at_minutes(m);
+        let cleared_at = minute(60);
+        // A live fact carries no `ended`.
+        let before = store
+            .hazards_bearing_on(&scope, w.cvn73, minute(0), tail)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 2);
+        assert!(before.iter().all(|h| h.ended.is_none()));
+
+        store
+            .clear_hazard(
+                &scope,
+                w.cvn73,
+                "3-148-2-E",
+                HazardKind::EnergisedBus,
+                "tags hung, zero energy verified",
+                cleared_at.epoch_millis(),
+            )
+            .await
+            .unwrap();
+
+        // Read before the clearance: still served, `ended` set to the later
+        // instant — the engine reads that as not yet happened.
+        let scrubbed_back = store
+            .hazards_bearing_on(&scope, w.cvn73, minute(50), tail)
+            .await
+            .unwrap();
+        let bus = scrubbed_back
+            .iter()
+            .find(|h| h.origin.as_str() == "3-148-2-E")
+            .expect("served before its clearance");
+        assert_eq!(bus.ended, Some(cleared_at));
+
+        // Inside the tail: served with `ended`. Live (tail 0): gone.
+        let in_tail = store
+            .hazards_bearing_on(&scope, w.cvn73, minute(70), tail)
+            .await
+            .unwrap();
+        assert!(in_tail.iter().any(|h| h.origin.as_str() == "3-148-2-E"));
+        let live = store
+            .live_hazards(&scope, w.cvn73, minute(70))
+            .await
+            .unwrap();
+        assert!(!live.iter().any(|h| h.origin.as_str() == "3-148-2-E"));
+        assert_eq!(
+            live,
+            store
+                .hazards_bearing_on(
+                    &scope,
+                    w.cvn73,
+                    minute(70),
+                    wadl_domain::units::Minutes::new(0)
+                )
+                .await
+                .unwrap(),
+            "a zero tail is the live read"
+        );
+
+        // At the tail's end the fact stops bearing: half-open, at +90 exactly.
+        let at_end = store
+            .hazards_bearing_on(&scope, w.cvn73, minute(90), tail)
+            .await
+            .unwrap();
+        assert!(!at_end.iter().any(|h| h.origin.as_str() == "3-148-2-E"));
+        assert!(store
+            .hazards_bearing_on(&scope, w.cvn73, minute(89), tail)
+            .await
+            .unwrap()
+            .iter()
+            .any(|h| h.origin.as_str() == "3-148-2-E"));
+    }
+
+    #[tokio::test]
+    async fn rules_in_force_switch_to_the_stored_table_and_back_to_the_seed() {
+        let (store, w) = InMemoryStore::demo();
+        let scope = w.yard_scope();
+        let seed = RuleSet::seed_usn_hot_work();
+        assert!(store.rule_table(&scope, w.cvn73).await.unwrap().is_none());
+        assert_eq!(store.rules_in_force(&scope, w.cvn73).await.unwrap(), seed);
+
+        // A table with one row in force replaces the seed whole.
+        let only_r22: Vec<RuleEntry> = seed
+            .entries()
+            .iter()
+            .filter(|e| e.rule_code == "R22")
+            .cloned()
+            .collect();
+        let doc = RuleTableDoc {
+            label: "sitting.csv".to_owned(),
+            header: vec!["Rule ID".to_owned()],
+            rows: vec![vec!["R22".to_owned()]],
+            entries: only_r22.clone(),
+            table_hash: "abc".to_owned(),
+            signoff: None,
+        };
+        store
+            .set_rule_table(&scope, w.cvn73, doc.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.rules_in_force(&scope, w.cvn73).await.unwrap(),
+            RuleSet::new(only_r22)
+        );
+        assert_eq!(
+            store.rule_table(&scope, w.cvn73).await.unwrap(),
+            Some(doc.clone())
+        );
+        // Another hull is untouched.
+        assert_eq!(store.rules_in_force(&scope, w.cvn71).await.unwrap(), seed);
+        // The unassigned hull refuses every rule-table call.
+        assert!(matches!(
+            store.rule_table(&scope, w.ddg).await,
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_rule_table(&scope, w.ddg, doc.clone()).await,
+            Err(StoreError::NotFound)
+        ));
+
+        // Signing records the person on the document; without a document it
+        // is NotFound.
+        let signoff = SignOff {
+            signed_at_ms: 1,
+            signer_id: "Y-2001".to_owned(),
+            signer_name: "R. Alvarez".to_owned(),
+            statement: "signed at the sitting".to_owned(),
+            table_hash: "abc".to_owned(),
+            rows: vec!["00000000-0000-0000-0000-000000002201".to_owned()],
+            ledger_seq: 12,
+        };
+        let signed = store
+            .sign_rule_table(&scope, w.cvn73, signoff.clone())
+            .await
+            .unwrap();
+        assert_eq!(signed.signoff, Some(signoff.clone()));
+        assert_eq!(
+            store
+                .rule_table(&scope, w.cvn73)
+                .await
+                .unwrap()
+                .unwrap()
+                .signoff,
+            Some(signoff.clone())
+        );
+        assert!(matches!(
+            store.sign_rule_table(&scope, w.cvn71, signoff).await,
+            Err(StoreError::NotFound)
+        ));
+
+        // Revert → the seed.
+        store.clear_rule_table(&scope, w.cvn73).await.unwrap();
+        assert!(store.rule_table(&scope, w.cvn73).await.unwrap().is_none());
+        assert_eq!(store.rules_in_force(&scope, w.cvn73).await.unwrap(), seed);
     }
 
     #[tokio::test]

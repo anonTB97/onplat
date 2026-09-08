@@ -346,16 +346,19 @@ impl PgStore {
 // ============================================================================
 
 use wadl_domain::ids::{CouplingTypeId, SegmentId, WorkOrderId};
-use wadl_domain::units::{HopDepth, ManHours};
+use wadl_domain::units::{HopDepth, ManHours, Minutes};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
 use wadl_plan::{Package, Segment, SpaceWork};
 
 use crate::memory::{
     BudgetBook, CompartmentRegister, CouplingRegister, FieldMapDoc, GeometryRegister, ManningBook,
-    ScheduleOfRecord, YardClockDoc, ZoneRegister,
+    RuleTableDoc, ScheduleOfRecord, SignOff, YardClockDoc, ZoneRegister,
 };
 use crate::model::{ScheduleRun, ScheduleRunReport, ScheduleRunSummary};
+
+/// The `ingested_document.kind` of the safety authority's rule table (0019).
+const RULE_TABLE_KIND: &str = "rule_table";
 
 /// The jsonb payload of a `geometry_register` document row: the register minus
 /// its label (the label is the document row's own column).
@@ -603,6 +606,90 @@ impl PgStore {
         .await?;
         tx.commit().await?;
         Ok(row.map(|r| (r.get("label"), r.get("doc"))))
+    }
+
+    /// The hull's rule table document, if one is stored. The row's label is
+    /// the document's; the payload carries the rest (`header`, `rows`,
+    /// `entries`, `table_hash`, `signoff`) beside the schema stamp.
+    async fn rule_table_doc(
+        &self,
+        org: OrgId,
+        vessel: VesselId,
+    ) -> Result<Option<RuleTableDoc>, StoreError> {
+        self.document(org, vessel, RULE_TABLE_KIND)
+            .await?
+            .map(|(label, mut doc)| {
+                if let Some(obj) = doc.as_object_mut() {
+                    obj.insert("label".to_owned(), serde_json::Value::String(label));
+                }
+                serde_json::from_value(doc)
+                    .map_err(|e| StoreError::Backend(format!("rule_table doc: {e}")))
+            })
+            .transpose()
+    }
+
+    /// The hazards bearing on a decision at `at` — see
+    /// [`Repositories::hazards_bearing_on`]. Not cleared *as of the read
+    /// instant*, or cleared within the tail: a clearance stamped later than
+    /// `at` has not happened yet from that instant's point of view, so the
+    /// hazard is served (with `ended` set to that later instant, which the
+    /// engine reads as not yet) and the scrubbed board shows the hold that
+    /// was really there. `cleared_at + tail > $2` is that rule in SQL; with
+    /// a zero tail it is the live filter as it always was.
+    async fn bearing_on(
+        &self,
+        org: OrgId,
+        vessel: VesselId,
+        at: Timestamp,
+        tail: Minutes,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        let mut tx = self.with_tenant(org).await?;
+        let at = chrono::DateTime::from_timestamp_millis(at.epoch_millis())
+            .ok_or_else(|| StoreError::Backend("read instant out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT compartment_no, kind, raised_at, label, cleared_at
+               FROM hazard
+              WHERE vessel_id = $1
+                AND (cleared_at IS NULL
+                     OR cleared_at + make_interval(mins => $3::int) > $2)
+              ORDER BY raised_at",
+        )
+        .bind(vessel.as_uuid())
+        .bind(at)
+        .bind(i32::try_from(tail.get()).unwrap_or(i32::MAX))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(Hazard {
+                    origin: CompartmentNo::new(row.get::<String, _>("compartment_no")),
+                    kind: hazard_kind(&row.get::<String, _>("kind"))?,
+                    since: ts(row.get("raised_at")),
+                    label: row.get("label"),
+                    ended: row
+                        .get::<Option<chrono::DateTime<chrono::Utc>>, _>("cleared_at")
+                        .map(ts),
+                })
+            })
+            .collect()
+    }
+
+    /// Writes a rule table document whole (label on the row, the rest as
+    /// the payload).
+    async fn put_rule_table(
+        &self,
+        org: OrgId,
+        vessel: VesselId,
+        doc: &RuleTableDoc,
+    ) -> Result<(), StoreError> {
+        let mut payload = serde_json::to_value(doc)
+            .map_err(|e| StoreError::Backend(format!("rule_table doc: {e}")))?;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.remove("label");
+        }
+        self.put_document(org, vessel, RULE_TABLE_KIND, &doc.label, payload)
+            .await
     }
 
     /// Replaces (or installs) an ingested document — the all-or-nothing unit.
@@ -1021,6 +1108,51 @@ impl Repositories for PgStore {
         self.pg_get_vessel(scope, vessel).await?;
         self.delete_document(scope.org, vessel, "p6_field_map")
             .await
+    }
+
+    async fn rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<RuleTableDoc>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.rule_table_doc(scope.org, vessel).await
+    }
+
+    async fn set_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: RuleTableDoc,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.put_rule_table(scope.org, vessel, &doc).await
+    }
+
+    async fn clear_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, RULE_TABLE_KIND)
+            .await
+    }
+
+    async fn sign_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        signoff: SignOff,
+    ) -> Result<RuleTableDoc, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut doc = self
+            .rule_table_doc(scope.org, vessel)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        doc.signoff = Some(signoff);
+        self.put_rule_table(scope.org, vessel, &doc).await?;
+        Ok(doc)
     }
 
     async fn commit_schedule_run(
@@ -1674,35 +1806,19 @@ impl Repositories for PgStore {
         at: Timestamp,
     ) -> Result<Vec<Hazard>, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
-        let mut tx = self.with_tenant(scope.org).await?;
-        // Not cleared *as of the read instant*: a clearance stamped later than
-        // `at` has not happened yet from that instant's point of view, so the
-        // hazard is served and the scrubbed board shows the hold that was
-        // really there. `cleared_at > $2` is that rule in SQL.
-        let at = chrono::DateTime::from_timestamp_millis(at.epoch_millis())
-            .ok_or_else(|| StoreError::Backend("read instant out of range".to_owned()))?;
-        let rows = sqlx::query(
-            "SELECT compartment_no, kind, raised_at, label
-               FROM hazard
-              WHERE vessel_id = $1 AND (cleared_at IS NULL OR cleared_at > $2)
-              ORDER BY raised_at",
-        )
-        .bind(vessel.as_uuid())
-        .bind(at)
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(Hazard {
-                    origin: CompartmentNo::new(row.get::<String, _>("compartment_no")),
-                    kind: hazard_kind(&row.get::<String, _>("kind"))?,
-                    since: ts(row.get("raised_at")),
-                    label: row.get("label"),
-                    ended: None,
-                })
-            })
-            .collect()
+        self.bearing_on(scope.org, vessel, at, Minutes::new(0))
+            .await
+    }
+
+    async fn hazards_bearing_on(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        at: Timestamp,
+        tail: Minutes,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.bearing_on(scope.org, vessel, at, tail).await
     }
 
     async fn clear_hazard(
@@ -1793,10 +1909,18 @@ impl Repositories for PgStore {
         vessel: VesselId,
     ) -> Result<RuleSet, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
+        // The committed rule table, when the hull has one, is the set in
+        // force; its entries carry their content-addressed ids.
+        if let Some(doc) = self.rule_table_doc(scope.org, vessel).await? {
+            return Ok(RuleSet::new(doc.entries));
+        }
         let mut tx = self.with_tenant(scope.org).await?;
-        // The payload contract from 0011: `trigger_expr` IS the engine's
-        // RuleEntry, so this is a deserialize, not a reconstruction. Bindings
-        // with no class apply to every hull; effective_to NULL means in force.
+        // Else the seed rows: the payload contract from 0011: `trigger_expr`
+        // IS the engine's RuleEntry, so this is a deserialize, not a
+        // reconstruction. Bindings with no class apply to every hull;
+        // effective_to NULL means in force (a retired seed version has it
+        // set). Work type and category are the entry's own binding, read by
+        // the call site through `RuleSet::bound_to`, not a SQL filter.
         let rows = sqlx::query(
             "SELECT rv.trigger_expr
                FROM rule_binding b

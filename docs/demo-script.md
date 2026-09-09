@@ -210,8 +210,8 @@ Role menu → **Safety**. The front door is **Conflicts & Risk**.
   rows read `via: cli`).
 - **Safety signs the table after the clearance.** Still as Safety, open
   **Data Sources** and find the **Rule table** card. At boot it reads
-  `SEED` — *10 entries in force from 10 rows*, *unsigned — the seed is in
-  force; the safety authority signs a committed table*, and the work-type
+  `SEED` — *10 entries in force from 10 rows (7 rule ids)*, *unsigned — the
+  seed is in force; the safety authority signs a committed table*, and the work-type
   line in amber: *unbound: coating, electrical, inspection, insulation,
   mechanical, rigging — judged by the any-work rows only*. **Sign this
   table** is disabled with the reason (the seed is not signed here). Switch
@@ -220,10 +220,12 @@ Role menu → **Safety**. The front door is **Conflicts & Risk**.
   22 columns (Export CSV hands out the same file). The staged bar reads
   *10 entries in force from 10 rows · replaces seed_usn_hot_work (seed) ·
   0 spaces change state right now*, and the fold under the card lists every
-  row — R03 BLOCK same space, hot_work, hold 480; R04 SUSPEND
-  deck_penetration 1 hop, any work, *hold 30 min from the permit's close*,
-  *fires on 8 spaces*; R09 twice, SUSPEND for hot work and WARN for the
-  rest — each with the seed's version id. Confirm: the card reads
+  row — R03-0 BLOCK same space, hot_work, hold 480 min, *fires on 9 spaces
+  (7 activities)*; R04 SUSPEND deck_penetration 1 hop, any work, *hold 30
+  min from the permit's close*, *fires on 49 spaces (589 activities)*; R09
+  twice, SUSPEND for hot work and WARN for the rest, *fires on nothing
+  today* with the Y2 finding above it — each with the seed's version id
+  (`…0402`). Confirm: the card reads
   `INGESTED`, *unsigned — committed, awaiting the safety authority's
   signature*, and the Sequence Board's **RULES** chip reads
   *CVN73-rule-table.csv unsigned* in amber. Planner's **Sign this table**

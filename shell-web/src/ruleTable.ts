@@ -18,9 +18,9 @@ export const tokenWord = (token: string): string => token.replace(/_/g, " ");
 
 /** `same space` · `deck_penetration 1 hop` · `exhaust_trunk 2 hops`. */
 export function appliesWord(applies: RuleEntryReport["applies"]): string {
-  if (applies === "same_space") return "same space";
-  if (typeof applies === "object" && applies !== null && "coupled" in applies) {
-    const c = (applies as { coupled: { code: string; max_hops: number } }).coupled;
+  if (applies === "SameSpace") return "same space";
+  if (typeof applies === "object" && applies !== null && "Coupled" in applies) {
+    const c = applies.Coupled;
     return `${c.code} ${c.max_hops} hop${c.max_hops === 1 ? "" : "s"}`;
   }
   return "reach unreadable";
@@ -127,15 +127,21 @@ export function workTypeLine(wt: WorkTypeAudit): { text: string; unbound: boolea
   return { text: head + tail + unseen, unbound };
 }
 
-/** `10 entries in force from 10 rows` · `10 entries in force from 8 of 20 rows`. */
+/**
+ * `10 entries in force from 10 rows (7 rule ids)` ·
+ * `2 entries in force from 2 of 20 rows (2 rule ids) · 18 not compiled, kept on file with their reason`.
+ * A row is one line of the CSV (an entry once compiled); a rule id may own
+ * several — R03 same-space and R03 one deck up are two rows of one rule.
+ */
 export function inForceLine(info: Pick<RuleTableInfo, "rows" | "rows_total" | "rows_in_force">): string {
-  const compiled = info.rows.filter((r) => r.compiled).length;
-  const ruleIds = new Set(info.rows.filter((r) => r.compiled).map((r) => r.rule)).size;
-  const rowsWord = ruleIds === info.rows_total ? `${info.rows_total} rows` : `${ruleIds} of ${info.rows_total} rows`;
-  const notCompiled = info.rows.filter((r) => !r.compiled).length;
+  const compiledRows = info.rows.filter((r) => r.compiled);
+  const notCompiled = info.rows.length - compiledRows.length;
+  const compiledLines = new Set(compiledRows.map((r) => r.line)).size;
+  const ruleIds = new Set(compiledRows.map((r) => r.rule)).size;
+  const rowsWord = compiledLines === info.rows_total ? `${info.rows_total} rows` : `${compiledLines} of ${info.rows_total} rows`;
   return (
-    `${info.rows_in_force} entr${info.rows_in_force === 1 ? "y" : "ies"} in force from ${rowsWord}` +
-    (compiled !== info.rows_in_force ? ` (${compiled} compiled, the rest outside their effective range)` : "") +
+    `${info.rows_in_force} entr${info.rows_in_force === 1 ? "y" : "ies"} in force from ${rowsWord} (${ruleIds} rule id${ruleIds === 1 ? "" : "s"})` +
+    (compiledRows.length !== info.rows_in_force ? ` · ${compiledRows.length} compiled, the rest outside their effective range` : "") +
     (notCompiled > 0 ? ` · ${notCompiled} not compiled, kept on file with their reason` : "")
   );
 }
@@ -149,6 +155,11 @@ export function statusOf(info: Pick<RuleTableInfo, "source" | "signoff">): { lab
 
 /** The first eight of a hash — enough to read, not enough to mistake for the whole. */
 export const shortHash = (hash: string): string => hash.slice(0, 8);
+
+/** A version id as the docs and traces spell it: a seed id by its tail
+ *  (`…0402`), a content-addressed one by its first eight. */
+export const shortVersion = (id: string): string =>
+  id.startsWith("00000000-0000-0000-0000-") ? `…${id.slice(-4)}` : shortHash(id);
 
 /**
  * The statement the authority signs, written for them to edit: who, what
@@ -188,7 +199,7 @@ export function tableRows(rows: RowReport[]): RuleRowCells[] {
     work: r.entry ? workWord(r.entry.work_types) : "—",
     hold: r.entry ? holdWord(r.entry) : "—",
     fires: r.compiled ? firesWord(r.fires_on) : "—",
-    version: r.version ? shortHash(r.version) : "—",
+    version: r.version ? shortVersion(r.version) : "—",
     compiled: r.compiled,
     whyNot: r.why_not,
   }));

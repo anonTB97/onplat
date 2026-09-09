@@ -1758,7 +1758,8 @@ export interface RuleDoorFinding {
 /** What one compiled row does: the entry as the engine holds it. */
 export interface RuleEntryReport {
   hazard: string;
-  applies: "same_space" | { coupled: { code: string; max_hops: number } } | Record<string, unknown>;
+  /** The engine's reach, as serde spells it: `"SameSpace"` or `{ Coupled: { code, max_hops } }`. */
+  applies: "SameSpace" | { Coupled: { code: string; max_hops: number } };
   state: string;
   hold: number | null;
   hold_from: "raise" | "end";

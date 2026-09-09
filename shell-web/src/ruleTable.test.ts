@@ -21,7 +21,7 @@ const r04: RowReport = {
   why_not: null,
   entry: {
     hazard: "hot_work_live",
-    applies: { coupled: { code: "deck_penetration", max_hops: 1 } },
+    applies: { Coupled: { code: "deck_penetration", max_hops: 1 } },
     state: "SUSPEND",
     hold: 30,
     hold_from: "end",
@@ -39,6 +39,7 @@ const r03: RowReport = {
   ...r04,
   rule: "R03",
   ordinal: 1,
+  line: 4,
   name: "Coating cure",
   entry: {
     ...r04.entry!,
@@ -82,7 +83,7 @@ describe("rowLine", () => {
   it("lays the report out as table rows, file order kept", () => {
     const rows = tableRows([r04, r03, r08]);
     expect(rows.map((r) => r.ref)).toEqual(["R04-0", "R03-1", "R08-0"]);
-    expect(rows[0]).toMatchObject({ state: "SUSPEND", reach: "deck_penetration 1 hop", work: "any work", version: "00000000" });
+    expect(rows[0]).toMatchObject({ state: "SUSPEND", reach: "deck_penetration 1 hop", work: "any work", version: "…0402" });
     expect(rows[2]).toMatchObject({ compiled: false, state: "—", whyNot: r08.why_not });
   });
 });
@@ -168,9 +169,12 @@ describe("workTypeLine", () => {
 
 describe("inForceLine and the statement", () => {
   it("counts entries, rule ids and rows not compiled", () => {
-    expect(inForceLine({ rows: [r04, r03], rows_total: 2, rows_in_force: 2 })).toBe("2 entries in force from 2 rows");
-    expect(inForceLine({ rows: [r04, r03, r08], rows_total: 20, rows_in_force: 2 })).toBe(
-      "2 entries in force from 2 of 20 rows · 1 not compiled, kept on file with their reason",
+    expect(inForceLine({ rows: [r04, r03], rows_total: 2, rows_in_force: 2 })).toBe("2 entries in force from 2 rows (2 rule ids)");
+    expect(inForceLine({ rows: [r04, { ...r03, rule: "R04", line: 7 }, r08], rows_total: 20, rows_in_force: 2 })).toBe(
+      "2 entries in force from 1 of 20 rows (1 rule id) · 1 not compiled, kept on file with their reason",
+    );
+    expect(inForceLine({ rows: [r04, r03], rows_total: 2, rows_in_force: 1 })).toBe(
+      "1 entry in force from 2 rows (2 rule ids) · 2 compiled, the rest outside their effective range",
     );
   });
 

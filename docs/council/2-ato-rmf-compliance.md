@@ -1,22 +1,19 @@
 # Council 2 — ATO / RMF compliance lead: IL5 and NNPI posture
 
-Reviewed on branch `claude/kickoff-from-docs-arhiib` at `3b1df73` (working
-tree carries S14 sitting-B edits in `rule_table.rs`, not read). Nothing was
-implemented. Measurements in §1.5 were run against `target/release/serve`
-(built 2026-09-07; `hardening.rs` and `ledger.rs` are unchanged since, so the
-audit-line and chain claims are current; `/health` on that binary predates
-the S15 stamp). Earlier council documents: `1-chief-systems-architect.md`
-(tensions in §4) and `7-hull-grid-template.md` (its HG-4 is carried here by
-control ID, as it asked).
+Reviewed on `claude/kickoff-from-docs-arhiib` at `3b1df73` (working tree
+carries S14 sitting-B edits in `rule_table.rs`, not read). Nothing was
+implemented. §1.5 was measured against `target/release/serve` (built
+2026-09-07; `hardening.rs` and `ledger.rs` unchanged since, so the audit-line
+and chain claims are current; its `/health` predates the S15 stamp). Earlier
+council documents: `1-chief-systems-architect.md` (tensions in §4) and
+`7-hull-grid-template.md` (its HG-4 is carried here by control ID, as asked).
 
-Two bars, kept apart throughout. **IL5** is the CUI/mission bar: FIPS-validated
-crypto on every hop and at rest, STIG'd platform, DoD identity and session
-policy, audit that covers access as well as errors. **NNPI** is stricter and
-different in kind: it is *need-to-know*, not role. A Planner assigned to the
-hull is not thereby entitled to the reactor compartments' arrangement; the
-product's role → capability matrix has no axis for that at all. §1.4 designs
-both readings of the NNPI scope; neither is assumed until the customer
-answers §5 Q1.
+Two bars, kept apart. **IL5** is the CUI bar: validated crypto on every hop
+and at rest, a STIG'd platform, DoD identity and session policy, audit that
+covers access as well as errors. **NNPI** is different in kind: *need-to-know*,
+not role — a Planner assigned to the hull is not thereby entitled to the
+reactor compartments' arrangement, and the role → capability matrix has no
+axis for that. §1.4 designs both readings; neither is assumed until §5 Q1.
 
 ## 1. Current state
 
@@ -53,27 +50,24 @@ answers §5 Q1.
   `hardening.rs:64-78` layer order; `:104` logs every `/api` request and every
   non-2xx; shed 503s included (`:135-151` sits inside). AU-2/AU-12 for the
   request grain.
-- **No egress, no TLS stack, no config file, no unsafe.** `Cargo.lock` has no
-  `rustls`/`native-tls`/`openssl`; CSP `connect-src 'self'`
-  (`hardening.rs:238-240`); env-only config enumerated (`serve.rs:13-47`);
-  `unsafe_code = "forbid"`, panics denied (`Cargo.toml:93-108`). CM-6/CM-7/
-  SA-11/SI-16 with CI as the enforcer.
-- **Supply chain and build integrity are already evidence-shaped**:
-  `cargo-deny` (`ci.yml:262-269`), SPDX SBOM (`:271-282`), vendored offline
-  build (`:284-300`), reproducibility on dispatch (`:302-323`), `--locked`
-  everywhere. RA-5, SA-11, CM-8, SR-3/SR-4 (signing is POAM-5).
-- **The paperwork is generated and drift-checked**: `gen-ssp --check` in CI
-  (`ci.yml:58-59`); the self-assessment runs on every build (`:61-81`);
+- **No egress, no TLS stack, no config file, no unsafe; supply chain is
+  evidence-shaped.** `Cargo.lock` has no `rustls`/`native-tls`/`openssl`; CSP
+  `connect-src 'self'` (`hardening.rs:238-240`); env-only config
+  (`serve.rs:13-47`); `unsafe_code = "forbid"`, panics denied
+  (`Cargo.toml:93-108`); `cargo-deny` (`ci.yml:262-269`), SPDX SBOM
+  (`:271-282`), vendored offline build (`:284-300`), reproducibility on
+  dispatch (`:302-323`), `--locked` everywhere. CM-6/7, SA-11, SI-16, RA-5,
+  CM-8, SR-3/4 (signing is POAM-5).
+- **The paperwork is generated and drift-checked** (`gen-ssp --check`,
+  `ci.yml:58-59`; self-assessment every build, `:61-81`) and
   `docs/ato-package.md` is honest about what is missing (§2.1, §2.3, §2.9,
-  §2.11, A17, A21). CA-2/CA-7 and PL-2 inputs.
-- **Host sandbox** (`deploy/wadl.service:41-84`) covers SC-39, CM-7 and most
-  of the OS-STIG "application account" items: no capabilities, no new
-  privileges, strict filesystem, seccomp allow-list, `ProtectClock`.
-- **The domain stores no credential and no PII beyond the proxy's subject.**
-  `person` (`0001:67-77`) is never written by the store (no `INSERT INTO
-  person` in `crates/`); the binary holds no session, sets no cookie
-  (`identity-proxy-contract.md:17-20`); the shell persists only the demo role
-  (`Chrome.tsx:171,182`).
+  §2.11, A17, A21). CA-2/CA-7, PL-2 inputs.
+- **Host sandbox** (`deploy/wadl.service:41-84`): SC-39, CM-7 and most
+  OS-STIG "application account" items.
+- **No credential and no PII beyond the proxy's subject.** `person`
+  (`0001:67-77`) is never written (no `INSERT INTO person` in `crates/`); no
+  session, no cookie (`identity-proxy-contract.md:17-20`); the shell persists
+  only the demo role (`Chrome.tsx:171,182`).
 
 ### 1.2 Missing — not disqualifying, but each is a control an assessor will ask for by number
 
@@ -85,49 +79,46 @@ answers §5 Q1.
   `docs/runbook.md:299-301` defers the request id to after the pilot.
 - **AU-5 (response to audit failure) is undefined, and the measured
   behaviour is the worst shape.** The audit write is `println!`
-  (`hardening.rs:105`), which blocks the async worker on a slow pipe and
-  *panics* on a dead one. Measured (§1.5): with the stdout reader gone, seven
-  requests were answered 200 with their audit lines lost silently, the eighth
-  got an empty reply from a panicking `tokio-rt-worker`, and the process kept
-  serving. No counter, no stderr line, no 503, no `/health` change. In a
-  container (council 1 §4.3) the log pipeline *is* a pipe.
+  (`hardening.rs:105`): it blocks the async worker on a slow pipe and
+  *panics* on a dead one. Measured (§1.5): with the stdout reader gone,
+  seven requests answered 200 with their lines lost silently, the eighth got
+  an empty reply from a panicking `tokio-rt-worker`, and the process kept
+  serving. No counter, no stderr line, no 503. In a container the log
+  pipeline *is* a pipe (council 1 §4.3).
 - **AU-2 at data-access grain.** Bulk reads are logged at path grain only:
   `GET …/compartments` returned 12 "Reactor plant (restricted)" spaces to a
-  `reader` with one line saying `/compartments` (§1.5). Adequate for CUI;
-  not for NNPI, where disclosure of a marked record must be auditable per
-  record. Query strings are excluded by design (`hardening.rs:86`), so
-  `as_of` — *which instant was read* — is not recorded either.
+  `reader` with one line saying `/compartments` (§1.5). Adequate for CUI, not
+  for NNPI, where disclosure of a marked record must be auditable per record.
+  Query strings are excluded by design (`hardening.rs:86`), so `as_of` — which
+  instant was read — is not recorded either.
 - **AU-9(3)/AU-10 are weaker than the SSP reads.** The chain is an unkeyed
-  SHA-256 over prior hash + fields (`ledger.rs:81-96, 102-125`). Anyone who
-  can UPDATE `audit_entry` — the owner role, which `wadl migrate`, `backup.sh`
-  and `verify-ledger` all use — can rewrite any row *and every hash after it*
-  consistently; verify passes. The chain detects tampering by the app role
-  (which cannot UPDATE anyway) and by accident; it does not detect a
-  privileged insider. `ssp-input.md:182-192` says "non-repudiation of recorded
-  decisions"; the honest statement is "integrity against non-privileged
-  modification". No anchor of the chain head leaves the database.
-- **SC-13 has no statement, and the crypto in the binary is not
-  FIPS-validated.** In the release tree: RustCrypto `sha2 0.10.9`
-  (`Cargo.lock:1550`) for the ledger and activity ids; under the `postgres`
-  feature `md-5`, `hmac`, `sha2`, `stringprep` (`:1062, :715, :1845`) for
-  SCRAM-SHA-256 to PostgreSQL; `rand`/`getrandom` for uuid v7. None is a
-  validated module. `docs/ato-package.md:261` (A21) already names the
-  statement as missing. For IL5 the AO will ask what protects CUI: the
-  answer today is "nothing in the binary; the terminator and the disk" —
-  which is acceptable *if written*, and the ledger chain is then a checksum,
+  SHA-256 (`ledger.rs:81-96, 102-125`). Anyone who can UPDATE `audit_entry`
+  — the owner role, which `wadl migrate`, `backup.sh` and `verify-ledger`
+  all use — can rewrite a row *and every hash after it* consistently, and
+  verify passes. It detects the app role (which cannot UPDATE anyway) and
+  accidents, not a privileged insider. `ssp-input.md:182-192` says
+  "non-repudiation"; the honest claim is "integrity against non-privileged
+  modification". No chain head leaves the database.
+- **SC-13 has no statement, and nothing in the binary is FIPS-validated.**
+  RustCrypto `sha2 0.10.9` (`Cargo.lock:1550`) for the ledger and activity
+  ids; under `postgres`, `md-5`, `hmac`, `sha2`, `stringprep` (`:1062, :715,
+  :1845`) for SCRAM-SHA-256; `rand`/`getrandom` for uuid v7.
+  `docs/ato-package.md:261` (A21) names the statement as missing. The AO
+  will ask what protects CUI: today "nothing in the binary; the terminator
+  and the disk" — acceptable *if written*, with the chain then a checksum,
   not a cryptographic control.
 - **SC-28 has no statement.** The binary encrypts nothing at rest (correct).
   PostgreSQL at rest is the platform's (LUKS/dm-crypt under a FIPS kernel, or
   TDE); nothing in `deploy/README.md` or `docs/runbook.md` requires it.
   `scripts/backup.sh:63` writes `pg_dump -Fc` in the clear with a sha256
-  sidecar — integrity, not confidentiality (CP-9(8), SC-28(1)). `pgcrypto`
-  is created (`0001:27`) and used only for `gen_random_uuid()`.
+  sidecar — integrity, not confidentiality (CP-9(8), SC-28(1)); `pgcrypto`
+  (`0001:27`) serves only `gen_random_uuid()`.
 - **IA-5 / SC-12.** The proxy key and the database password are environment
   values (`auth.rs:102-104`; `serve.rs:78`); the unit file's credential hint
   does not work (council 1 §1.2, `deploy/wadl.service:36-39`) and its
-  fallback line is a static authenticator in a config file (IA-5(7)). There
-  is no rotation path: one key, compared exactly; rotating it means restarting
-  binary and proxy in lockstep.
+  fallback line is a static authenticator in a config file (IA-5(7)). No
+  rotation path: one key, compared exactly; rotating it restarts binary and
+  proxy in lockstep.
 - **AC-8 (system use notification).** No DoD consent banner anywhere in the
   shell (`grep -ri "consent\|government information system" shell-web/src`
   is empty). The terminator can show it at CAC login; the ASD STIG expects
@@ -148,37 +139,28 @@ answers §5 Q1.
 - **`/health` is open and discloses** identity mode, backend, schema version
   and (at HEAD) commit and build instant (`handlers.rs:116-138`, measured
   §1.5). Council 1 A4/A17 cover the split; the disclosure part is CM-8/SI-11.
-- **PostgreSQL STIG items the app must not fight**: `pgaudit` on owner-role
-  DML against `audit_entry` (the one path around append-only), `log_connections`,
-  and the role contract (council 1 A18) — none written down.
-- **Container STIG evidence: none**, because no image exists (council 1
-  §1.2). Iron Bank base, non-root uid, read-only rootfs, no shell, dropped
-  capabilities, a scan report in CI — all to build, all on council 1's list.
-- **CP-9/CP-10 are real** (`scripts/backup.sh`, `restore.sh`,
-  `restore-drill.sh`) but absent from the SSP input (`ssp-input.md` has no CP
-  family); backup encryption above.
-- **SI-4**: no metrics, no counters, no health signal beyond store
-  reachability; AU-6 review tooling is `jq` over the journal
-  (`deploy/README.md:133`).
+- **Nothing written for the platform's STIG half**: no container image, so
+  no container evidence (council 1 §1.2); no PostgreSQL contract naming
+  `pgaudit` on owner-role DML against `audit_entry` (the one path around
+  append-only) or `log_connections`.
+- **CP-9/CP-10 exist** (`scripts/backup.sh`, `restore.sh`,
+  `restore-drill.sh`) but the SSP input has no CP family. **SI-4**: no
+  counters; AU-6 review is `jq` over the journal (`deploy/README.md:133`).
 
 ### 1.3 Disqualifying for IL5/NNPI, or for carrier-scale concurrent use
 
 1. **NNPI has no enforcement axis and no data model, and the reference hull
    already contains what NNPI would look like.** `TenantScope` is
-   `{org, assigned_vessels, actor}` (`scope.rs:95-102`); assignment is
-   per hull (`:125-127`) and enforced in code only (`pg_repo.rs:133-137`)
-   because "a policy cannot express assignment"; capabilities are per role.
-   Nothing can say "this person may see the hull but not compartments
-   4-116-0-E, 4-152-0-E and their arrangement". The served documents are
-   one jsonb row per (hull, kind) (`0011:69-78`; `pg_repo.rs:476`), so
-   compartment-level RLS is not expressible on them either. Measured: a
-   `reader` receives every reactor-plant space by name in `/compartments`
-   and `/deck-states`, and `/compartments/4-116-0-E/state` is 200. If the
-   yard's register, schedule or hazard log carries NNPI, this system cannot
-   be accredited to hold it as built. Not a rewrite — the seam
-   (`auth.rs::resolve`) and the RLS pattern are the right places for a
-   clearance axis (§1.4 reading A) — but it is architecture, not polish, and
-   the customer's answer decides whether it is built at all.
+   `{org, assigned_vessels, actor}` (`scope.rs:95-102`); assignment is per
+   hull, in code only (`pg_repo.rs:133-137`); capabilities are per role.
+   Nothing can say "this person may see the hull but not 4-116-0-E and its
+   arrangement". Served documents are one jsonb row per (hull, kind)
+   (`0011:69-78`; `pg_repo.rs:476`), so compartment-level RLS is not
+   expressible on them. Measured: a `reader` receives every reactor-plant
+   space by name (§1.5). If the yard's documents carry NNPI, this system
+   cannot be accredited to hold it as built. Not a rewrite — the seam and
+   the RLS pattern are the right places for a clearance axis (§1.4 A) — but
+   architecture, and the customer's answer decides whether it is built.
 2. **Hull drawings and a real hull's register are served unscoped or would
    be.** Council 7 HG-4: 9.9 MB of deck plates under `shell-web/public/decks`
    are served by `static_site` (`hardening.rs:276-346`) with no `Caller` —
@@ -198,16 +180,14 @@ answers §5 Q1.
 
 ### 1.4 NNPI — two readings, both designed, neither assumed
 
-**What could carry NNPI here.** The register (names, arrangement and
-adjacency of reactor-plant spaces: `zone-scheme.md:44`, 12 rows in the
-reference register), the geometry register (extents), the coupling register
-(paths through the plant), the schedule of record (reactor-plant work
-descriptions, sequence and dates), hazards (`energised_bus` in a plant
-space), and — derivatively — the ledger `detail` (`handlers.rs:1577, 1661`
-write compartment and label into it) and findings that cross a plant space.
-Compartment *numbers* alone are generally not NNPI; the arrangement, the
-descriptions and the aggregate may be. The NNPI authority decides, not this
-document (Q1, Q2).
+**What could carry NNPI here.** The register (names, arrangement, adjacency
+of reactor-plant spaces: `zone-scheme.md:44`, 12 rows in the reference
+register), geometry (extents), couplings (paths through the plant), the
+schedule of record (reactor-plant work descriptions, sequence, dates),
+hazards in a plant space, and derivatively the ledger `detail`
+(`handlers.rs:1577, 1661` write compartment and label) and findings that
+cross a plant space. Placards alone are generally not NNPI; the arrangement,
+the descriptions and the aggregate may be. The NNPI authority decides (Q1, Q2).
 
 **Reading A — NNPI in-app, need-to-know enforced in RLS and in the shell.**
 1. Identity: a seventh header `x-wadl-clearances` (comma-separated tokens,
@@ -243,12 +223,11 @@ pattern.
 **Reading B — metadata only; NNPI content stays outside.** The system holds
 placards, deck, zone, frame, trade, activity ids and dates; no descriptive
 label, drawing or arrangement for marked spaces. The register gains a
-`handling` column; a marked row's `name` is refused at the door unless it
-equals the placard or a customer-approved neutral string; a door lint
-(`WADL_HANDLING_LINT=<file>`) refuses any document line matching the
-authority's word list (typed refusal with the line number, like every other
-door finding). Deck plates for a real hull are not shipped. Effort ~10 h.
-The accreditation is then IL5/CUI; the NNPI authority still has to concur
+`handling` column; a marked row's `name` must equal the placard or a
+customer-approved neutral string; a door lint (`WADL_HANDLING_LINT=<file>`)
+refuses any document line matching the authority's word list, as a typed
+refusal with the line number. Deck plates for a real hull are not shipped.
+~10 h. The accreditation is then IL5/CUI; the NNPI authority still concurs
 that placards + zones + reactor-work dates are not NNPI in aggregate (Q2).
 
 Either way: HG-4 (§1.3.2) is required, and the customer must confirm scope
@@ -321,10 +300,9 @@ Class: **ATO** blocks accreditation; **crash/perf** loses data or falls over;
 | R17 | `/health` counters: `shed`, `timeouts`, `audit_failures`, `pool_wait_ms` | UX | 2 | R3, council 1 A6 |
 | R18 | Database contract: owner role only for `migrate`/`backup`/`verify`; `pgaudit` on `audit_entry` DML by the owner; `log_connections` | ATO | 1 | council 1 A18 |
 
-Order: R1–R4 and R11 first (paper and the two measured faults, nothing to
-wait for); R5–R8 with council 1 A5; R10a as soon as Q1 is answered and
-before any real register is loaded; R9, R13–R16 with the container work;
-R10b only on reading A.
+Order: R1–R4 and R11 first (paper and the two measured faults); R5–R8 with
+council 1 A5; R10a as soon as Q1 is answered and before any real register
+is loaded; R9, R13–R16 with the container work; R10b only on reading A.
 
 ## 3. Concrete changes
 
@@ -357,53 +335,45 @@ R10b only on reading A.
 ## 4. Tensions with earlier personas and proposed resolutions
 
 1. **Council 1 §4.1 — TLS out of the default binary, mesh/loopback as the
-   accepted shapes.** Agreed on the default. Where my bar is stricter: any
-   TLS the binary ever carries must be a validated module, so `postgres-tls`
-   must be `rustls` over `aws-lc-rs` with the `fips` feature, never `ring`
-   (council 1 named this; I make it a requirement), and the mesh in the
-   GovCloud shape must be the FIPS build of Istio with the SSP citing the
-   module. Resolution: `postgres-tls` depends on the `fips` feature (R9);
-   the `air-gap` job builds it so the enclave build is rehearsed with cmake
-   and go present.
+   accepted shapes.** Agreed on the default. Stricter here: any TLS the
+   binary ever carries must be a validated module, so `postgres-tls` must be
+   `rustls` over `aws-lc-rs` with `fips`, never `ring`, and the GovCloud mesh
+   must be the FIPS build of Istio with the SSP citing the module.
+   Resolution: `postgres-tls` depends on `fips` (R9); the `air-gap` job builds
+   it so the enclave build is rehearsed with cmake and go present.
 2. **Council 1 A13 (request id, instance) vs my R4.** Same change; mine adds
    `src`, `mode`, `roles`, `cap` and the id in problem bodies. Resolution:
    one implementation, R4's field list, council 1's `instance`.
-3. **Council 1 §4.3 — AU-9 moves to the platform's log pipeline; "the
-   ledger remains the tamper-evident record for decisions".** Half agreed.
-   The ledger is tamper-evident against the app role and accidents, not
-   against the owner role (§1.2). Resolution: R5 anchors the chain head into
-   the same pipeline council 1 is relying on, so the platform's sealing
-   covers the chain too; R9 makes the hash a validated one where the AO
-   requires it; R1 words the claim honestly meanwhile. And AU-5 stays in the
-   binary regardless of pipeline (R3): a pipeline cannot notice a writer
-   that panicked.
+3. **Council 1 §4.3 — AU-9 moves to the platform's pipeline; "the ledger
+   remains the tamper-evident record".** Half agreed: tamper-evident against
+   the app role and accidents, not the owner role (§1.2). Resolution: R5
+   anchors the chain head into the same pipeline so the platform's sealing
+   covers the chain; R9 where the AO requires a validated hash; R1 words the
+   claim honestly meanwhile. AU-5 stays in the binary regardless (R3): a
+   pipeline cannot notice a writer that panicked.
 4. **Council 1 A3 (ledgered commit in one transaction).** Agreed; it is also
    AU-12. If the data persona prefers an outbox, the audit requirement is
    only that the row exists whenever the document does.
 5. **Council 1 §4.6 — keep the shared proxy key; the mesh policy is defence
    in depth.** Agreed, plus rotation (R6) and secret-from-file (A5): a static
-   authenticator with no rotation path is IA-5(1) as it stands.
+   authenticator with no rotation path is IA-5(1) as it stands. Council 1 A7's
+   import 503 raises no audit objection; it is logged with `cap` and `req`.
 6. **Council 1 A4/A17 (`/health` split; unauthenticated `/health` through the
-   terminator is a finding).** Agreed; R13 goes one step further and strips
-   the disclosure at the binary, because from the proxy host the port is
-   reachable without a session.
-7. **Council 1 A7 (import semaphore, 503 on a second import) vs the UX
-   persona.** No audit objection; the 503 must be logged with `cap` and
-   `req` like every refusal.
-8. **Council 7 HG-4 and Q4 (drawings in the static bundle; whether a real
-   hull's grid is marked).** Carried as §1.3.2 / R11 with control IDs
-   AC-3, AC-21, SC-4. Council 7's S22 grid document becomes a scoped,
-   ledgered document — under reading A it also carries `handling`. The
-   demo's invented CVN-73 numbers may stay in `reference/` only while no real
-   hull exists in the repository (Q2 covers the aggregate question).
-9. **Council 7's "Restricted only" vocabulary.** The shell's word means an
-   engine verdict; NNPI reviewers read it as a marking. Resolution: rename
-   in the shell (R10a); "restricted" is reserved for handling.
-10. **Pillar 1 minimalism vs R9.** `aws-lc-rs` is a C library with a cmake
-    build — the largest admission this tree would make. Resolution: behind
-    `fips`, default off, admitted under Pillar 1 §3 only when the AO requires
-    a validated module for AU-9(3); otherwise R1's honest wording plus R5
-    is the cheaper closure. The customer decides (Q4).
+   terminator is a finding).** Agreed; R13 also strips the disclosure at the
+   binary, because from the proxy host the port is reachable without a session.
+7. **Council 7 HG-4 and Q4 (drawings in the static bundle; whether a real
+   hull's grid is marked).** Carried as §1.3.2 / R11 with control IDs AC-3,
+   AC-21, SC-4. Council 7's S22 grid document becomes a scoped, ledgered
+   document — under reading A it also carries `handling`. The demo's invented
+   CVN-73 numbers may stay in `reference/` only while no real hull exists in
+   the repository (Q2 covers the aggregate). Council 7's "Restricted only"
+   means an engine verdict; NNPI reviewers read it as a marking — renamed in
+   R10a, and "restricted" is reserved for handling.
+8. **Pillar 1 minimalism vs R9.** `aws-lc-rs` is a C library with a cmake
+   build — the largest admission this tree would make. Resolution: behind
+   `fips`, default off, admitted under Pillar 1 §3 only when the AO requires
+   a validated module for AU-9(3); otherwise R1's wording plus R5 is the
+   cheaper closure. The customer decides (Q4).
 
 ## 5. Questions only the customer can answer
 
@@ -429,10 +399,8 @@ R10b only on reading A.
    (R3 default `halt`); the SIEM the audit stream and the ledger anchors
    land in; retention period; whether EDIPIs may appear in it (PTA, contract
    Q8).
-8. **Proxy key custody and rotation cadence** (contract Q6), and whether the
-   terminator or the application shows the consent banner — or both.
-9. **Container platform and image base** (council 1 Q1, Q2, Q5) — the STIG
-   profile the enclave scans against decides R14's tooling.
-10. **Whether the AO accepts inherited AC-2/AC-7/AC-10/AC-11/AC-12/AC-17 from
-    the terminator's existing ATO**, and which document that inheritance is
-    written in.
+8. **Proxy key custody and rotation cadence** (contract Q6); whether the
+   terminator or the application shows the consent banner, or both; the
+   container platform and image base (council 1 Q1, Q2, Q5), whose STIG
+   profile decides R14's tooling; and whether the AO accepts AC-2/7/10/11/
+   12/17 as inherited from the terminator's ATO, and in which document.

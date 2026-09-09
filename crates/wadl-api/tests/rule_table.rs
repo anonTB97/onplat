@@ -953,3 +953,245 @@ async fn the_deck_below_live_hot_work_stays_suspended_until_the_permit_closes_th
     assert_eq!(row["state"], "SUSPEND", "{row}");
     assert!(row["earliest_clear"].is_null(), "{row}");
 }
+
+/// R. Alvarez as the safety authority — the proxy's person headers.
+const ALVAREZ_SAFETY: [(&str, &str); 3] = [
+    ("x-wadl-person", "1234567890"),
+    ("x-wadl-person-name", "R.%20Alvarez"),
+    ("x-wadl-roles", "safety"),
+];
+
+/// A signature under `person`, on the hull.
+async fn sign_as(tw: &TestWorld, person: &[(&str, &str)], body: Value) -> (StatusCode, Value) {
+    call_app(
+        &tw.app,
+        tw,
+        Method::POST,
+        "/rule-table/sign",
+        person,
+        Some(body),
+    )
+    .await
+}
+
+/// The newest ledger row, raw.
+async fn newest_ledger_row(tw: &TestWorld) -> Value {
+    let (_, ledger) = tw.get("/ledger").await;
+    ledger["entries"][0].clone()
+}
+
+#[tokio::test]
+async fn signing_records_the_person_the_hash_and_the_versions_and_a_recommit_unsigns() {
+    let tw = reference_hull().await;
+    // The seed is not signed here: the table is committed through the door first.
+    let (status, out) = sign_as(
+        &tw,
+        &ALVAREZ_SAFETY,
+        json!({ "statement": "Reviewed against the sitting's table.", "table_hash": "0000" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{out}");
+    assert!(
+        out["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no rule table is stored"),
+        "{out}"
+    );
+
+    let (status, out) = tw
+        .call(
+            Method::POST,
+            "/rule-table",
+            Some(body("CVN73-rule-table.csv", REFERENCE_CSV)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let hash = out["table_hash"].as_str().unwrap().to_owned();
+
+    // A blank statement, a wrong hash: refused, nothing written.
+    let (status, out) = sign_as(
+        &tw,
+        &ALVAREZ_SAFETY,
+        json!({ "statement": "   ", "table_hash": hash }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{out}");
+    assert!(
+        out["detail"].as_str().unwrap().contains("no statement"),
+        "{out}"
+    );
+    let (status, out) = sign_as(
+        &tw,
+        &ALVAREZ_SAFETY,
+        json!({ "statement": "Reviewed.", "table_hash": "deadbeef" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{out}");
+    assert!(
+        out["detail"]
+            .as_str()
+            .unwrap()
+            .contains("is not the stored table's"),
+        "{out}"
+    );
+    let (_, served) = tw.get("/rule-table").await;
+    assert!(served["signoff"].is_null(), "{}", served["signoff"]);
+    assert_eq!(rule_table_ledger(&tw).await.len(), 1, "only the commit");
+
+    // The signature.
+    let statement = "I have read every row against the sitting's table and the golden traces; this is the table the yard runs.";
+    let (status, out) = sign_as(
+        &tw,
+        &ALVAREZ_SAFETY,
+        json!({ "statement": statement, "table_hash": hash }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["signed"], true);
+    let signoff = &out["signoff"];
+    assert_eq!(signoff["signer_id"], "1234567890");
+    assert_eq!(signoff["signer_name"], "R. Alvarez");
+    assert_eq!(signoff["statement"], statement);
+    assert_eq!(signoff["table_hash"], hash);
+    assert_eq!(signoff["signed_at_ms"], DEMO_ANCHOR_MS);
+    let signed_versions = signoff["rows"].as_array().unwrap();
+    assert_eq!(signed_versions.len(), 10, "every version in force");
+    assert!(signed_versions.iter().any(|v| v == SEED_R04));
+    let seq = signoff["ledger_seq"].as_i64().unwrap();
+
+    // Ledgered under the person, with the hash and every version.
+    let newest = newest_ledger_row(&tw).await;
+    assert_eq!(newest["action"], "RULE_TABLE_SIGNED");
+    assert_eq!(newest["seq"], seq);
+    assert_eq!(newest["actor_id"], "1234567890");
+    assert_eq!(newest["actor_name"], "R. Alvarez");
+    let detail: Value = serde_json::from_str(newest["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(detail["kind"], "rule_table");
+    assert_eq!(detail["label"], "CVN73-rule-table.csv");
+    assert_eq!(detail["table_hash"], hash);
+    assert_eq!(detail["statement"], statement);
+    assert_eq!(detail["rows"], 10);
+    assert_eq!(detail["versions"].as_array().unwrap().len(), 10);
+    assert_eq!(detail["signer"]["id"], "1234567890");
+    assert_eq!(detail["signer"]["name"], "R. Alvarez");
+
+    // Served on the GET and on the register.
+    let (_, served) = tw.get("/rule-table").await;
+    assert_eq!(served["signoff"]["signer_name"], "R. Alvarez");
+    assert_eq!(served["signoff"]["ledger_seq"], seq);
+    let (_, register) = tw.get("/activities").await;
+    assert_eq!(register["rules"]["signed"], true);
+    assert_eq!(register["rules"]["label"], "CVN73-rule-table.csv");
+
+    // The same hash is not signed twice.
+    let (status, out) = sign_as(
+        &tw,
+        &ALVAREZ_SAFETY,
+        json!({ "statement": "Again.", "table_hash": hash }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{out}");
+    assert!(
+        out["detail"]
+            .as_str()
+            .unwrap()
+            .contains("already signed by R. Alvarez"),
+        "{out}"
+    );
+
+    // A recommit unsigns: the signature is of a hash.
+    let (status, out) = tw
+        .call(
+            Method::POST,
+            "/rule-table",
+            Some(body(
+                "CVN73-rule-table-60.csv",
+                &with_r04_hold(REFERENCE_CSV, "60"),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let new_hash = out["table_hash"].as_str().unwrap().to_owned();
+    assert_ne!(new_hash, hash);
+    let (_, served) = tw.get("/rule-table").await;
+    assert!(served["signoff"].is_null(), "a commit clears the signature");
+    let (_, register) = tw.get("/activities").await;
+    assert_eq!(register["rules"]["signed"], false);
+    // The old hash is refused; the new one signs.
+    let (status, _) = sign_as(
+        &tw,
+        &ALVAREZ_SAFETY,
+        json!({ "statement": "The old reading.", "table_hash": hash }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, out) = sign_as(
+        &tw,
+        &ALVAREZ_SAFETY,
+        json!({ "statement": "The sixty-minute watch.", "table_hash": new_hash }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert!(out["signoff"]["ledger_seq"].as_i64().unwrap() > seq);
+    let ledger = rule_table_ledger(&tw).await;
+    assert_eq!(
+        ledger.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(),
+        vec![
+            "RULE_TABLE_SIGNED",
+            "DOCUMENT_REPLACED",
+            "RULE_TABLE_SIGNED",
+            "DOCUMENT_REPLACED"
+        ],
+        "newest first"
+    );
+}
+
+#[tokio::test]
+async fn a_planner_may_not_sign_and_nothing_is_written() {
+    let tw = reference_hull().await;
+    let (status, out) = tw
+        .call(
+            Method::POST,
+            "/rule-table",
+            Some(body("CVN73-rule-table.csv", REFERENCE_CSV)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let hash = out["table_hash"].as_str().unwrap().to_owned();
+    for (roles, sentence) in [
+        (
+            "planner",
+            "Planner may not sign the rule table — sign_rule_table is held by Safety",
+        ),
+        (
+            "foreman",
+            "Foreman may not sign the rule table — sign_rule_table is held by Safety",
+        ),
+        (
+            "ship_super",
+            "Ship Super may not sign the rule table — sign_rule_table is held by Safety",
+        ),
+    ] {
+        let (status, out) = sign_as(
+            &tw,
+            &[
+                ("x-wadl-person", "dev:planner"),
+                ("x-wadl-person-name", "Demo%20Planner%20(Y-1001)"),
+                ("x-wadl-roles", roles),
+            ],
+            json!({ "statement": "I sign.", "table_hash": hash }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{out}");
+        assert_eq!(out["capability"], "sign_rule_table");
+        assert_eq!(out["detail"], sentence);
+    }
+    let (_, served) = tw.get("/rule-table").await;
+    assert!(served["signoff"].is_null());
+    let ledger = rule_table_ledger(&tw).await;
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].0, "DOCUMENT_REPLACED");
+    let newest = newest_ledger_row(&tw).await;
+    assert_ne!(newest["action"], "RULE_TABLE_SIGNED");
+}

@@ -199,7 +199,7 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         "POST",
         "/api/vessels/:id/rule-table/sign",
         true,
-        Some(r#"{"statement":"leak test","rows":null}"#),
+        Some(r#"{"statement":"leak test","table_hash":"leak test"}"#),
     ),
     ("GET", "/api/vessels/:id/schedule-proposals", true, None),
     (

@@ -27,6 +27,7 @@
 use core::fmt::Write as _;
 use std::collections::{BTreeMap, BTreeSet};
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
@@ -46,13 +47,13 @@ use wadl_engine::{
     evaluate, AdjacencyGraph, Applies, Decision, EvaluationRequest, Hazard, HoldFrom, RuleEntry,
     RuleSet, TraversalBound, Work,
 };
-use wadl_store::memory::RuleTableDoc;
+use wadl_store::memory::{RuleTableDoc, SignOff};
 use wadl_store::model::{ActivitySummary, CompartmentSummary};
 use wadl_store::TenantScope;
 
 use crate::auth::Caller;
 use crate::error::ApiError;
-use crate::handlers::{ledger_document, read_import_body, DryRun};
+use crate::handlers::{body_rejection, ledger_document, read_import_body, DryRun};
 use crate::AppState;
 
 /// The document kind the rule table is stored and ledgered under.
@@ -1150,6 +1151,107 @@ pub(crate) async fn revert_rule_table(
     )
     .await?;
     Ok(Json(json!({ "reverted": true, "source": "seed" })))
+}
+
+/// The body of a signature: what the authority says, and the hash of the
+/// table they read — the signature is of a hash, so a table that changed
+/// between the reading and the signing is refused rather than signed blind.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct SignRuleTable {
+    /// The authority's statement, in their words.
+    pub(crate) statement: String,
+    /// The `table_hash` the GET served them.
+    pub(crate) table_hash: String,
+}
+
+/// `POST /api/vessels/:id/rule-table/sign` — the safety authority signs the
+/// table in force. The signer is the person on the scope (S12's actor);
+/// `sign_rule_table` is held by Safety alone, and the gate has judged that
+/// before the body is read. Refused (422) when no document is stored (the
+/// seed is not signed here — it is committed through the door first), when
+/// the hash signed is not the stored table's, or when that hash is already
+/// signed. Ledgers `RULE_TABLE_SIGNED` with the hash, the rows, every
+/// version and the signer, then writes the signature — with its ledger seq —
+/// onto the document. Any later commit clears it.
+pub(crate) async fn sign_rule_table(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<SignRuleTable>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    // Scope first, body second, as every scoped POST.
+    state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let statement = body.statement.trim().to_owned();
+    if statement.is_empty() {
+        return Err(ApiError::OutOfRange(
+            "the signature was refused: it carries no statement".to_owned(),
+        ));
+    }
+    let doc = state
+        .store
+        .rule_table(&scope, vessel)
+        .await?
+        .ok_or_else(|| {
+            ApiError::OutOfRange(
+                "the signature was refused: no rule table is stored — the seed is in force and is not signed here; commit the table through the door first"
+                    .to_owned(),
+            )
+        })?;
+    if body.table_hash.trim() != doc.table_hash {
+        return Err(ApiError::OutOfRange(format!(
+            "the signature was refused: the hash signed ({}) is not the stored table's ({}) — re-read the table and sign what is stored",
+            body.table_hash.trim(),
+            doc.table_hash
+        )));
+    }
+    if let Some(existing) = doc
+        .signoff
+        .as_ref()
+        .filter(|s| s.table_hash == doc.table_hash)
+    {
+        return Err(ApiError::OutOfRange(format!(
+            "the signature was refused: this table is already signed by {} (ledger #{})",
+            existing.signer_name, existing.ledger_seq
+        )));
+    }
+    let now_ms = state.clock.now().epoch_millis();
+    let versions: Vec<String> = doc
+        .entries
+        .iter()
+        .map(|e| e.rule_version.to_string())
+        .collect();
+    let detail = json!({
+        "kind": RULE_TABLE_KIND,
+        "label": doc.label,
+        "table_hash": doc.table_hash,
+        "statement": statement,
+        "rows": doc.rows.len(),
+        "versions": versions,
+        "signer": { "id": scope.actor.id, "name": scope.actor.name, "source": scope.actor.source },
+        "by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(&scope, vessel, "RULE_TABLE_SIGNED", &detail, None, now_ms)
+        .await?;
+    let signoff = SignOff {
+        signed_at_ms: now_ms,
+        signer_id: scope.actor.id.clone(),
+        signer_name: scope.actor.name.clone(),
+        statement,
+        table_hash: doc.table_hash.clone(),
+        rows: versions,
+        ledger_seq: record.seq,
+    };
+    let signed = state.store.sign_rule_table(&scope, vessel, signoff).await?;
+    Ok(Json(json!({ "signed": true, "signoff": signed.signoff })))
 }
 
 #[cfg(test)]

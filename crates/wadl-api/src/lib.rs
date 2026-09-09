@@ -229,6 +229,10 @@ pub fn build_router(state: AppState) -> Router {
             post(rule_table::revert_rule_table),
         )
         .route(
+            "/api/vessels/:id/rule-table/sign",
+            post(rule_table::sign_rule_table),
+        )
+        .route(
             "/api/vessels/:id/schedule-proposals",
             get(handlers::list_schedule_proposals).post(handlers::propose_schedule_change),
         )

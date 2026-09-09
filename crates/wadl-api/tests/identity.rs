@@ -173,7 +173,13 @@ async fn whoami_names_the_person_roles_capabilities_hulls_and_markings() {
     assert_eq!(who["roles"], json!(["safety"]));
     assert_eq!(
         who["capabilities"],
-        json!(["read", "raise_hazard", "clear_hazard", "decide"])
+        json!([
+            "read",
+            "raise_hazard",
+            "clear_hazard",
+            "decide",
+            "sign_rule_table"
+        ])
     );
     let hulls = who["hulls"].as_array().unwrap();
     assert_eq!(hulls.len(), 1, "the hulls this scope is served");
@@ -344,7 +350,7 @@ async fn dev_mode_without_roles_opens_every_door_and_the_ledger_says_dev_anonymo
     assert_eq!(who["person"]["id"], "dev:anonymous");
     assert_eq!(who["person"]["source"], "dev-shim-anonymous");
     assert_eq!(who["roles"], json!([]));
-    assert_eq!(who["capabilities"].as_array().unwrap().len(), 6);
+    assert_eq!(who["capabilities"].as_array().unwrap().len(), 7);
     assert_eq!(
         who["warnings"][0],
         "demo mode: no x-wadl-roles — every door is open"

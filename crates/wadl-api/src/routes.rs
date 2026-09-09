@@ -195,6 +195,12 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         ),
     ),
     ("POST", "/api/vessels/:id/rule-table/revert", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/rule-table/sign",
+        true,
+        Some(r#"{"statement":"leak test","rows":null}"#),
+    ),
     ("GET", "/api/vessels/:id/schedule-proposals", true, None),
     (
         "POST",

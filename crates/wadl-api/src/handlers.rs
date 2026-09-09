@@ -38,7 +38,7 @@ pub(crate) async fn read_import_body<T: serde::de::DeserializeOwned>(
 /// get flattened in the process is a length-limit trip — that is a 413 with
 /// the ceiling named (axum's small default on these routes; the import doors
 /// read their own bodies against [`crate::MAX_IMPORT_BYTES`]), not a 422.
-fn body_rejection(rejection: &axum::extract::rejection::JsonRejection) -> ApiError {
+pub(crate) fn body_rejection(rejection: &axum::extract::rejection::JsonRejection) -> ApiError {
     // axum's default body ceiling on extractors, which these routes keep.
     const DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;
     if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {

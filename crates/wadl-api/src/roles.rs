@@ -47,17 +47,21 @@ pub enum Capability {
     Propose,
     /// Answer for a mitigation option or an issue.
     Decide,
+    /// Sign the rule table in force — the safety authority's act, of a
+    /// hash: any later commit of the table unsigns it.
+    SignRuleTable,
 }
 
 impl Capability {
     /// Every capability, in the order `whoami` serves them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Read,
         Self::RaiseHazard,
         Self::ClearHazard,
         Self::CommitDocument,
         Self::Propose,
         Self::Decide,
+        Self::SignRuleTable,
     ];
 
     /// The wire code, as `whoami` and the refusal body spell it.
@@ -70,6 +74,7 @@ impl Capability {
             Self::CommitDocument => "commit_document",
             Self::Propose => "propose",
             Self::Decide => "decide",
+            Self::SignRuleTable => "sign_rule_table",
         }
     }
 
@@ -83,6 +88,7 @@ impl Capability {
             Self::CommitDocument => "commit or revert a document",
             Self::Propose => "propose a schedule change",
             Self::Decide => "answer for an option or an issue",
+            Self::SignRuleTable => "sign the rule table",
         }
     }
 
@@ -177,9 +183,10 @@ impl Role {
 }
 
 /// The role → capability matrix the yard signs. `Read` is implicit and not
-/// listed. To add a capability (S14's `sign_rule_table`, safety only): add
-/// the variant, its code and deed, a row here for each holder, and its
-/// routes to [`GATED`] — nothing else in the tree decides who may do what.
+/// listed. To add a capability (as S14 added `sign_rule_table`, safety
+/// only): add the variant, its code and deed, a row here for each holder,
+/// and its routes to [`GATED`] — nothing else in the tree decides who may do
+/// what.
 pub const MATRIX: &[(Role, &[Capability])] = &[
     (
         Role::Planner,
@@ -205,6 +212,7 @@ pub const MATRIX: &[(Role, &[Capability])] = &[
             Capability::RaiseHazard,
             Capability::ClearHazard,
             Capability::Decide,
+            Capability::SignRuleTable,
         ],
     ),
     (
@@ -415,7 +423,7 @@ pub const GATED: &[(&str, &str, Capability)] = &[
         Capability::CommitDocument,
     ),
     // The rule table is a document through a door like every other; the
-    // signature (S14 sitting C, `sign_rule_table`) is the deed that differs.
+    // signature is the deed that differs — the safety authority's alone.
     (
         "POST",
         "/api/vessels/:id/rule-table",
@@ -425,6 +433,11 @@ pub const GATED: &[(&str, &str, Capability)] = &[
         "POST",
         "/api/vessels/:id/rule-table/revert",
         Capability::CommitDocument,
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/rule-table/sign",
+        Capability::SignRuleTable,
     ),
 ];
 
@@ -591,6 +604,11 @@ mod tests {
             Capability::ClearHazard.holders(),
             vec![Role::ShipSuper, Role::Safety]
         );
+        assert_eq!(
+            Capability::SignRuleTable.holders(),
+            vec![Role::Safety],
+            "the signature is the safety authority's alone"
+        );
         for role in Role::ALL {
             assert_eq!(Role::parse(role.code()), Some(role));
         }
@@ -610,6 +628,10 @@ mod tests {
         assert_eq!(
             refusal_sentence(&[], Capability::Decide),
             "A person with no recognised role may not answer for an option or an issue — decide is held by Planner, Ship Super, Safety, Zone Manager, Production Super and Project Manager"
+        );
+        assert_eq!(
+            refusal_sentence(&[Role::Planner], Capability::SignRuleTable),
+            "Planner may not sign the rule table — sign_rule_table is held by Safety"
         );
     }
 

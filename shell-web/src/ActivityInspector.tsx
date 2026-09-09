@@ -192,6 +192,23 @@ export function ActivityInspector({
               {a.trade}
             </div>
             <div>
+              <div style={label}>Work type</div>
+              {a.work_type ? (
+                <span style={{ fontFamily: "monospace", fontSize: 11 }}>{a.work_type}</span>
+              ) : (
+                <span style={{ color: C.dim }} title="Not carried by the field map — unknown work is judged by every row in force, never by none.">—</span>
+              )}
+              {a.rules_bound !== undefined && !a.is_milestone && (
+                <div
+                  style={{ fontSize: 10.5, color: a.rules_bound === 0 ? C.warn : C.dim }}
+                  title="The rules in force bound to this row's work type in its space — the set the verdict was judged under. A work type no row names is judged by the any-work rows only."
+                >
+                  judged by {a.rules_bound} row{a.rules_bound === 1 ? "" : "s"} bound to {a.work_type ?? "unknown work"}
+                  {a.rules_bound === 0 && " — no rule binds to this work type"}
+                </div>
+              )}
+            </div>
+            <div>
               <div style={label}>Planned</div>
               <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>
                 {a.planned ? `${fmtDay(a.planned.start)} → ${fmtDay(a.planned.end)}` : "no dates"}

@@ -25,6 +25,7 @@ import {
   scheduleAlternatives,
   type ProposalList,
   type Activity,
+  type ActivityRegister,
   type AlternativeRow,
   type AsOf,
   type DeckStateRow,
@@ -51,8 +52,11 @@ type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
 
 /** The columns the reader may sort by. Absent = the server's schedule order. */
 type SortKey =
-  | "code" | "name" | "order" | "space" | "trade"
+  | "code" | "name" | "order" | "space" | "trade" | "work"
   | "planned" | "exec" | "budget" | "earned" | "status";
+
+/** The column count of the register table — the evidence row spans it. */
+const REGISTER_COLUMNS = 11;
 
 /** Worst first when ascending: the refusals are what sorting this column is for. */
 const EXEC_RANK: Record<string, number> = {
@@ -180,11 +184,16 @@ export default function SequenceBoard({
   const [pending, setPending] = useState<{ label: string; xer: string; encoding: XerEncoding; preview: ImportPreview } | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [source, setSource] = useState<string | null>(null);
+  /** Whose rules judged the rows — the seed or a committed table, signed or
+   *  not — as the register serves it. Null = the register did not say. */
+  const [rules, setRules] = useState<NonNullable<ActivityRegister["rules"]> | null>(null);
   const [mismatches, setMismatches] = useState<ReconciliationMismatch[]>([]);
   const [edges, setEdges] = useState<ScheduleEdge[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [trade, setTrade] = useState<string | null>(null);
+  /** The work type in the chip row — what the rule table binds to. */
+  const [workType, setWorkType] = useState<string | null>(null);
   const [space, setSpace] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusFilter>("all");
   const [inWindowOnly, setInWindowOnly] = useState(false);
@@ -211,6 +220,7 @@ export default function SequenceBoard({
         setActivities(r.activities);
         setAsOfMs(r.as_of);
         setSource(r.schedule_source);
+        setRules(r.rules ?? null);
         setMismatches(r.reconciliation.mismatches);
         setEdges(r.edges);
         // The inspector follows the register: re-point it at the fresh row so
@@ -280,6 +290,7 @@ export default function SequenceBoard({
     setImportMsg(null);
     setSearch("");
     setTrade(null);
+    setWorkType(null);
     setSpace(null);
     setStatus("all");
     setSort(null);
@@ -293,13 +304,29 @@ export default function SequenceBoard({
   useEffect(() => {
     if (activities === null) return;
     const tradesNow = new Set(activities.map((a) => a.trade));
+    const workNow = new Set(activities.map((a) => a.work_type ?? null));
     const spacesNow = new Set(activities.map((a) => a.compartment_no).filter(Boolean));
     setTrade((t) => (t !== null && !tradesNow.has(t) ? null : t));
+    setWorkType((w) => (w !== null && !workNow.has(w) ? null : w));
     setSpace((sp) => (sp !== null && sp !== "unlocated" && !spacesNow.has(sp) ? null : sp));
   }, [activities]);
 
   const trades = useMemo(
     () => [...new Set((activities ?? []).map((a) => a.trade).filter((t) => t !== "—"))].sort(),
+    [activities],
+  );
+
+  // The work types the field map read — the tokens the rule table binds to.
+  // Empty when the map names no field: the column reads "—" on every row
+  // and the chip row is absent, never a guess from the trade.
+  const workTypes = useMemo(
+    () =>
+      [...new Set(
+        (activities ?? [])
+          .filter((a) => !a.is_milestone)
+          .map((a) => a.work_type ?? null)
+          .filter((w): w is string => w !== null),
+      )].sort(),
     [activities],
   );
 
@@ -323,6 +350,7 @@ export default function SequenceBoard({
     const q = search.trim().toLowerCase();
     const filtered = (activities ?? []).filter((a) => {
       if (trade && a.trade !== trade) return false;
+      if (workType && (a.work_type ?? null) !== workType) return false;
       if (space === "unlocated") {
         if (a.compartment_no !== null || a.is_milestone) return false;
       } else if (space && a.compartment_no !== space) {
@@ -348,6 +376,7 @@ export default function SequenceBoard({
         case "order": return a.work_order_code;
         case "space": return a.compartment_no;
         case "trade": return a.trade === "—" ? null : a.trade;
+        case "work": return a.work_type ?? null;
         case "planned": return a.planned?.start ?? null;
         case "exec": return EXEC_RANK[a.executability.verdict];
         case "budget": return a.is_milestone ? null : a.budget_hours;
@@ -366,7 +395,7 @@ export default function SequenceBoard({
         : String(va).localeCompare(String(vb));
       return cmp * sort.dir;
     });
-  }, [activities, search, trade, space, status, inWindowOnly, notExecOnly, sort]);
+  }, [activities, search, trade, workType, space, status, inWindowOnly, notExecOnly, sort]);
 
   if (error) return <p style={{ color: C.danger }}>Register unavailable ({error}).</p>;
   if (!activities) return <Loading label="Reading the register…" />;
@@ -498,6 +527,32 @@ export default function SequenceBoard({
         >
           Proposals{proposals && proposals.counts.open > 0 ? ` · ${proposals.counts.open} open` : ""}
         </button>
+        {/* Whose rules judged every verdict on this board — served with the
+            register, never derived here. Amber until the safety authority
+            signs the table on Data Sources. */}
+        <span
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 9px", borderRadius: 6, fontSize: 11,
+            border: `1px solid ${rules === null ? C.danger : rules.signed ? C.ok : C.warn}66`,
+            background: rules === null ? "rgba(248,113,113,0.06)" : rules.signed ? "rgba(34,197,94,0.06)" : "rgba(245,158,11,0.06)",
+            color: rules === null ? C.danger : C.dim,
+          }}
+          title={
+            rules === null
+              ? "The register did not say whose rules judged it — the API served no rules object."
+              : `${rules.source === "seed" ? "The seed" : `The committed table ${rules.label}`} judged every verdict on this board — each row by the rules bound to its work type in its space. ${rules.signed ? "Signed by the safety authority." : "Unsigned: the safety authority signs it on Data Sources."}`
+          }
+        >
+          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.6, color: C.subtle }}>RULES</span>
+          {rules === null ? (
+            "rules unavailable"
+          ) : (
+            <>
+              <span style={{ fontFamily: "monospace", color: C.bright }}>{rules.label}</span>
+              <span style={{ color: rules.signed ? C.ok : C.warn, fontWeight: 700 }}>{rules.signed ? "signed" : "unsigned"}</span>
+            </>
+          )}
+        </span>
         {zoneFocus && (
           <span
             style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "3px 8px 3px 10px", borderRadius: 6, border: `1px solid ${C.warn}88`, background: "rgba(245,158,11,0.08)", fontSize: 11.5 }}
@@ -550,11 +605,12 @@ export default function SequenceBoard({
             onClick={() => {
               const esc = (v: string) => `"${v.replaceAll('"', '""')}"`;
               const lines = [
-                "code,name,work_order,compartment,reliability,trade,start,end,budget_mh,earned_mh,status,executability,source",
+                "code,name,work_order,compartment,reliability,trade,work_type,rules_bound,start,end,budget_mh,earned_mh,status,executability,source",
                 ...activities.map((a) =>
                   [
                     a.code, esc(a.name), a.work_order_code ?? "", a.compartment_no ?? "",
-                    a.compartment_reliability, a.trade,
+                    a.compartment_reliability, a.trade, a.work_type ?? "",
+                    a.rules_bound === undefined ? "" : String(a.rules_bound),
                     a.planned ? fmtStamp(a.planned.start) : "",
                     a.planned ? fmtStamp(a.planned.end) : "",
                     String(a.budget_hours), String(a.earned_hours), a.status,
@@ -782,6 +838,21 @@ export default function SequenceBoard({
             {t}
           </button>
         ))}
+        {workTypes.length > 0 && (
+          <>
+            <span style={{ width: 1, height: 18, background: C.line }} />
+            {workTypes.map((w) => (
+              <button
+                key={w}
+                style={{ ...chip(workType === w), fontFamily: "monospace" }}
+                onClick={() => setWorkType(workType === w ? null : w)}
+                title={`Show only ${w} work — the work type the field map read, which the rule table binds to · click again to clear`}
+              >
+                {w}
+              </button>
+            ))}
+          </>
+        )}
         <span style={{ width: 1, height: 18, background: C.line }} />
         <select
           value={space ?? ""}
@@ -843,6 +914,7 @@ export default function SequenceBoard({
                   ["Work order", "order", false],
                   ["Space", "space", false],
                   ["Trade", "trade", false],
+                  ["Work type", "work", false],
                   ["Planned", "planned", false],
                   ["Executable?", "exec", false],
                   ["Budget", "budget", true],
@@ -972,14 +1044,23 @@ export default function SequenceBoard({
                     </span>
                   )}
                 </td>
-                <td style={{ ...td, color: C.dim }}>
-                  {a.trade}
-                  {a.work_type && (
+                <td style={{ ...td, color: C.dim }}>{a.trade}</td>
+                <td style={{ ...td, fontFamily: "monospace", fontSize: 11 }}>
+                  {a.work_type ? (
                     <span
-                      style={{ marginLeft: 6, fontSize: 9.5, color: C.subtle, fontFamily: "monospace" }}
-                      title="The work type the field map read for this row — from the schedule of record, what the rule table binds to."
+                      style={{ color: C.bright }}
+                      title={
+                        `The work type the field map read for this row — what the rule table binds to.` +
+                        (a.rules_bound !== undefined
+                          ? ` Judged by ${a.rules_bound} rule${a.rules_bound === 1 ? "" : "s"} bound to ${a.work_type} in its space.`
+                          : "")
+                      }
                     >
                       {a.work_type}
+                    </span>
+                  ) : (
+                    <span style={{ color: C.dim }} title={a.is_milestone ? "A key event carries no work type." : "Not carried by the field map — unknown work is judged by every row in force, never by none."}>
+                      —
                     </span>
                   )}
                 </td>
@@ -1046,7 +1127,12 @@ export default function SequenceBoard({
                   ) : (
                     <span
                       style={{ color: "rgba(34,197,94,0.65)" }}
-                      title="The space permits work at every instant of the planned window, against the hazards on file."
+                      title={
+                        "The space permits this work at every instant of the planned window, against the hazards on file." +
+                        (a.rules_bound !== undefined
+                          ? ` Judged by ${a.rules_bound} rule${a.rules_bound === 1 ? "" : "s"} bound to ${a.work_type ?? "unknown work"}${a.rules_bound === 0 ? " — no rule binds to this work type" : ""}.`
+                          : "")
+                      }
                     >
                       ✓
                     </span>
@@ -1068,7 +1154,7 @@ export default function SequenceBoard({
               </tr>
               {openEvidence === a.activity_id && a.executability.verdict === "not_executable" && (
                 <tr style={{ background: "rgba(239,68,68,0.04)" }}>
-                  <td colSpan={10} style={{ ...td, padding: "6px 12px 10px" }}>
+                  <td colSpan={REGISTER_COLUMNS} style={{ ...td, padding: "6px 12px 10px" }}>
                     {/* The tooltip's facts, in the open: what refuses, where,
                         from when, and how it clears — beside the door to the fix. */}
                     <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center", fontSize: 11 }}>
@@ -1116,7 +1202,7 @@ export default function SequenceBoard({
             ))}
             {rows.length > tableLimit && (
               <tr>
-                <td colSpan={10} style={{ ...td, padding: "8px 12px", color: C.dim }}>
+                <td colSpan={REGISTER_COLUMNS} style={{ ...td, padding: "8px 12px", color: C.dim }}>
                   <button
                     onClick={() => setTableLimit((n) => n + 1000)}
                     title="Render the next thousand rows. Every row is already counted above and in the exports; only the table is paged."

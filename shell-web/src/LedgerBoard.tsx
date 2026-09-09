@@ -38,6 +38,12 @@ const ACTION_STYLE: Record<string, { label: string; fg: string; bg: string; bord
     bg: "rgba(61,107,255,0.10)",
     border: "rgba(61,107,255,0.4)",
   },
+  RULE_TABLE_SIGNED: {
+    label: "RULE TABLE SIGNED",
+    fg: C.ok,
+    bg: "rgba(34,197,94,0.10)",
+    border: "rgba(34,197,94,0.45)",
+  },
 };
 
 const FALLBACK_STYLE = {
@@ -70,6 +76,9 @@ function summarise(e: AuditEntry): string {
     if (typeof d.disposition === "string") parts.push(d.disposition);
     if (typeof d.reason === "string" && d.reason) parts.push(`“${d.reason}”`);
     if (typeof d.note === "string" && d.note) parts.push(`“${d.note}”`);
+    // A signature carries the authority's statement and the hash it is of.
+    if (typeof d.statement === "string" && d.statement) parts.push(`“${d.statement}”`);
+    if (typeof d.table_hash === "string" && d.table_hash) parts.push(`hash ${d.table_hash.slice(0, 8)}`);
     const issue = d.issue as Record<string, unknown> | undefined;
     if (issue && typeof issue.kind === "string") parts.push(`finding: ${issue.kind}`);
     // A document line names its kind and label: `yard_clock · CVN73-clock.csv`.

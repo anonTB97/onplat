@@ -62,8 +62,12 @@ phase('Council')
 log('Council: six sequential persona passes, the hull-grid template alongside')
 const gridP = agent(personaPrompt(HULL_GRID, []), { label: 'hull-grid', phase: 'Council', schema: INDEX_SCHEMA, effort: 'high' })
 const passes = []
+// Passes whose documents already landed before a cut-off: skipped on resume,
+// but later personas still read their files.
+const ALREADY_LANDED = ['ato']
 const earlier = []
 for (const p of PERSONAS) {
+  if (ALREADY_LANDED.indexOf(p.slug) >= 0) { log('persona ' + p.slug + ' already landed at docs/council/' + p.file + '; skipped'); earlier.push('docs/council/' + p.file); continue }
   const r = await agent(personaPrompt(p, earlier.slice()), { label: 'persona:' + p.slug, phase: 'Council', schema: INDEX_SCHEMA, effort: p.slug === 'ato' || p.slug === 'perf' ? 'xhigh' : 'high' })
   if (r) { passes.push(r); earlier.push('docs/council/' + p.file) }
   else { log('persona ' + p.slug + ' returned nothing (cut off?); the synthesis will read whatever it committed') }

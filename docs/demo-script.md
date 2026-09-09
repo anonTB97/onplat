@@ -159,7 +159,9 @@ example) rather than guessed.
   windows as green ghosts.
 - Find **A51350 Blast / mechanical prep deck coating 2A — JP-5 service
   tank No. 3** in 6-216-1-J: suspended under R04 by hot work permit 2673 in
-  shaft alley No. 3, the fire marshal's to clear. Open it. The inspector
+  shaft alley No. 3, the fire marshal's to clear — *clears on verification*
+  until permit 2673 closes, then for the thirty-minute fire watch that runs
+  from the close. Open it. The inspector
   shows the evidence and the engine's alternative: a viable window after the
   earliest clear, the delay in hours, and the one activity it pushes
   (A51360). The knock-on is computed, not estimated, and the basis says so.

@@ -1,7 +1,7 @@
 {
   "compartment": { "source": "udf", "name": "compartment" },
   "work_item": { "source": "udf", "name": "wi_number" },
-  "work_type": { "source": "none" },
+  "work_type": { "source": "udf", "name": "work_type" },
   "trade": { "source": "resource" },
   "projects": [],
   "placards_from_names": true

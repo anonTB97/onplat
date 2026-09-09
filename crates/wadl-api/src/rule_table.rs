@@ -328,23 +328,81 @@ struct TableInEffect {
     signoff: Option<Value>,
 }
 
-/// Parses and compiles CSV text against the hull's clock, minting ids for
-/// rows that carry none. Every refusal, or the compiled table.
-fn compile_text(csv: &str, clock: &YardClock) -> Result<(Table, Compiled), Vec<String>> {
+/// What a text compiles to: the table, the entries with their ids settled,
+/// and the rows whose carried id was set aside.
+struct CompiledText {
+    table: Table,
+    compiled: Compiled,
+    /// Rows that carried a version id their cells no longer answer to, each
+    /// with the id that was set aside — a finding, so the authority sees the
+    /// new version is theirs to sign.
+    reminted: Vec<String>,
+}
+
+/// Two entries read the same when everything but the version id is equal.
+fn same_reading(a: &RuleEntry, b: &RuleEntry) -> bool {
+    let nil = RuleVersionId::from_uuid(Uuid::nil());
+    RuleEntry {
+        rule_version: nil,
+        ..a.clone()
+    } == RuleEntry {
+        rule_version: nil,
+        ..b.clone()
+    }
+}
+
+/// Settles every entry's version id. A carried id (column 22) is honoured
+/// only while the row still reads the same — it is the entry's content
+/// address, or a seed id whose seed reading the entry equals. Any other
+/// carried id is set aside and the row minted afresh: the exported table
+/// carries the seed's fixed ids, and a cell edited in the spreadsheet must
+/// become a new version of that row, never the old id on a new reading.
+fn settle_versions(mut compiled: Compiled) -> (Compiled, Vec<String>) {
+    let seed = RuleSet::seed_usn_hot_work();
+    let mut reminted = Vec::new();
+    for (row, entry) in &mut compiled.entries {
+        let carried = entry.rule_version;
+        if carried.as_uuid().is_nil() {
+            continue;
+        }
+        let unchanged = carried == mint_version(entry)
+            || seed
+                .entries()
+                .iter()
+                .any(|s| s.rule_version == carried && same_reading(s, entry));
+        if !unchanged {
+            reminted.push(format!(
+                "{row} (line {}) carried version {carried} but its cells changed — a new version is minted for it",
+                row.line
+            ));
+            entry.rule_version = RuleVersionId::from_uuid(Uuid::nil());
+        }
+    }
+    (compiled.with_versions(mint_version), reminted)
+}
+
+/// Parses and compiles CSV text against the hull's clock and settles the
+/// version ids. Every refusal, or the compiled table.
+fn compile_text(csv: &str, clock: &YardClock) -> Result<CompiledText, Vec<String>> {
     let sentences =
         |r: Vec<compiler::Refusal>| -> Vec<String> { r.iter().map(ToString::to_string).collect() };
     let table = compiler::parse(csv).map_err(sentences)?;
-    let compiled = compiler::compile(&table, clock)
-        .map_err(sentences)?
-        .with_versions(mint_version);
-    Ok((table, compiled))
+    let (compiled, reminted) =
+        settle_versions(compiler::compile(&table, clock).map_err(sentences)?);
+    Ok(CompiledText {
+        table,
+        compiled,
+        reminted,
+    })
 }
 
 /// The seed as a table: exported in the document layout, parsed and
 /// compiled — the identity the engine test proves.
 fn seed_table(clock: &YardClock) -> Result<TableInEffect, ApiError> {
     let csv = compiler::export(&RuleSet::seed_usn_hot_work(), clock, compiler::seed_text);
-    let (table, compiled) = compile_text(&csv, clock).map_err(|refusals| {
+    let CompiledText {
+        table, compiled, ..
+    } = compile_text(&csv, clock).map_err(|refusals| {
         eprintln!(
             "{}",
             json!({ "event": "backend_error", "detail": format!("the seed does not compile: {}", refusals.join("; ")) })
@@ -383,15 +441,32 @@ fn document_table(doc: RuleTableDoc, clock: &YardClock) -> Result<TableInEffect,
             })
             .collect(),
     };
-    let compiled = compiler::compile(&table, clock)
-        .map_err(|refusals| {
-            eprintln!(
-                "{}",
-                json!({ "event": "backend_error", "detail": format!("stored rule table {} does not compile: {}", doc.label, refusals.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")) })
-            );
-            ApiError::Internal
-        })?
-        .with_versions(mint_version);
+    let mut compiled = compiler::compile(&table, clock).map_err(|refusals| {
+        eprintln!(
+            "{}",
+            json!({ "event": "backend_error", "detail": format!("stored rule table {} does not compile: {}", doc.label, refusals.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")) })
+        );
+        ApiError::Internal
+    })?;
+    // The versions in force are the stored entries' — what `rules_in_force`
+    // serves — not a re-reading of the cells: a row that carried the seed's
+    // id into the door and was minted afresh at commit reports the id it
+    // was minted, and exports it in column 22. The entries and the rows are
+    // one compile in file order; a document that disagrees with itself is
+    // settled the way the door settles a fresh import.
+    if compiled.entries.len() == doc.entries.len()
+        && compiled
+            .entries
+            .iter()
+            .zip(&doc.entries)
+            .all(|((_, e), stored)| same_reading(e, stored))
+    {
+        for ((_, entry), stored) in compiled.entries.iter_mut().zip(&doc.entries) {
+            entry.rule_version = stored.rule_version;
+        }
+    } else {
+        compiled = settle_versions(compiled).0;
+    }
     Ok(TableInEffect {
         source: "document",
         label: doc.label,
@@ -696,9 +771,18 @@ const NAMED_CLEARERS: [&str; 4] = [
 const LONG_HOLD_MINUTES: i64 = 480;
 
 /// Findings, never refusals: what the table would do on this hull that the
-/// authority should see before Confirm.
-fn findings(compiled: &Compiled, hull: &Hull, work_types: &Value) -> Vec<Value> {
-    let mut out = Vec::new();
+/// authority should see before Confirm. `reminted` names the rows whose
+/// carried version id was set aside.
+fn findings(
+    compiled: &Compiled,
+    hull: &Hull,
+    work_types: &Value,
+    reminted: &[String],
+) -> Vec<Value> {
+    let mut out: Vec<Value> = reminted
+        .iter()
+        .map(|text| finding("info", text.clone()))
+        .collect();
     if compiled.entries.is_empty() {
         out.push(finding(
             "warn",
@@ -889,7 +973,7 @@ pub(crate) async fn get_rule_table(
         "rows": row_reports(&table.table, &table.compiled, &hull, &clock.clock),
         "signoff": table.signoff,
         "work_types": work_types,
-        "findings": findings(&table.compiled, &hull, &work_types),
+        "findings": findings(&table.compiled, &hull, &work_types, &[]),
     }))
     .into_response())
 }
@@ -929,7 +1013,11 @@ pub(crate) async fn import_rule_table(
         ));
     }
     let clock = crate::yard_clock::clock_in_effect(state.store.as_ref(), &scope, vessel).await?;
-    let (table, compiled) = compile_text(&body.csv, &clock.clock).map_err(|refusals| {
+    let CompiledText {
+        table,
+        compiled,
+        reminted,
+    } = compile_text(&body.csv, &clock.clock).map_err(|refusals| {
         ApiError::OutOfRange(format!(
             "the rule table was refused whole: {}",
             refusals.join("; ")
@@ -955,7 +1043,7 @@ pub(crate) async fn import_rule_table(
     )
     .await?;
     let work_types = work_types_json(&compiled, &hull);
-    let findings = findings(&compiled, &hull, &work_types);
+    let findings = findings(&compiled, &hull, &work_types, &reminted);
     let moved = hull.moved(&current_rules, &proposed);
     let rows: Vec<Vec<String>> = table.rows.iter().map(|r| r.cells.clone()).collect();
     let hash = table_hash(&table.header, &rows);
@@ -1099,9 +1187,61 @@ mod tests {
             compiler::export(&RuleSet::seed_usn_hot_work(), &clock, compiler::seed_text),
             "the door's export is the compiler's, byte for byte"
         );
-        let (table, compiled) = compile_text(&csv, &clock).expect("the export compiles");
+        let CompiledText {
+            table,
+            compiled,
+            reminted,
+        } = compile_text(&csv, &clock).expect("the export compiles");
         assert_eq!(compiled.rule_set(), RuleSet::seed_usn_hot_work());
+        assert!(reminted.is_empty(), "the seed's ids are honoured");
         let rows: Vec<Vec<String>> = table.rows.iter().map(|r| r.cells.clone()).collect();
         assert_eq!(table_hash(&table.header, &rows), seed.hash);
+    }
+
+    #[test]
+    fn a_carried_id_is_honoured_only_while_the_row_reads_the_same() {
+        let clock = YardClock::utc();
+        // The seed's own export: every id carried, every id kept.
+        let csv = compiler::export(&RuleSet::seed_usn_hot_work(), &clock, compiler::seed_text);
+        // R04's hold edited in the spreadsheet, its seed id still in column 22.
+        let edited = csv.replace(
+            "\"deck_penetration\",\"30\",\"end\"",
+            "\"deck_penetration\",\"60\",\"end\"",
+        );
+        assert_ne!(edited, csv, "the edit lands on R04");
+        let CompiledText {
+            compiled, reminted, ..
+        } = compile_text(&edited, &clock).expect("the edited export compiles");
+        assert_eq!(reminted.len(), 1, "{reminted:?}");
+        assert!(
+            reminted[0]
+                .starts_with("R04-0 (line 7) carried version 00000000-0000-0000-0000-000000000402"),
+            "{}",
+            reminted[0]
+        );
+        let r04 = compiled
+            .entries
+            .iter()
+            .find(|(r, _)| r.rule == "R04")
+            .map(|(_, e)| e)
+            .expect("R04 compiles");
+        assert_eq!(r04.hold, Some(Minutes::new(60)));
+        assert_eq!(r04.rule_version, mint_version(r04), "content-addressed");
+        assert_eq!(r04.rule_version.as_uuid().get_version_num(), 8);
+        // Every other row keeps the seed's id.
+        let seed = RuleSet::seed_usn_hot_work();
+        for (r, e) in compiled.entries.iter().filter(|(r, _)| r.rule != "R04") {
+            assert!(
+                seed.entries()
+                    .iter()
+                    .any(|s| s.rule_version == e.rule_version),
+                "{r} keeps its seed id"
+            );
+        }
+        // A content-addressed id re-imported is its own proof.
+        let reexport = compiler::export(&compiled.rule_set(), &clock, compiler::seed_text);
+        let again = compile_text(&reexport, &clock).expect("re-export compiles");
+        assert!(again.reminted.is_empty(), "{:?}", again.reminted);
+        assert_eq!(again.compiled.rule_set(), compiled.rule_set());
     }
 }

@@ -9,6 +9,9 @@ handful of deliberate negative lags (overlaps written into the schedule's own
 logic — findings, not errors).
 
 The file exercises every grading path the ingest carries:
+  * every task carries a `work_type` UDF read off its step verb (hot_work,
+    coating, electrical, inspection, insulation, rigging, mechanical) — the
+    token the rule table binds rows to; the field map points at it,
   * most work locates through the compartment UDF (authored),
   * some locates only through a placard written in the task name (derived),
   * zone-level services carry no compartment at all but sit under their zone's
@@ -143,6 +146,27 @@ WAVES = [(0, 25), (14, 45), (45, 70), (95, 60), (130, 45)]
 SEEDED_WI = {"Z1": "WI-4471", "Z2": "WI-1905", "Z3": "WI-3318",
              "Z4": "WI-3905", "Z5": "WI-5571", "Z6": "WI-3402"}
 
+# The work type each task carries in its `work_type` UDF, read off the step
+# verb in the task's name — the token the rule table binds rows to (S14). The
+# first matching class wins, in this order; a name no verb claims is
+# `mechanical`. Milestones carry none: a key event is not work.
+WORK_TYPES = [
+    ("hot_work", ("weld", "crop", "cut out", "grind", "burn")),
+    ("coating", ("blast", "prime", "top coat", "cure")),
+    ("electrical", ("de-energize", "pull & land", "megger", "energize")),
+    ("inspection", ("ndt", "survey", "inspect", "test", "ring-out")),
+    ("insulation", ("strip lagging", "asbestos", "re-insulate", "sheathing")),
+    ("rigging", ("scaffolding", "rig")),
+]
+
+
+def work_type_of(name):
+    lowered = name.lower()
+    for token, verbs in WORK_TYPES:
+        if any(v in lowered for v in verbs):
+            return token
+    return "mechanical"
+
 lines = []
 task_rows = []
 pred_rows = []
@@ -234,6 +258,9 @@ def add_task(name, wbs, trade, start, end, *, milestone=False, compartment=None,
     if wi:
         udf_id += 1
         udf_rows.append((902, tid, wi))
+    if not milestone:
+        udf_id += 1
+        udf_rows.append((903, tid, work_type_of(name)))
     return tid, code
 
 
@@ -395,6 +422,7 @@ w("%T\tUDFTYPE")
 w("%F\tudf_type_id\tudf_type_name\tudf_type_label\tlogical_data_type")
 w("%R\t901\tcompartment\tCompartment\tFT_TEXT")
 w("%R\t902\twi_number\tWork Item\tFT_TEXT")
+w("%R\t903\twork_type\tWork Type\tFT_TEXT")
 w("%T\tTASK")
 w("%F\ttask_id\tproj_id\twbs_id\tclndr_id\ttask_code\ttask_name\ttask_type\tstatus_code"
   "\ttarget_start_date\ttarget_end_date\tearly_start_date\tearly_end_date"
@@ -422,3 +450,8 @@ print(f"{OUT.name}: {n_tasks} tasks ({n_miles} milestones) · {len(pred_rows)} r
       f"{len(rsrc_rows)} assignments · {len(udf_rows)} UDF values · {OUT.stat().st_size / 1048576:.1f} MB")
 neg = sum(1 for p in pred_rows if p[4] < 0)
 print(f"negative lags: {neg}")
+by_type = {}
+for utype, _, text in udf_rows:
+    if utype == 903:
+        by_type[text] = by_type.get(text, 0) + 1
+print("work types: " + " · ".join(f"{k} {v}" for k, v in sorted(by_type.items(), key=lambda kv: -kv[1])))

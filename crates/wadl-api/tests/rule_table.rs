@@ -8,6 +8,7 @@
 
 #![allow(
     missing_docs,
+    clippy::doc_markdown,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -55,12 +56,12 @@ fn with_r04_hold(csv: &str, minutes: &str) -> String {
 
 /// The table without column 22 — a table authored fresh, no ids carried.
 fn without_versions(csv: &str) -> String {
-    csv.lines()
-        .map(|line| {
-            let head = line.rsplit_once(',').map_or(line, |(head, _)| head);
-            format!("{head}\n")
-        })
-        .collect()
+    let mut out = String::with_capacity(csv.len());
+    for line in csv.lines() {
+        out.push_str(line.rsplit_once(',').map_or(line, |(head, _)| head));
+        out.push('\n');
+    }
+    out
 }
 
 fn rows_of(preview: &Value) -> &Vec<Value> {
@@ -184,9 +185,8 @@ async fn post_as(tw: &TestWorld, roles: &str, path: &str, body: Value) -> (Statu
     .await
 }
 
-#[tokio::test]
-async fn a_dry_run_compiles_the_reference_table_and_reports_what_each_row_fires_on() {
-    let tw = reference_hull().await;
+/// The reference table through the door as a dry run: the response.
+async fn dry_run_reference(tw: &TestWorld) -> Value {
     let (status, out) = tw
         .call(
             Method::POST,
@@ -198,6 +198,13 @@ async fn a_dry_run_compiles_the_reference_table_and_reports_what_each_row_fires_
     assert_eq!(out["stored"], false);
     assert_eq!(out["label"], "CVN73-rule-table.csv");
     assert_eq!(out["table_hash"].as_str().unwrap().len(), 64);
+    out
+}
+
+#[tokio::test]
+async fn a_dry_run_compiles_the_reference_table_and_reports_what_each_row_fires_on() {
+    let tw = reference_hull().await;
+    let out = dry_run_reference(&tw).await;
     let preview = &out["preview"];
     let rows = rows_of(preview);
     assert_eq!(rows.len(), 10, "seven rule ids, ten entries");
@@ -278,6 +285,13 @@ async fn a_dry_run_compiles_the_reference_table_and_reports_what_each_row_fires_
         live("coating_open").min(12)
     );
     assert_eq!(r03["entry"]["work_types"], json!(["hot_work"]));
+}
+
+#[tokio::test]
+async fn a_dry_run_audits_the_work_types_on_the_schedule_and_stores_nothing() {
+    let tw = reference_hull().await;
+    let out = dry_run_reference(&tw).await;
+    let preview = &out["preview"];
 
     // The work-type audit: what the export carries, what the table names.
     let wt = &preview["work_types"];
@@ -769,14 +783,15 @@ async fn space_under_the_coat(tw: &TestWorld) -> String {
                 .any(|no| s["compartment"]["compartment_no"] == *no)
         })
         .find(|s| s["rules_fired"] == json!(["R03"]) && s["state"] == "BLOCK");
-    only_r03
-        .map(|s| {
+    only_r03.map_or_else(
+        || panic!("a space under the coat held by R03 alone among {reached:?}"),
+        |s| {
             s["compartment"]["compartment_no"]
                 .as_str()
                 .unwrap()
                 .to_owned()
-        })
-        .unwrap_or_else(|| panic!("a space under the coat held by R03 alone among {reached:?}"))
+        },
+    )
 }
 
 #[tokio::test]
@@ -832,7 +847,7 @@ async fn a_cold_work_inspection_above_a_curing_coat_is_executable_and_the_weld_b
 
 /// The deck-states row for `no` at `as_of`.
 async fn deck_state(app: &axum::Router, tw: &TestWorld, no: &str, as_of_ms: i64) -> Value {
-    let (status, states) = call_app(
+    let (status, board) = call_app(
         app,
         tw,
         Method::GET,
@@ -841,8 +856,8 @@ async fn deck_state(app: &axum::Router, tw: &TestWorld, no: &str, as_of_ms: i64)
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{states}");
-    states
+    assert_eq!(status, StatusCode::OK, "{board}");
+    board
         .as_array()
         .unwrap()
         .iter()

@@ -24,6 +24,7 @@
 //! row only. The compiler itself is `wadl_engine::rule_table`, pure; this
 //! module reads the store, mints ids and shapes the wire.
 
+use core::fmt::Write as _;
 use std::collections::{BTreeMap, BTreeSet};
 
 use axum::extract::{Path, Query, State};
@@ -281,8 +282,10 @@ pub(crate) fn table_hash(header: &[String], rows: &[Vec<String>]) -> String {
     hasher
         .finalize()
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut hex, b| {
+            let _ = write!(hex, "{b:02x}");
+            hex
+        })
 }
 
 /// A content-addressed version id: `uuid8(sha256("wadl:rule-version:" ‖
@@ -756,7 +759,7 @@ fn work_types_json(compiled: &Compiled, hull: &Hull) -> Value {
 }
 
 fn finding(severity: &str, text: String) -> Value {
-    json!({ "severity": severity, "text": text })
+    json!({ "severity": severity, "text": Value::String(text) })
 }
 
 /// The clearing-authority codes the shell has a name for.
@@ -770,41 +773,12 @@ const NAMED_CLEARERS: [&str; 4] = [
 /// A shift's cure: a hold longer than this widens every read's hazard tail.
 const LONG_HOLD_MINUTES: i64 = 480;
 
-/// Findings, never refusals: what the table would do on this hull that the
-/// authority should see before Confirm. `reminted` names the rows whose
-/// carried version id was set aside.
-fn findings(
-    compiled: &Compiled,
-    hull: &Hull,
-    work_types: &Value,
-    reminted: &[String],
-) -> Vec<Value> {
-    let mut out: Vec<Value> = reminted
-        .iter()
-        .map(|text| finding("info", text.clone()))
-        .collect();
-    if compiled.entries.is_empty() {
-        out.push(finding(
-            "warn",
-            "nothing compiles — commit would put no rule in force".to_owned(),
-        ));
-    }
-    if !compiled.not_compiled.is_empty() {
-        let names: Vec<String> = compiled
-            .not_compiled
-            .iter()
-            .map(|(r, _)| r.rule.clone())
-            .collect();
-        out.push(finding(
-            "info",
-            format!(
-                "{} of {} rows are not compiled and stay on file with their reason: {}",
-                compiled.not_compiled.len(),
-                compiled.not_compiled.len() + compiled.entries.len(),
-                names.join(", ")
-            ),
-        ));
-    }
+/// What each compiled row would do on this hull that the authority should
+/// see: a coupling code the register does not carry, an exhaust trunk on a
+/// hull with too few such edges (Y2), a clearer the shell has no name for, a
+/// hold longer than a shift's cure.
+fn row_findings(compiled: &Compiled, hull: &Hull) -> Vec<Value> {
+    let mut out = Vec::new();
     let codes = hull.coupling_codes();
     let mut seen_codes: BTreeSet<String> = BTreeSet::new();
     for (r, entry) in &compiled.entries {
@@ -850,6 +824,45 @@ fn findings(
             ));
         }
     }
+    out
+}
+
+/// Findings, never refusals: what the table would do on this hull that the
+/// authority should see before Confirm. `reminted` names the rows whose
+/// carried version id was set aside.
+fn findings(
+    compiled: &Compiled,
+    hull: &Hull,
+    work_types: &Value,
+    reminted: &[String],
+) -> Vec<Value> {
+    let mut out: Vec<Value> = reminted
+        .iter()
+        .map(|text| finding("info", text.clone()))
+        .collect();
+    if compiled.entries.is_empty() {
+        out.push(finding(
+            "warn",
+            "nothing compiles — commit would put no rule in force".to_owned(),
+        ));
+    }
+    if !compiled.not_compiled.is_empty() {
+        let names: Vec<String> = compiled
+            .not_compiled
+            .iter()
+            .map(|(r, _)| r.rule.clone())
+            .collect();
+        out.push(finding(
+            "info",
+            format!(
+                "{} of {} rows are not compiled and stay on file with their reason: {}",
+                compiled.not_compiled.len(),
+                compiled.not_compiled.len() + compiled.entries.len(),
+                names.join(", ")
+            ),
+        ));
+    }
+    out.extend(row_findings(compiled, hull));
     let list = |key: &str| -> Vec<String> {
         work_types
             .get(key)
@@ -1063,19 +1076,7 @@ pub(crate) async fn import_rule_table(
             "preview": preview,
         })));
     }
-    let versions: Vec<Value> = compiled
-        .entries
-        .iter()
-        .map(|(r, e)| json!({ "rule": r.rule, "ordinal": r.ordinal, "version": e.rule_version }))
-        .collect();
-    let counts = json!({
-        "rows": table.rows.len(),
-        "compiled": compiled.entries.len(),
-        "in_force": in_force(&compiled, hull.at),
-        "moved_spaces": moved.get("spaces").cloned().unwrap_or(json!(0)),
-        "table_hash": hash,
-        "versions": versions,
-    });
+    let counts = ledger_counts(&table, &compiled, &hash, &moved, hull.at);
     let doc = RuleTableDoc {
         label: label.clone(),
         header: table.header.clone(),
@@ -1102,6 +1103,31 @@ pub(crate) async fn import_rule_table(
         "findings": findings,
         "preview": preview,
     })))
+}
+
+/// The counts a commit's `DOCUMENT_REPLACED` line carries: the rows, what
+/// compiled and is in force, how many spaces changed state, the hash the
+/// signature will be of, and every version put in force.
+fn ledger_counts(
+    table: &Table,
+    compiled: &Compiled,
+    hash: &str,
+    moved: &Value,
+    at: Timestamp,
+) -> Value {
+    let versions: Vec<Value> = compiled
+        .entries
+        .iter()
+        .map(|(r, e)| json!({ "rule": r.rule, "ordinal": r.ordinal, "version": e.rule_version }))
+        .collect();
+    json!({
+        "rows": table.rows.len(),
+        "compiled": compiled.entries.len(),
+        "in_force": in_force(compiled, at),
+        "moved_spaces": moved.get("spaces").cloned().unwrap_or(json!(0)),
+        "table_hash": hash,
+        "versions": versions,
+    })
 }
 
 /// `POST /api/vessels/:id/rule-table/revert` — back to the seed, and every

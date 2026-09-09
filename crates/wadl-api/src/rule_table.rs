@@ -331,9 +331,11 @@ struct TableInEffect {
 /// Parses and compiles CSV text against the hull's clock, minting ids for
 /// rows that carry none. Every refusal, or the compiled table.
 fn compile_text(csv: &str, clock: &YardClock) -> Result<(Table, Compiled), Vec<String>> {
-    let table = compiler::parse(csv).map_err(|r| r.iter().map(ToString::to_string).collect())?;
+    let sentences =
+        |r: Vec<compiler::Refusal>| -> Vec<String> { r.iter().map(ToString::to_string).collect() };
+    let table = compiler::parse(csv).map_err(sentences)?;
     let compiled = compiler::compile(&table, clock)
-        .map_err(|r| r.iter().map(ToString::to_string).collect::<Vec<_>>())?
+        .map_err(sentences)?
         .with_versions(mint_version);
     Ok((table, compiled))
 }
@@ -472,10 +474,8 @@ impl Hull {
                 *counts.entry(wt).or_insert(0) += 1;
             }
         }
-        let mut out: Vec<(String, usize)> = counts
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v))
-            .collect();
+        let mut out: Vec<(String, usize)> =
+            counts.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         out
     }
@@ -512,11 +512,18 @@ impl Hull {
             .activities
             .iter()
             .filter(|a| !a.is_milestone)
-            .filter(|a| a.compartment_no.as_ref().is_some_and(|no| spaces.contains(no)))
+            .filter(|a| {
+                a.compartment_no
+                    .as_ref()
+                    .is_some_and(|no| spaces.contains(no))
+            })
             .filter(|a| {
                 let work = Work {
                     work_type: a.work_type.as_deref(),
-                    category: a.compartment_no.as_ref().and_then(|no| self.category_of(no)),
+                    category: a
+                        .compartment_no
+                        .as_ref()
+                        .and_then(|no| self.category_of(no)),
                 };
                 entry.binds(work, self.at)
             })
@@ -821,17 +828,19 @@ fn export_csv(table: &Table, compiled: &Compiled, clock: &YardClock) -> String {
     let mut out = line(&compiler::export_header());
     out.push('\n');
     for (r, entry) in &compiled.entries {
-        let text = row_by_line.get(&r.line).map_or_else(RowText::default, |row| RowText {
-            name: table.cell(row, "Name").to_owned(),
-            trigger: table.cell(row, "Trigger condition").to_owned(),
-            propagation: table.cell(row, "Propagation type").to_owned(),
-            clearing_condition: table.cell(row, "Clearing condition").to_owned(),
-            who_may_clear: table.cell(row, "Who may clear").to_owned(),
-            config_anchor: table.cell(row, "Config anchor").to_owned(),
-            open_question: table
-                .cell(row, "Open question for the safety authority")
-                .to_owned(),
-        });
+        let text = row_by_line
+            .get(&r.line)
+            .map_or_else(RowText::default, |row| RowText {
+                name: table.cell(row, "Name").to_owned(),
+                trigger: table.cell(row, "Trigger condition").to_owned(),
+                propagation: table.cell(row, "Propagation type").to_owned(),
+                clearing_condition: table.cell(row, "Clearing condition").to_owned(),
+                who_may_clear: table.cell(row, "Who may clear").to_owned(),
+                config_anchor: table.cell(row, "Config anchor").to_owned(),
+                open_question: table
+                    .cell(row, "Open question for the safety authority")
+                    .to_owned(),
+            });
         out.push_str(&line(&compiler::export_row(entry, clock, &text)));
         out.push('\n');
     }
@@ -869,13 +878,7 @@ pub(crate) async fn get_rule_table(
         return Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response());
     }
     let rules = table.compiled.rule_set();
-    let hull = Hull::read(
-        &state,
-        &scope,
-        vessel,
-        rules.longest_end_anchored_hold(),
-    )
-    .await?;
+    let hull = Hull::read(&state, &scope, vessel, rules.longest_end_anchored_hold()).await?;
     let work_types = work_types_json(&table.compiled, &hull);
     Ok(Json(json!({
         "source": table.source,
@@ -1057,10 +1060,18 @@ mod tests {
         let minted = mint_version(&r03);
         let mut renamed = r03.clone();
         renamed.rule_version = RuleVersionId::from_uuid(Uuid::from_u128(0xF00D));
-        assert_eq!(mint_version(&renamed), minted, "the id is not part of the content");
+        assert_eq!(
+            mint_version(&renamed),
+            minted,
+            "the id is not part of the content"
+        );
         let mut longer = r03.clone();
         longer.hold = Some(Minutes::new(600));
-        assert_ne!(mint_version(&longer), minted, "a changed cell is a new version");
+        assert_ne!(
+            mint_version(&longer),
+            minted,
+            "a changed cell is a new version"
+        );
         assert_eq!(minted.as_uuid().get_version_num(), 8);
         // Two entries of one row differ by reach, so they get distinct ids.
         let same_space = seed

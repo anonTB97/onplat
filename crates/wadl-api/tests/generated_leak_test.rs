@@ -991,6 +991,57 @@ async fn leak_post_api_vessels_id_yard_clock_revert() {
 }
 
 #[tokio::test]
+async fn leak_get_api_vessels_id_rule_table() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/rule-table"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("GET", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant GET /api/vessels/:id/rule-table must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_rule_table() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/rule-table"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","csv":"Rule ID,Name,Kind,Trigger condition,Propagation type,Hop depth,Resulting state,Authority document,Clearing condition,Who may clear,Config anchor,Open question for the safety authority\n"}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/rule-table must be 404"
+    );
+}
+
+#[tokio::test]
+async fn leak_post_api_vessels_id_rule_table_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let foreign = w.navy_hull.as_uuid().to_string();
+    let path = "/api/vessels/:id/rule-table/revert"
+        .replace(":id", &foreign)
+        .replace(":no", "4-141-0-C");
+    let code = status("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "cross-tenant POST /api/vessels/:id/rule-table/revert must be 404"
+    );
+}
+
+#[tokio::test]
 async fn leak_get_api_vessels_id_schedule_proposals() {
     let (_, w) = wadl_api::demo_app();
     let org = w.yard_org.as_uuid().to_string();
@@ -1127,7 +1178,7 @@ async fn control_in_tenant_get_vessel_is_ok() {
 
 #[test]
 fn every_scoped_id_route_has_a_leak_test() {
-    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 57);
+    assert_eq!(wadl_api::routes::scoped_id_routes().len(), 60);
 }
 
 #[tokio::test]
@@ -1798,7 +1849,53 @@ async fn weakest_role_post_api_vessels_id_yard_clock_revert() {
     );
 }
 
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_rule_table() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/rule-table"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, Some(r#"{"label":"leak test","csv":"Rule ID,Name,Kind,Trigger condition,Propagation type,Hop depth,Resulting state,Authority document,Clearing condition,Who may clear,Config anchor,Open question for the safety authority\n"}"#)).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/rule-table must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
+#[tokio::test]
+async fn weakest_role_post_api_vessels_id_rule_table_revert() {
+    let (_, w) = wadl_api::demo_app();
+    let org = w.yard_org.as_uuid().to_string();
+    let assigned = yard_assigned(&w);
+    let hull = w.cvn73.as_uuid().to_string();
+    let path = "/api/vessels/:id/rule-table/revert"
+        .replace(":id", &hull)
+        .replace(":no", "4-141-0-C");
+    let (code, problem) = as_reader("POST", &path, &org, &assigned, None).await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "a reader at POST /api/vessels/:id/rule-table/revert must be 403"
+    );
+    assert_eq!(
+        problem
+            .get("capability")
+            .and_then(serde_json::Value::as_str),
+        Some("commit_document")
+    );
+}
+
 #[test]
 fn every_gated_route_has_a_weakest_role_test() {
-    assert_eq!(wadl_api::roles::GATED.len(), 26);
+    assert_eq!(wadl_api::roles::GATED.len(), 28);
 }

@@ -414,6 +414,18 @@ pub const GATED: &[(&str, &str, Capability)] = &[
         "/api/vessels/:id/yard-clock/revert",
         Capability::CommitDocument,
     ),
+    // The rule table is a document through a door like every other; the
+    // signature (S14 sitting C, `sign_rule_table`) is the deed that differs.
+    (
+        "POST",
+        "/api/vessels/:id/rule-table",
+        Capability::CommitDocument,
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/rule-table/revert",
+        Capability::CommitDocument,
+    ),
 ];
 
 /// POST routes deliberately open to every authenticated caller. Empty today;

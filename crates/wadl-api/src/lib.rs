@@ -221,6 +221,14 @@ pub fn build_router(state: AppState) -> Router {
             post(yard_clock::revert_yard_clock),
         )
         .route(
+            "/api/vessels/:id/rule-table",
+            get(rule_table::get_rule_table).post(rule_table::import_rule_table),
+        )
+        .route(
+            "/api/vessels/:id/rule-table/revert",
+            post(rule_table::revert_rule_table),
+        )
+        .route(
             "/api/vessels/:id/schedule-proposals",
             get(handlers::list_schedule_proposals).post(handlers::propose_schedule_change),
         )

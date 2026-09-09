@@ -185,6 +185,16 @@ const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
         ),
     ),
     ("POST", "/api/vessels/:id/yard-clock/revert", true, None),
+    ("GET", "/api/vessels/:id/rule-table", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/rule-table",
+        true,
+        Some(
+            r#"{"label":"leak test","csv":"Rule ID,Name,Kind,Trigger condition,Propagation type,Hop depth,Resulting state,Authority document,Clearing condition,Who may clear,Config anchor,Open question for the safety authority\n"}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/rule-table/revert", true, None),
     ("GET", "/api/vessels/:id/schedule-proposals", true, None),
     (
         "POST",

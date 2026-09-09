@@ -981,6 +981,7 @@ async fn newest_ledger_row(tw: &TestWorld) -> Value {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // one signature walked end to end: seed refused, commit, sign, re-sign, recommit
 async fn signing_records_the_person_the_hash_and_the_versions_and_a_recommit_unsigns() {
     let tw = reference_hull().await;
     // The seed is not signed here: the table is committed through the door first.

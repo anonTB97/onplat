@@ -58,6 +58,7 @@ import {
 import { fmtStamp, type YardClockInfo } from "./clock";
 import { useIdentity, type Capability } from "./identity";
 import { SHEET_SOURCE, SHEET_SOURCE_URL } from "./deckSheets";
+import { RuleTableCard } from "./RuleTableCard";
 import { ScheduleDoor } from "./ScheduleDoor";
 import { SourceCard } from "./SourceCard";
 import {
@@ -1036,6 +1037,20 @@ export default function SourcesBoard({
           importHint="Raised and cleared one at a time on the Deck Explorer"
           commitCapability="raise_hazard"
           onOpenHome={() => onOpenModule("deckExplorer")}
+        />
+
+        <RuleTableCard
+          identity={identity}
+          vesselId={vesselId}
+          nonce={nonce}
+          stagedKind={staged?.kind ?? null}
+          onStage={setStaged}
+          onMutated={() => {
+            setNonce((n) => n + 1);
+            onMutated();
+          }}
+          onMsg={setMsg}
+          onOpenModule={onOpenModule}
         />
 
         <SourceCard

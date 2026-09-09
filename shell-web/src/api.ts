@@ -736,6 +736,9 @@ export interface Activity {
   /** The work type the field map read for this row — what the rule table
    *  binds to. null when the map names no field for it. */
   work_type?: string | null;
+  /** How many rules in force bind to this row's work type in its space —
+   *  the set it was judged by. Absent on a register served before S14. */
+  rules_bound?: number;
   planned: Window | null;
   budget_hours: number;
   earned_hours: number;
@@ -1058,6 +1061,9 @@ export interface ActivityRegister {
   mapping: MappingReport;
   /** The schedule's logic — what the dates were computed from. */
   edges: ScheduleEdge[];
+  /** Whose rules judged the rows: the seed or a committed table, and
+   *  whether the safety authority has signed it. Absent before S14. */
+  rules?: { source: "seed" | "document"; label: string; signed: boolean };
   activities: Activity[];
 }
 
@@ -1739,6 +1745,167 @@ export async function revertYardClock(id: Identity, vesselId: string): Promise<v
     headers: headers(id),
   });
   if (!res.ok) throw await doorRefusal(res, "yard clock revert");
+}
+
+/* ------------------------------------------------------------ the rule table */
+
+/** One finding the rule door makes without refusing. */
+export interface RuleDoorFinding {
+  severity: "warn" | "info";
+  text: string;
+}
+
+/** What one compiled row does: the entry as the engine holds it. */
+export interface RuleEntryReport {
+  hazard: string;
+  applies: "same_space" | { coupled: { code: string; max_hops: number } } | Record<string, unknown>;
+  state: string;
+  hold: number | null;
+  hold_from: "raise" | "end";
+  clearing_authority: string;
+  work_types: string[];
+  categories: string[];
+  effective_from: string;
+  effective_to: string;
+}
+
+/** What a row fires on today, against the hull as it stands. */
+export interface FiresOn {
+  hazards: number;
+  spaces: string[];
+  space_count: number;
+  activities_bound: number;
+}
+
+/** One row of the table's report, in file order — compiled or not, with its
+ *  sentence when not. */
+export interface RowReport {
+  rule: string;
+  ordinal: number;
+  line: number;
+  name: string;
+  kind: string;
+  compiled: boolean;
+  why_not: string | null;
+  entry: RuleEntryReport | null;
+  version: string | null;
+  fires_on: FiresOn | null;
+}
+
+/** The safety authority's signature on a rule table: who, when, of what. */
+export interface SignOff {
+  signed_at_ms: number;
+  signer_id: string;
+  signer_name: string;
+  statement: string;
+  table_hash: string;
+  /** The version ids signed — every entry in force at signing. */
+  rows: string[];
+  ledger_seq: number;
+}
+
+/** The work-type audit: what the schedule carries, what the table names. */
+export interface WorkTypeAudit {
+  on_schedule: { work_type: string; activities: number }[];
+  bound: string[];
+  unbound_on_schedule: string[];
+  unseen_in_table: string[];
+}
+
+/** The table in force: the committed document, or the seed in the document's layout. */
+export interface RuleTableInfo {
+  source: "seed" | "document";
+  label: string;
+  table_hash: string;
+  rows_total: number;
+  rows_in_force: number;
+  rows: RowReport[];
+  signoff: SignOff | null;
+  work_types: WorkTypeAudit;
+  findings: RuleDoorFinding[];
+}
+
+/** Which spaces change state right now if the table replaces the one in force. */
+export interface RuleTableMoved {
+  spaces: number;
+  examples: { compartment: string; before: string; after: string; rule: string }[];
+}
+
+/** What the rule door previews before Confirm. */
+export interface RuleTablePreview {
+  rows: RowReport[];
+  in_force: number;
+  replaces: { source: "seed" | "document"; label: string };
+  work_types: WorkTypeAudit;
+  moved: RuleTableMoved;
+}
+
+/** The rule door's answer to a dry run or a commit. */
+export interface RuleTableImport {
+  stored: boolean;
+  label: string;
+  table_hash: string;
+  findings: RuleDoorFinding[];
+  preview: RuleTablePreview;
+}
+
+/** The table in force with every row's report and the signature. */
+export async function getRuleTable(id: Identity, vesselId: string): Promise<RuleTableInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`rule table → ${res.status}`);
+  return (await res.json()) as RuleTableInfo;
+}
+
+/** The in-force set exported in the handoff layout — what the sitting starts from. */
+export async function exportRuleTableCsv(id: Identity, vesselId: string): Promise<string> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table?format=csv`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`rule table export → ${res.status}`);
+  return await res.text();
+}
+
+/** The safety authority's CSV through the door, refused whole with every
+ *  reason (422 — the server's sentence is the error). `dryRun` previews
+ *  every row against the hull and stores nothing. */
+export async function importRuleTable(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  csv: string,
+  dryRun: boolean,
+): Promise<RuleTableImport> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, csv }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "rule table");
+  return (await res.json()) as RuleTableImport;
+}
+
+/** Back to the seed — every trace carries the seed's ids again. */
+export async function revertRuleTable(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "rule table revert");
+}
+
+/** The safety authority signs the stored table's hash — refused without a
+ *  document, with a stale hash, or when that hash is already signed. */
+export async function signRuleTable(
+  id: Identity,
+  vesselId: string,
+  statement: string,
+  tableHash: string,
+): Promise<{ signed: boolean; signoff: SignOff }> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table/sign`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ statement, table_hash: tableHash }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "rule table signature");
+  return (await res.json()) as { signed: boolean; signoff: SignOff };
 }
 
 /** One surveyed space of a geometry register (docs/geometry-accuracy.md). */

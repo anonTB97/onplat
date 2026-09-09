@@ -30,6 +30,7 @@ export const CAPABILITIES = [
   "commit_document",
   "propose",
   "decide",
+  "sign_rule_table",
 ] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
@@ -66,6 +67,7 @@ export const DEEDS: Record<Capability, string> = {
   commit_document: "commit or revert a document",
   propose: "propose a schedule change",
   decide: "answer for an option or an issue",
+  sign_rule_table: "sign the rule table",
 };
 
 /** What the shell asserts on the wire, by trust mode. */

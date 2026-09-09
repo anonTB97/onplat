@@ -117,6 +117,24 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
             brings a prior import back, ledgered. The line under the hull in the top bar reads
             whose export every screen is on and since when.
           </p>
+          <p style={{ margin: "0 0 8px" }}>
+            <span style={dt}>The rules are a document too.</span> The <b>Rule table</b> card on{" "}
+            <Go to="sources" label="Data Sources" onOpenModule={onOpenModule} /> is the safety
+            authority&apos;s door: <b>Export CSV</b> hands them the table in force in their own
+            handoff columns; an upload dry-runs every row against the hull as it stands — the
+            state, the reach, the work types it binds to, the hold, what it <i>fires on today</i>,
+            which spaces would change state — and Confirm puts it in force on every trace with
+            content-addressed version ids, so a row that did not change keeps its id and its
+            golden trace. Rows bind by <b>work type</b>: an inspection above a curing coat is
+            judged by the rows bound to inspection, the weld beside it by the rows bound to hot
+            work, and unknown work by every row. The{" "}
+            <Go to="sequenceBoard" label="Sequence Board" onOpenModule={onOpenModule} /> carries
+            the work type per row, says <i>judged by N rows bound to</i> it, and wears a{" "}
+            <b>RULES</b> chip naming the table and whether it is <b>signed</b>. Only Safety may{" "}
+            <b>Sign this table</b>: the statement and the table&apos;s hash go into the ledger under
+            their name as <span style={mono}>RULE_TABLE_SIGNED</span>, and any later commit unsigns
+            it — the signature is of a hash, never of a label.
+          </p>
           <p style={{ margin: 0, ...dim }}>
             A realistic hull ships in the repo as documents: <span style={mono}>reference/cvn73/</span>{" "}
             — a 476-space compartment register on twelve decks, a zone chart of 3-D blocks, a

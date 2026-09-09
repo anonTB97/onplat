@@ -213,9 +213,16 @@ and pins the engine's answer as one snapshot per row, named
 `rule-ordinal-scenario`, the row's fields in the snapshot header. Sixteen
 rows cover the eight rule ids in force today. The CSV row is what the
 authority signs; the snapshot is the engine's answer to it. The signature on
-the table itself goes through the rule door's sign route (S14, sitting C):
-recorded on the document and in the ledger under the signer's person,
-invalidated by any later commit.
+the table itself is given on the **Rule table** card on Data Sources
+(`POST /api/vessels/:id/rule-table/sign` with `{ statement, table_hash }`,
+capability `sign_rule_table`, Safety alone): the card shows the statement
+for them to edit, names them on the button, and the server refuses the
+seed (commit the table first), a hash that is not the stored table's, and a
+hash already signed. The signature is recorded on the document (`signoff`:
+who, when, the statement, the hash, every version id, the ledger seq) and
+in the ledger as `RULE_TABLE_SIGNED` under the signer's person; any later
+commit clears it, because the signature is of a hash. The Sequence Board's
+`RULES` chip reads *signed* from then on.
 
 The sign-off table lives in this file's companion
 `docs/briefs/rule-signoff.md` once the sitting produces rows; until then

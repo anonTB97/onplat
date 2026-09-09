@@ -208,6 +208,37 @@ Role menu → **Safety**. The front door is **Conflicts & Risk**.
   about where the served hull came from, written by the same loader
   `wadl load-docs` runs from the DBA's session on data-load day (then the
   rows read `via: cli`).
+- **Safety signs the table after the clearance.** Still as Safety, open
+  **Data Sources** and find the **Rule table** card. At boot it reads
+  `SEED` — *10 entries in force from 10 rows*, *unsigned — the seed is in
+  force; the safety authority signs a committed table*, and the work-type
+  line in amber: *unbound: coating, electrical, inspection, insulation,
+  mechanical, rigging — judged by the any-work rows only*. **Sign this
+  table** is disabled with the reason (the seed is not signed here). Switch
+  to **Planner**, **⭱ Upload rule table CSV** with
+  `reference/cvn73/CVN73-rule-table.csv` — the seed in the handoff's own
+  22 columns (Export CSV hands out the same file). The staged bar reads
+  *10 entries in force from 10 rows · replaces seed_usn_hot_work (seed) ·
+  0 spaces change state right now*, and the fold under the card lists every
+  row — R03 BLOCK same space, hot_work, hold 480; R04 SUSPEND
+  deck_penetration 1 hop, any work, *hold 30 min from the permit's close*,
+  *fires on 8 spaces*; R09 twice, SUSPEND for hot work and WARN for the
+  rest — each with the seed's version id. Confirm: the card reads
+  `INGESTED`, *unsigned — committed, awaiting the safety authority's
+  signature*, and the Sequence Board's **RULES** chip reads
+  *CVN73-rule-table.csv unsigned* in amber. Planner's **Sign this table**
+  is disabled: *Planner may not sign the rule table — sign_rule_table is
+  held by Safety*. Switch to **Safety** and click it: the statement is
+  written for them — *I, Demo Safety Officer (Y-1007), have read the 10
+  entries in force of CVN73-rule-table.csv (…) against the golden traces
+  and sign this as the table the hull runs* — edit it or not, then **Sign
+  as Demo Safety Officer (Y-1007)**. The card reads `SIGNED` with *signed
+  by Demo Safety Officer (Y-1007) · <stamp> · ledger #n*; the **Decisions
+  Ledger**'s newest row is `RULE TABLE SIGNED` under the same name with the
+  statement and the hash; the Sequence Board's chip reads *signed* in
+  green. Upload the table again with R04's hold changed to 60 and Confirm:
+  the card is `INGESTED` and *unsigned* again — the signature was of a
+  hash. Discard brings the seed back.
 
 ## 5. Ship Super and Project Manager — "the hull, worst first" (2 min)
 

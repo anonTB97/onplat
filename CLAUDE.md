@@ -36,9 +36,13 @@ plan and every slice is expected to advance it, or at minimum not regress it.
   the inside of that extractor only. Deployment shape: `deploy/`.
 - The lint wall is part of the product: no `unsafe`, no `unwrap`/`expect`/
   `panic`/indexing in non-test code, `-D warnings`, `--locked` in CI. Run
-  `cargo fmt --all && cargo clippy --workspace --all-targets --all-features
-  -- -D warnings` before committing; also featureless `cargo test
-  --workspace` (this proves the no-sqlx tree still stands).
+  `cargo fmt --all && RUSTFLAGS="-D warnings" cargo clippy --workspace
+  --all-targets --all-features -- -D warnings` before committing; also
+  featureless `cargo test --workspace` (this proves the no-sqlx tree still
+  stands). The `RUSTFLAGS` matters: CI exports it globally, so rustc lints
+  like `missing_docs` are hard errors there — a local run without it prints
+  them as warnings, and grepping for `error` sails past them. Three pushes
+  have gone red exactly that way.
 
 ## Conventions
 

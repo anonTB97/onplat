@@ -10,7 +10,7 @@ use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::VesselId;
 use wadl_domain::time::Timestamp;
 use wadl_domain::units::ManHours;
-use wadl_engine::{evaluate, Decision, EvaluationRequest};
+use wadl_engine::Decision;
 use wadl_plan::governing_constraint;
 use wadl_plan::readiness::{roll_up, Readiness, SpaceReadiness};
 
@@ -23,7 +23,7 @@ use crate::AppState;
 /// single body byte is buffered. Read by hand against [`crate::MAX_IMPORT_BYTES`]
 /// so the generous import ceiling applies to exactly these doors; every other
 /// route keeps axum's small default limit.
-async fn read_import_body<T: serde::de::DeserializeOwned>(
+pub(crate) async fn read_import_body<T: serde::de::DeserializeOwned>(
     req: axum::extract::Request,
 ) -> Result<T, ApiError> {
     let bytes = axum::body::to_bytes(req.into_body(), crate::MAX_IMPORT_BYTES)
@@ -38,7 +38,7 @@ async fn read_import_body<T: serde::de::DeserializeOwned>(
 /// get flattened in the process is a length-limit trip — that is a 413 with
 /// the ceiling named (axum's small default on these routes; the import doors
 /// read their own bodies against [`crate::MAX_IMPORT_BYTES`]), not a 422.
-fn body_rejection(rejection: &axum::extract::rejection::JsonRejection) -> ApiError {
+pub(crate) fn body_rejection(rejection: &axum::extract::rejection::JsonRejection) -> ApiError {
     // axum's default body ceiling on extractors, which these routes keep.
     const DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;
     if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
@@ -103,20 +103,50 @@ impl AsOf {
     }
 }
 
-pub(crate) async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok", "decision_support_only": true }))
+/// `GET /health` — whether this process can answer, and whether its store
+/// can. A load balancer reads the status code; an operator reads the body:
+/// which backend, whether a round trip just succeeded, the migration the
+/// database is at, the document shape this build writes, which identity
+/// boundary is armed (the shell reads `identity_mode` before it decides
+/// whether to send dev headers at all), and the release stamp — the commit,
+/// its instant and the migration set this binary was built for — with
+/// `schema_state` judging that set against the database's. Unreachable
+/// store → 503, so a pool that lost its database drops out of rotation
+/// instead of serving 500s to every screen.
+pub(crate) async fn health(State(state): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
+    let store = state.store.health().await;
+    let status = if store.reachable {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    let version = crate::version::current();
+    let schema_state =
+        crate::version::schema_state(version.schema, store.schema_version.as_deref());
+    (
+        status,
+        Json(json!({
+            "status": if store.reachable { "ok" } else { "degraded" },
+            "decision_support_only": true,
+            "identity_mode": crate::auth::identity_mode(),
+            "version": version,
+            "schema_state": schema_state,
+            "store": store,
+            "now": state.clock.now(),
+        })),
+    )
 }
 
 pub(crate) async fn list_vessels(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
 ) -> Json<Value> {
     Json(json!(state.store.list_vessels(&scope).await))
 }
 
 pub(crate) async fn get_vessel(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = state
@@ -128,14 +158,43 @@ pub(crate) async fn get_vessel(
 
 pub(crate) async fn list_compartments(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let compartments = state
-        .store
-        .list_compartments(&scope, VesselId::from_uuid(id))
-        .await?;
+    let vessel = VesselId::from_uuid(id);
+    let mut compartments = state.store.list_compartments(&scope, vessel).await?;
+    overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
     Ok(Json(json!(compartments)))
+}
+
+/// Overlays the ingested geometry register onto served compartments: a
+/// surveyed space gains its frame extent, its forward boundary becomes the
+/// drawn datum, and its provenance climbs to `surveyed`. Done here, once, so
+/// both stores serve identical geometry and no view re-derives the grade.
+async fn overlay_geometry(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    compartments: &mut [wadl_store::model::CompartmentSummary],
+) -> Result<(), ApiError> {
+    let Some(register) = state.store.geometry_register(scope, vessel).await? else {
+        return Ok(());
+    };
+    let by_no: std::collections::BTreeMap<&str, &wadl_store::model::SpaceGeometrySummary> =
+        register
+            .spaces
+            .iter()
+            .map(|g| (g.compartment_no.as_str(), g))
+            .collect();
+    for c in compartments.iter_mut() {
+        if let Some(g) = by_no.get(c.compartment_no.as_str()) {
+            c.frame = Some(g.fwd_frame);
+            c.fwd_frame = Some(g.fwd_frame);
+            c.aft_frame = Some(g.aft_frame);
+            "surveyed".clone_into(&mut c.geometry_source);
+        }
+    }
+    Ok(())
 }
 
 /// The work orders on a hull, each marked with whether it is planned for `as_of`.
@@ -145,7 +204,7 @@ pub(crate) async fn list_compartments(
 /// it reads as in progress, and that is a flag, not an omission.
 pub(crate) async fn list_work_orders(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -191,22 +250,19 @@ pub(crate) async fn list_work_orders(
 /// negative lags where cure-window inversions hide.
 pub(crate) async fn list_activities(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let activities = state.store.list_activities(&scope, vessel).await?;
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let hull = wadl_issues::Hull {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-    };
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let rules_served = crate::rule_table::rules_served(&state, &scope, vessel).await?;
     let source = state.store.schedule_source(&scope, vessel).await?;
+    // The run the served register came from — label, when, by whom — so the
+    // breadcrumb can say whose export this is without a second read.
+    let schedule_run = state.store.served_schedule_run(&scope, vessel).await?;
     let schedule_edges = state.store.list_schedule_edges(&scope, vessel).await?;
     let reconciliation = reconcile(&state, &scope, vessel, &activities).await?;
     // The location-mapping report rides on every read, not only on the import
@@ -215,15 +271,21 @@ pub(crate) async fn list_activities(
     // learn to disagree.
     let compartments = state.store.list_compartments(&scope, vessel).await?;
     let mapping = mapping_report(&activities, &compartments);
+    // Each row is judged by the rows bound to its work type in its space —
+    // a cold-work inspection above a curing coat is executable while the
+    // weld beside it is refused — and says how many rows bind to it.
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, &activities);
     let rows: Vec<Value> = activities
         .into_iter()
         .map(|a| {
+            let hull = inputs.hull_under(scopes.for_activity(&a));
             let exec = wadl_issues::executability(&hull, a.compartment_no.as_ref(), a.planned);
             let mut row = json!(a);
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("in_window".to_owned(), json!(a.booked_at(at)));
                 obj.insert("remaining_hours".to_owned(), json!(a.remaining_hours()));
                 obj.insert("executability".to_owned(), json!(exec));
+                obj.insert("rules_bound".to_owned(), json!(scopes.rules_bound(&a)));
             }
             row
         })
@@ -231,6 +293,8 @@ pub(crate) async fn list_activities(
     Ok(Json(json!({
         "as_of": at,
         "schedule_source": source,
+        "schedule_run": schedule_run,
+        "rules": rules_served,
         "reconciliation": reconciliation,
         "mapping": mapping,
         "edges": schedule_edges,
@@ -255,7 +319,7 @@ pub(crate) async fn list_activities(
 /// the options panel; nothing here writes anything.
 pub(crate) async fn schedule_alternatives(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -266,14 +330,9 @@ pub(crate) async fn schedule_alternatives(
         .availability
         .map_or_else(|| Timestamp::from_epoch_millis(i64::MAX / 2), |w| w.end);
     let activities = state.store.list_activities(&scope, vessel).await?;
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let hull = wadl_issues::Hull {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-    };
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, &activities);
     let edges = state.store.list_schedule_edges(&scope, vessel).await?;
     let start_of: std::collections::BTreeMap<&str, i64> = activities
         .iter()
@@ -285,6 +344,7 @@ pub(crate) async fn schedule_alternatives(
         let (Some(compartment), Some(planned)) = (a.compartment_no.as_ref(), a.planned) else {
             continue;
         };
+        let hull = inputs.hull_under(scopes.for_activity(a));
         let exec = wadl_issues::executability(&hull, Some(compartment), Some(planned));
         let wadl_issues::Executability::NotExecutable(refusal) = exec else {
             continue;
@@ -332,7 +392,7 @@ pub(crate) async fn schedule_alternatives(
 /// generated register this is empty by construction (a test pins it); once a
 /// real export is the register, this is where "the schedule does not cover the
 /// package work" stops being a surprise in a meeting.
-async fn reconcile(
+pub(crate) async fn reconcile(
     state: &AppState,
     scope: &wadl_store::TenantScope,
     vessel: VesselId,
@@ -413,23 +473,36 @@ async fn reconcile(
 /// worse, mark a projection as live.
 pub(crate) async fn timeframe(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = state
         .store
         .get_vessel(&scope, VesselId::from_uuid(id))
         .await?;
+    // The yard clock rides on the first read the shell makes per hull, so
+    // every board renders yard-local from its first paint after this one.
+    let clock =
+        crate::yard_clock::clock_in_effect(state.store.as_ref(), &scope, VesselId::from_uuid(id))
+            .await?;
+    // And the served schedule run, for the breadcrumb: which export, when,
+    // by whom — `null` for the generated register.
+    let schedule_run = state
+        .store
+        .served_schedule_run(&scope, VesselId::from_uuid(id))
+        .await?;
     Ok(Json(json!({
         "now": state.clock.now(),
         "availability_code": vessel.availability_code,
         "availability": vessel.availability,
+        "yard_clock": clock.summary(),
+        "schedule_run": schedule_run,
     })))
 }
 
 pub(crate) async fn stranded_hours(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let report = state
@@ -442,7 +515,7 @@ pub(crate) async fn stranded_hours(
 /// The hull's decks, ordered downward.
 pub(crate) async fn list_decks(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let decks = state
@@ -461,7 +534,7 @@ pub(crate) async fn list_decks(
 /// same engine build run in the browser and on a phone.
 pub(crate) async fn compartment_state(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -522,6 +595,60 @@ async fn packages_with_footprints(
         });
     }
     Ok(out)
+}
+
+/// Where a hull's booked hours come from, said on the response so a planner
+/// can tell a demo register from their own schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HoursSource {
+    /// The ingested schedule of record: every located, unfinished activity
+    /// is booked work in its space over its planned window.
+    ScheduleOfRecord,
+    /// The seeded work orders — the demo world, before any import.
+    SeededWorkOrders,
+}
+
+/// The work booked on the hull, as rows the readiness rollup can price.
+///
+/// Once a schedule of record is ingested, the schedule IS the work: each
+/// located activity with hours left becomes one booked row in its space over
+/// its planned window, so the deck and readiness tiles show the yard's own
+/// hours rather than the six seeded orders the demo shipped with. Without an
+/// ingest the seeded orders stand in, and the response says which.
+async fn booked_orders(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+) -> Result<(Vec<wadl_store::model::WorkOrderSummary>, HoursSource), ApiError> {
+    if state.store.schedule_source(scope, vessel).await?.is_none() {
+        return Ok((
+            state.store.list_work_orders(scope, vessel).await?,
+            HoursSource::SeededWorkOrders,
+        ));
+    }
+    let activities = state.store.list_activities(scope, vessel).await?;
+    let rows = activities
+        .into_iter()
+        .filter(|a| !a.is_milestone && a.status != wadl_store::model::ActivityStatus::Complete)
+        .filter_map(|a| {
+            let compartment_no = a.compartment_no?;
+            Some(wadl_store::model::WorkOrderSummary {
+                work_order_id: wadl_domain::ids::WorkOrderId::from_uuid(a.activity_id.as_uuid()),
+                code: a.work_order_code.unwrap_or_else(|| a.code.clone()),
+                title: a.name,
+                trade: a.trade,
+                system: String::new(),
+                compartment_no,
+                budget_hours: a.budget_hours,
+                earned_hours: a.earned_hours,
+                source_ref: a.source_ref,
+                source_verified: true,
+                planned: a.planned,
+            })
+        })
+        .collect();
+    Ok((rows, HoursSource::ScheduleOfRecord))
 }
 
 fn booked_work(
@@ -589,30 +716,29 @@ fn booked_work(
 /// query Deck Explorer draws a deck sheet from.
 pub(crate) async fn deck_states(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let compartments = state.store.list_compartments(&scope, vessel).await?;
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let orders = state.store.list_work_orders(&scope, vessel).await?;
+    let mut compartments = state.store.list_compartments(&scope, vessel).await?;
+    overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
+    // The deck board is an array of rows; the hours source rides on the
+    // readiness rollup, which is the object the tiles read.
+    let (orders, _hours_source) = booked_orders(&state, &scope, vessel).await?;
     let packages = packages_with_footprints(&state, &scope, vessel).await?;
     let stranded = state.store.stranded_hours(&scope, vessel).await?;
 
     let rows: Vec<Value> = compartments
         .into_iter()
         .map(|compartment| {
-            let decision = evaluate(&EvaluationRequest {
-                subject: &compartment.compartment_no,
-                graph: &graph,
-                rules: &rules,
-                hazards: &hazards,
-                at,
-            });
+            let decision = inputs.decide(
+                &compartment.compartment_no,
+                scopes.for_compartment(&compartment),
+            );
             let work = booked_work(
                 &compartment.compartment_no,
                 &orders,
@@ -663,17 +789,16 @@ pub(crate) async fn deck_states(
 /// proceed?*), and the two are kept apart deliberately.
 pub(crate) async fn readiness(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
     let compartments = state.store.list_compartments(&scope, vessel).await?;
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
-    let orders = state.store.list_work_orders(&scope, vessel).await?;
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
+    let (orders, hours_source) = booked_orders(&state, &scope, vessel).await?;
     // Distributed packages book their hours per *segment*, so a compartment in a
     // package footprint has no work order of its own. Without this the rollup
     // reports zero hours held in exactly the spaces the cascade suspends — the
@@ -705,13 +830,10 @@ pub(crate) async fn readiness(
     let spaces: Vec<SpaceReadiness> = compartments
         .into_iter()
         .map(|compartment| {
-            let decision = evaluate(&EvaluationRequest {
-                subject: &compartment.compartment_no,
-                graph: &graph,
-                rules: &rules,
-                hazards: &hazards,
-                at,
-            });
+            let decision = inputs.decide(
+                &compartment.compartment_no,
+                scopes.for_compartment(&compartment),
+            );
             let work = booked_work(
                 &compartment.compartment_no,
                 &orders,
@@ -739,7 +861,14 @@ pub(crate) async fn readiness(
         })
         .collect();
 
-    Ok(Json(json!(roll_up(&spaces, unattributed))))
+    // The rollup, with where its hours came from stamped on it — a planner
+    // reading "564 MH held" is entitled to know whether that is their
+    // schedule or the demo's six work orders.
+    let mut body = json!(roll_up(&spaces, unattributed));
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("hours_source".to_owned(), json!(hours_source));
+    }
+    Ok(Json(body))
 }
 
 /// Assembles the world mitigation options are computed against.
@@ -757,6 +886,13 @@ struct MitigationInputs {
     orders: Vec<wadl_store::model::WorkOrderSummary>,
     packages: Vec<PackageWork>,
     stranded: wadl_store::model::StrandedReport,
+    /// The loads already priced, by instant. The planner asks for the hull's
+    /// loads once per subject it triages and once per instant a plan waits
+    /// to; on a carrier-sized register that was hundreds of full passes over
+    /// thousands of booked rows per read, all returning the same answer. A
+    /// mutex rather than a cell so the inputs stay `Send` across the awaits
+    /// that assemble them.
+    load_cache: std::sync::Mutex<std::collections::HashMap<i64, Vec<wadl_mitigate::SpaceLoad>>>,
 }
 
 impl MitigationInputs {
@@ -766,7 +902,17 @@ impl MitigationInputs {
     /// is evaluated at a future instant and must be priced there too — and because
     /// the hours have to come from the same [`booked_work`] every other board uses.
     fn loads(&self, at: Timestamp) -> Vec<wadl_mitigate::SpaceLoad> {
-        self.compartments
+        let key = at.epoch_millis();
+        if let Some(hit) = self
+            .load_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+        {
+            return hit;
+        }
+        let loads: Vec<wadl_mitigate::SpaceLoad> = self
+            .compartments
             .iter()
             .map(|c| wadl_mitigate::SpaceLoad {
                 booked: booked_work(
@@ -779,7 +925,11 @@ impl MitigationInputs {
                 .remaining,
                 compartment: c.compartment_no.clone(),
             })
-            .collect()
+            .collect();
+        if let Ok(mut cache) = self.load_cache.lock() {
+            cache.insert(key, loads.clone());
+        }
+        loads
     }
 
     fn contains(&self, compartment: &CompartmentNo) -> bool {
@@ -793,15 +943,21 @@ async fn mitigation_inputs(
     state: &AppState,
     scope: &wadl_store::TenantScope,
     vessel: VesselId,
+    at: Timestamp,
 ) -> Result<MitigationInputs, ApiError> {
+    // The every-work set, deliberately: an option is never priced more
+    // permissively than the deck plan reads (S18 revisits with the trade
+    // taxonomy).
+    let engine = crate::rule_table::engine_inputs(state, scope, vessel, at).await?;
     Ok(MitigationInputs {
-        graph: state.store.adjacency_graph(scope, vessel).await?,
-        hazards: state.store.live_hazards(scope, vessel).await?,
-        rules: state.store.rules_in_force(scope, vessel).await?,
+        graph: engine.graph,
+        hazards: engine.hazards,
+        rules: engine.rules,
         compartments: state.store.list_compartments(scope, vessel).await?,
-        orders: state.store.list_work_orders(scope, vessel).await?,
+        orders: booked_orders(state, scope, vessel).await?.0,
         packages: packages_with_footprints(state, scope, vessel).await?,
         stranded: state.store.stranded_hours(scope, vessel).await?,
+        load_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 
@@ -816,13 +972,13 @@ async fn mitigation_inputs(
 /// here changes a hazard, a schedule or an authorization.
 pub(crate) async fn mitigations(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    let inputs = mitigation_inputs(&state, &scope, vessel, at).await?;
     let subject = CompartmentNo::new(compartment);
     // A placard the register does not contain is not-found, not an ALLOW. Answering
     // "nothing is holding 9-999-9-Z" is a confident statement about a space that
@@ -913,7 +1069,7 @@ struct DecisionDetail<'a> {
 /// about an audit record.
 pub(crate) async fn record_decision(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, compartment)): Path<(Uuid, String)>,
     body: Result<Json<DecisionBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
@@ -950,7 +1106,7 @@ pub(crate) async fn record_decision(
     // never produced: the hash would verify perfectly and the content would be
     // fiction. So the assessment is re-derived and the action matched into it.
     let subject = CompartmentNo::new(&compartment);
-    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    let inputs = mitigation_inputs(&state, &scope, vessel, at).await?;
     if !inputs.contains(&subject) {
         return Err(ApiError::NotFound);
     }
@@ -1019,13 +1175,13 @@ pub(crate) async fn record_decision(
 /// six compartments appears once with its full effect rather than six times.
 pub(crate) async fn leverage(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
-    let inputs = mitigation_inputs(&state, &scope, vessel).await?;
+    let inputs = mitigation_inputs(&state, &scope, vessel, at).await?;
     let loads = |instant: Timestamp| inputs.loads(instant);
     let world = wadl_mitigate::World {
         graph: &inputs.graph,
@@ -1050,7 +1206,7 @@ async fn derived_issues(
     vessel: VesselId,
     at: Timestamp,
 ) -> Result<Vec<wadl_issues::Issue>, ApiError> {
-    let inputs = mitigation_inputs(state, scope, vessel).await?;
+    let inputs = mitigation_inputs(state, scope, vessel, at).await?;
     let activities = state.store.list_activities(scope, vessel).await?;
     let loads = |instant: Timestamp| inputs.loads(instant);
     let world = wadl_mitigate::World {
@@ -1113,7 +1269,7 @@ async fn derived_issues(
 /// issue somebody has answered for.
 pub(crate) async fn issues(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1191,7 +1347,7 @@ pub(crate) async fn issues(
 /// a break names the sequence number where trust stops.
 pub(crate) async fn ledger(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
@@ -1255,7 +1411,7 @@ struct AckDetail<'a> {
 /// not on offer is refused.
 pub(crate) async fn acknowledge_issue(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     body: Result<Json<AckBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1293,216 +1449,222 @@ pub(crate) async fn acknowledge_issue(
             "ISSUE_ACKNOWLEDGED",
             &detail,
             Some(&body.key),
-            at.epoch_millis(),
+            // The ledger's time is when the person answered, on the wall
+            // clock; the instant they were looking at rides in the detail as
+            // `as_of_ms`. Stamping the scrubbed instant here made an
+            // acknowledgement recorded on Friday about Monday's board look
+            // like it had been made on Monday.
+            state.clock.now().epoch_millis(),
         )
         .await?;
     Ok(Json(json!({ "recorded": record })))
 }
 
-/// The re-import delta: what an incoming schedule changes against the
-/// register currently served — the question a weekly re-baseline actually
-/// raises. P6's own compare tools can say which dates moved; only this
-/// platform can say which moves land work inside a constraint, because that
-/// answer takes the coupling graph, the live hazards and the rules in force —
-/// none of which are in the file. Computed at the import door so the
-/// consequences are on the table BEFORE Confirm, and recorded in the ledger
-/// at commit so "what did the week-34 reissue change" stays answerable.
-async fn schedule_delta(
-    state: &AppState,
-    scope: &wadl_store::TenantScope,
-    vessel: VesselId,
-    incoming: &[wadl_store::model::ActivitySummary],
-) -> Result<Value, ApiError> {
-    use std::collections::{BTreeMap, BTreeSet};
-    const EXAMPLES: usize = 6;
-    let current = state.store.list_activities(scope, vessel).await?;
-    let baseline = state
-        .store
-        .schedule_source(scope, vessel)
-        .await?
-        .unwrap_or_else(|| "the generated demo register".to_owned());
-
-    let old: BTreeMap<&str, &wadl_store::model::ActivitySummary> =
-        current.iter().map(|a| (a.code.as_str(), a)).collect();
-    let new: BTreeMap<&str, &wadl_store::model::ActivitySummary> =
-        incoming.iter().map(|a| (a.code.as_str(), a)).collect();
-
-    let mut added = 0usize;
-    let mut retimed = 0usize;
-    let mut rehoused = 0usize;
-    let mut rebudgeted = 0usize;
-    for (code, a) in &new {
-        match old.get(code) {
-            None => added += 1,
-            Some(o) => {
-                if o.planned != a.planned {
-                    retimed += 1;
-                }
-                if o.compartment_no != a.compartment_no {
-                    rehoused += 1;
-                }
-                if o.budget_hours != a.budget_hours {
-                    rebudgeted += 1;
-                }
-            }
-        }
-    }
-    let removed = old.keys().filter(|c| !new.contains_key(*c)).count();
-
-    // The constraint half: executability under the SAME hull inputs, before
-    // and after — so any shift is the schedule's doing, not the hazards'.
-    let graph = state.store.adjacency_graph(scope, vessel).await?;
-    let hazards = state.store.live_hazards(scope, vessel).await?;
-    let rules = state.store.rules_in_force(scope, vessel).await?;
-    let hull = wadl_issues::Hull {
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-    };
-    let refused =
-        |acts: &[wadl_store::model::ActivitySummary]| -> BTreeMap<String, (String, String)> {
-            acts.iter()
-                .filter(|a| !a.is_milestone)
-                .filter_map(|a| {
-                    match wadl_issues::executability(&hull, a.compartment_no.as_ref(), a.planned) {
-                        wadl_issues::Executability::NotExecutable(r) => Some((
-                            a.code.clone(),
-                            (
-                                a.compartment_no
-                                    .as_ref()
-                                    .map_or_else(String::new, |c| c.as_str().to_owned()),
-                                r.rule_code,
-                            ),
-                        )),
-                        _ => None,
-                    }
-                })
-                .collect()
-        };
-    let before = refused(&current);
-    let after = refused(incoming);
-    let before_keys: BTreeSet<&String> = before.keys().collect();
-    let after_keys: BTreeSet<&String> = after.keys().collect();
-
-    let newly_refused: Vec<Value> = after
-        .iter()
-        .filter(|(code, _)| !before_keys.contains(code))
-        .take(EXAMPLES)
-        .map(|(code, (space, rule))| json!({ "code": code, "space": space, "rule": rule }))
-        .collect();
-    let newly_refused_count = after_keys.difference(&before_keys).count();
-    // Cleared = was refused, still present, no longer refused. A refusal that
-    // vanished because its activity was deleted is the `removed` column's
-    // story, not a constraint clearing.
-    let newly_clear: Vec<Value> = before
-        .iter()
-        .filter(|(code, _)| !after_keys.contains(code) && new.contains_key(code.as_str()))
-        .take(EXAMPLES)
-        .map(|(code, (space, rule))| json!({ "code": code, "space": space, "rule": rule }))
-        .collect();
-    let newly_clear_count = before
-        .keys()
-        .filter(|code| !after_keys.contains(code) && new.contains_key(code.as_str()))
-        .count();
-
-    Ok(json!({
-        "baseline": baseline,
-        "added": added,
-        "removed": removed,
-        "retimed": retimed,
-        "rehoused": rehoused,
-        "rebudgeted": rebudgeted,
-        "refused_before": before.len(),
-        "refused_after": after.len(),
-        "newly_refused": { "count": newly_refused_count, "examples": newly_refused },
-        "newly_clear": { "count": newly_clear_count, "examples": newly_clear },
-    }))
-}
-
-/// The import half of the schedule-of-record area: a P6 XER export, posted as
-/// text, becomes the hull's served register.
-///
-/// All-or-nothing: one rejected line refuses the whole import with the
-/// rejection reasons in the response, because a partially loaded schedule
-/// presenting as the whole one is the lie the ingest grading exists to
-/// prevent. The scope check runs first — the body is read by hand after it,
-/// so a foreign hull is not-found before a single body byte is buffered.
-pub(crate) async fn import_schedule(
+/// The live hazards on a hull — the recorded field conditions the engine
+/// evaluates, served raw so the surface can show WHAT is shut (the fact)
+/// alongside the trace's WHY (the consequences). Each carries its origin
+/// space, kind, when it was raised, and its label.
+pub(crate) async fn list_hazards(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
-    Query(dry): Query<DryRun>,
-    req: axum::extract::Request,
+    Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let hazards = state.store.live_hazards(&scope, vessel, at).await?;
+    Ok(Json(json!({ "hazards": hazards, "as_of": at })))
+}
+
+/// A field condition, as raised: where, what kind, what it is called, and
+/// since when.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct RaiseHazardBody {
+    /// The origin space — must be on the hull's register.
+    compartment: String,
+    /// The hazard kind, in the engine's serde names (`hot_work_live`, …).
+    kind: wadl_engine::HazardKind,
+    /// The fact as the deck says it — the ticket, the bus, the permit:
+    /// "CT-3160-4 · final coat, curing". Required: a hazard with no label is
+    /// a colour with no reason.
+    label: String,
+    /// When it was raised, epoch ms; defaults to the wall clock. Never in
+    /// the future — a condition is raised when it is a fact, not before.
+    #[serde(default)]
+    since_ms: Option<i64>,
+}
+
+/// Raises a field condition: the day's tag-out, the coating ticket, the hot
+/// work permit, the stop-work — the facts the engine evaluates against, which
+/// until this route could enter the product only as seed data. Validated
+/// against the register (a hazard in a space the hull does not know is a typo,
+/// not a fact) and against what is already live (one fact, once). Lands in
+/// the ledger as `HAZARD_RAISED` before the response returns; every verdict
+/// the hazard drives re-derives on the next read.
+pub(crate) async fn raise_hazard(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<RaiseHazardBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    // Scope first, body second (see `record_decision`).
     state.store.get_vessel(&scope, vessel).await?;
-    let body: ImportSchedule = read_import_body(req).await?;
-    let sor = crate::schedule::parse_xer(&body.label, &body.xer)
-        .map_err(|reasons| ApiError::OutOfRange(format!("XER rejected: {reasons}")))?;
-    // A file that parses to nothing is refused, not previewed: every line of
-    // an alien file reads as XER "header noise", so without this check a
-    // grabbed-the-wrong-file upload sails to a live Confirm button whose
-    // click would empty every board.
-    if sor.activities.is_empty() {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let label = body.label.trim();
+    if label.is_empty() {
         return Err(ApiError::OutOfRange(
-            "XER rejected: the file carries no activities — no TASK section was found.              Is this a Primavera P6 XER export?"
+            "a field condition needs its label — the ticket, the bus, the permit — \
+             so the trace can say what is holding the space, not just that something is."
                 .to_owned(),
         ));
     }
-    let activities = sor.activities.len();
-    let edges = sor.edges.len();
-    // The dry run: everything the import would say, nothing it would do —
-    // including the reconciliation the reader currently only sees AFTER the
-    // swap, and the location-mapping report. Committing a schedule blind was
-    // the sharpest edge on this door.
-    let reconciliation = reconcile(&state, &scope, vessel, &sor.activities).await?;
-    let compartments = state.store.list_compartments(&scope, vessel).await?;
-    let mapping = mapping_report(&sor.activities, &compartments);
-    let delta = schedule_delta(&state, &scope, vessel, &sor.activities).await?;
-    if dry.dry_run.unwrap_or(false) {
-        return Ok(Json(json!({
-            "dry_run": true,
-            "label": body.label,
-            "activities": activities,
-            "edges": edges,
-            "reconciliation": reconciliation,
-            "mapping": mapping,
-            "delta": delta,
-        })));
+    let compartment = body.compartment.trim();
+    let register = state.store.list_compartments(&scope, vessel).await?;
+    if !register
+        .iter()
+        .any(|c| c.compartment_no.as_str() == compartment)
+    {
+        return Err(ApiError::OutOfRange(format!(
+            "{compartment} is not on this hull's register — a field condition is raised \
+             against a space the hull knows, or it is a typo the engine would never evaluate"
+        )));
     }
-    state
+    let now_ms = state.clock.now().epoch_millis();
+    let since_ms = body.since_ms.unwrap_or(now_ms);
+    if since_ms > now_ms {
+        return Err(ApiError::OutOfRange(
+            "a field condition is raised when it is a fact, not before — since_ms is in the future"
+                .to_owned(),
+        ));
+    }
+    let live = state
         .store
-        .set_schedule_of_record(&scope, vessel, sor)
+        .live_hazards(&scope, vessel, state.clock.now())
         .await?;
-    // The reissue's record: what replaced what, and what the replacement did
-    // to the constraints — hash-chained, so the answer to "what did that
-    // re-baseline change" cannot be quietly rewritten later.
-    let detail = serde_json::to_string(&json!({
-        "label": body.label,
-        "activities": activities,
-        "edges": edges,
-        "delta": delta,
-    }))
-    .unwrap_or_else(|_| format!("{{\"label\":\"{}\"}}", body.label));
-    state
+    if live
+        .iter()
+        .any(|h| h.origin.as_str() == compartment && h.kind == body.kind)
+    {
+        return Err(ApiError::OutOfRange(format!(
+            "a {} hazard is already live in {compartment} — one fact, once; clear it \
+             before raising it again",
+            json!(body.kind).as_str().unwrap_or("?"),
+        )));
+    }
+
+    let hazard = state
+        .store
+        .raise_hazard(&scope, vessel, compartment, body.kind, since_ms, label)
+        .await?;
+    let detail = json!({
+        "compartment": compartment,
+        "kind": body.kind,
+        "label": label,
+        "since_ms": since_ms,
+        "raised_by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
         .store
         .append_audit(
             &scope,
             vessel,
-            "SCHEDULE_REPLACED",
+            "HAZARD_RAISED",
             &detail,
-            None,
-            state.clock.now().epoch_millis(),
+            Some(compartment),
+            now_ms,
         )
         .await?;
-    Ok(Json(json!({
-        "label": body.label,
-        "activities": activities,
-        "edges": edges,
-        "reconciliation": reconciliation,
-        "mapping": mapping,
-        "delta": delta,
-    })))
+    Ok(Json(json!({ "hazard": hazard, "recorded": record })))
+}
+
+/// An administrative clearance, as posted: which recorded fact is verified
+/// ended, and on what basis.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ClearHazardBody {
+    /// The hazard's origin space.
+    compartment: String,
+    /// The hazard kind, in the engine's serde names (`energised_bus`, …).
+    kind: wadl_engine::HazardKind,
+    /// What was verified and by whom — "tags hung, zero energy confirmed by
+    /// shift electrician". Required: a clearance without its basis is a
+    /// silent delete.
+    basis: String,
+}
+
+/// Administratively clears a hazard: the crew verified the field condition
+/// ended (tags hung, gas-free sighted), someone with the authority records
+/// that here, and every verdict the hazard was driving re-derives clean on
+/// the next read — same space, coupled spaces, refused activities alike.
+/// That cascade is not this handler's doing: verdicts are computed from live
+/// hazards on every read, so ending the fact IS the cascade.
+///
+/// The clearance happens at the wall clock, not the scrubbed instant — it is
+/// a real recorded event, and it lands in the ledger (`HAZARD_CLEARED`,
+/// basis in the hashed detail) before the response returns.
+pub(crate) async fn clear_hazard(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<ClearHazardBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    // Scope first, body second: a foreign hull is not-found before a malformed
+    // body can say anything else (see `record_decision`).
+    state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let basis = body.basis.trim();
+    if basis.is_empty() {
+        return Err(ApiError::OutOfRange(
+            "a clearance needs its basis — what was verified, and by whom. \
+             Without it this would be a silent delete, not a record."
+                .to_owned(),
+        ));
+    }
+
+    let now_ms = state.clock.now().epoch_millis();
+    let cleared = state
+        .store
+        .clear_hazard(&scope, vessel, &body.compartment, body.kind, basis, now_ms)
+        .await?;
+    if cleared.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "no live {} hazard originates in {} — either it was already \
+             cleared, or the fact was never recorded here",
+            json!(body.kind).as_str().unwrap_or("?"),
+            body.compartment,
+        )));
+    }
+
+    let detail = json!({
+        "compartment": body.compartment,
+        "kind": body.kind,
+        "basis": basis,
+        "cleared": cleared.iter().map(|h| h.label.clone()).collect::<Vec<_>>(),
+        "cleared_by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "HAZARD_CLEARED",
+            &detail,
+            Some(&body.compartment),
+            now_ms,
+        )
+        .await?;
+    Ok(Json(json!({ "cleared": cleared, "recorded": record })))
 }
 
 /// The location-mapping report: how the export's work landed on the hull.
@@ -1526,7 +1688,7 @@ pub(crate) async fn import_schedule(
 ///
 /// Milestones are counted apart: key events carry dates and no place, and
 /// folding them into `unlocated` would make every clean import look risky.
-fn mapping_report(
+pub(crate) fn mapping_report(
     activities: &[wadl_store::model::ActivitySummary],
     compartments: &[wadl_store::model::CompartmentSummary],
 ) -> Value {
@@ -1577,25 +1739,39 @@ pub(crate) struct DryRun {
     pub(crate) dry_run: Option<bool>,
 }
 
-/// Reverts the hull to its generated register, discarding the ingested
-/// schedule of record. The undo the import door needs to be safe to try.
-pub(crate) async fn revert_schedule(
-    State(state): State<AppState>,
-    Caller(scope): Caller,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Value>, ApiError> {
-    let vessel = VesselId::from_uuid(id);
-    state.store.clear_schedule_of_record(&scope, vessel).await?;
-    Ok(Json(json!({ "reverted": true })))
-}
-
-/// The body of a schedule-of-record import.
-#[derive(Debug, serde::Deserialize)]
-pub(crate) struct ImportSchedule {
-    /// Where the export came from, shown on the register as its source.
-    pub(crate) label: String,
-    /// The XER file, verbatim.
-    pub(crate) xer: String,
+/// One ledger line per document that changes hands.
+///
+/// Every door commit and every revert lands here as `DOCUMENT_REPLACED` or
+/// `DOCUMENT_REVERTED`, with the kind, the label and the counts in the hashed
+/// detail. A tamper-evident record that let a whole zone chart or manning
+/// book be swapped silently was a record with a hole in it exactly where an
+/// auditor would look first.
+pub(crate) async fn ledger_document(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    action: &str,
+    kind: &str,
+    label: Option<&str>,
+    counts: Value,
+) -> Result<(), ApiError> {
+    // One writer for every such row, shared with the boot loader and the
+    // CLI (`documents::ledger_document_on`); the doors are `via: door`.
+    crate::documents::ledger_document_on(
+        state.store.as_ref(),
+        scope,
+        vessel,
+        crate::documents::DocumentLedgerLine {
+            action,
+            kind,
+            label,
+            counts,
+            via: "door",
+        },
+        state.clock.now().epoch_millis(),
+    )
+    .await?;
+    Ok(())
 }
 
 /// The audit that joins a zone chart to the compartment register: which
@@ -1608,33 +1784,72 @@ pub(crate) struct ImportSchedule {
 /// about the same placard.
 fn zone_audit(
     compartments: &[wadl_store::model::CompartmentSummary],
+    decks: &[wadl_store::model::DeckSummary],
     bounds: &[wadl_store::model::ZoneBoundSummary],
 ) -> Value {
-    let by_zone: std::collections::BTreeMap<&str, &wadl_store::model::ZoneBoundSummary> =
-        bounds.iter().map(|b| (b.zone.as_str(), b)).collect();
+    let ordinal: std::collections::BTreeMap<&str, i32> =
+        decks.iter().map(|d| (d.code.as_str(), d.ordinal)).collect();
+    // A zone owns one or more BLOCKS — a frame band on a band of decks. A
+    // space is in bounds when any block of its zone contains its deck and
+    // its frame (docs/zone-scheme.md).
+    let mut blocks: std::collections::BTreeMap<&str, Vec<&wadl_store::model::ZoneBoundSummary>> =
+        std::collections::BTreeMap::new();
+    for b in bounds {
+        blocks.entry(b.zone.as_str()).or_default().push(b);
+    }
+    let contains = |b: &wadl_store::model::ZoneBoundSummary, frame: i32, deck_ordinal: i32| {
+        if frame < b.lo_frame || frame > b.hi_frame {
+            return false;
+        }
+        match (&b.top_deck, &b.bottom_deck) {
+            (Some(top), Some(bottom)) => {
+                let (Some(&t), Some(&bo)) =
+                    (ordinal.get(top.as_str()), ordinal.get(bottom.as_str()))
+                else {
+                    return false;
+                };
+                deck_ordinal >= t && deck_ordinal <= bo
+            }
+            _ => true,
+        }
+    };
+    let describe = |bs: &[&wadl_store::model::ZoneBoundSummary]| {
+        bs.iter()
+            .map(|b| match (&b.top_deck, &b.bottom_deck) {
+                (Some(t), Some(bo)) if t == bo => {
+                    format!("Fr {}–{} on {t}", b.lo_frame, b.hi_frame)
+                }
+                (Some(t), Some(bo)) => format!("Fr {}–{} on {t}–{bo}", b.lo_frame, b.hi_frame),
+                _ => format!("Fr {}–{}", b.lo_frame, b.hi_frame),
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
     let mut out_of_bounds = Vec::new();
     let mut zones_seen = std::collections::BTreeSet::new();
     for c in compartments {
         zones_seen.insert(c.zone.as_str());
-        let (Some(frame), Some(bound)) = (c.frame, by_zone.get(c.zone.as_str())) else {
+        let (Some(frame), Some(bs)) = (c.frame, blocks.get(c.zone.as_str())) else {
             continue;
         };
-        if frame < bound.lo_frame || frame > bound.hi_frame {
+        if !bs.iter().any(|b| contains(b, frame, c.deck_ordinal)) {
             out_of_bounds.push(json!({
                 "compartment": c.compartment_no,
                 "zone": c.zone,
                 "frame": frame,
-                "lo_frame": bound.lo_frame,
-                "hi_frame": bound.hi_frame,
+                "deck_code": c.deck_code,
+                "lo_frame": bs.first().map_or(0, |b| b.lo_frame),
+                "hi_frame": bs.first().map_or(0, |b| b.hi_frame),
+                "bounds": describe(bs),
             }));
         }
     }
     let unbounded_zones: Vec<&str> = zones_seen
         .iter()
-        .filter(|z| !by_zone.contains_key(**z))
+        .filter(|z| !blocks.contains_key(**z))
         .copied()
         .collect();
-    let unassigned_bounds: Vec<&str> = by_zone
+    let unassigned_bounds: Vec<&str> = blocks
         .keys()
         .filter(|z| !zones_seen.contains(**z))
         .copied()
@@ -1654,13 +1869,14 @@ fn zone_audit(
 /// was inferred from.
 pub(crate) async fn zones(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.get_vessel(&scope, vessel).await?;
     let register = state.store.zone_register(&scope, vessel).await?;
     let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let decks = state.store.list_decks(&scope, vessel).await?;
     let (source, bounds) = match register {
         Some(r) => (Some(r.label), r.bounds),
         None => (None, Vec::new()),
@@ -1668,7 +1884,186 @@ pub(crate) async fn zones(
     Ok(Json(json!({
         "source": source,
         "bounds": bounds,
-        "audit": zone_audit(&compartments, &bounds),
+        "audit": zone_audit(&compartments, &decks, &bounds),
+    })))
+}
+
+/// How far across a frame boundary "next door" reaches: eight frames, 32 ft
+/// on this class — about two compartments.
+const BOUNDARY_FRAMES: i32 = 8;
+
+/// The frame extent a space claims: the surveyed extent where the geometry
+/// register has one, the placard's frame station otherwise.
+fn frame_extent(c: &wadl_store::model::CompartmentSummary) -> Option<(i32, i32)> {
+    match (c.fwd_frame, c.aft_frame, c.frame) {
+        (Some(f), Some(a), _) => Some((f, a)),
+        (_, _, Some(f)) => Some((f, f)),
+        _ => None,
+    }
+}
+
+/// Every reason a space outside a zone counts as next door to it, keyed by
+/// placard: `frame_boundary`, `deck_above`, `deck_below`, `coupled:<code>`.
+fn adjacency_reasons<'a>(
+    compartments: &'a [wadl_store::model::CompartmentSummary],
+    inside: &[&wadl_store::model::CompartmentSummary],
+    graph: &wadl_engine::AdjacencyGraph,
+) -> std::collections::BTreeMap<&'a str, std::collections::BTreeSet<String>> {
+    // The hull's deck order: "directly above" is the previous ordinal the
+    // register carries, not ordinal - 1.
+    let mut ordinals: Vec<i32> = compartments.iter().map(|c| c.deck_ordinal).collect();
+    ordinals.sort_unstable();
+    ordinals.dedup();
+    let neighbour_decks = |o: i32| -> (Option<i32>, Option<i32>) {
+        let i = ordinals.iter().position(|&x| x == o);
+        (
+            i.and_then(|i| i.checked_sub(1))
+                .and_then(|i| ordinals.get(i).copied()),
+            i.and_then(|i| ordinals.get(i + 1).copied()),
+        )
+    };
+    // The zone's frame extent per deck it occupies.
+    let mut extent_by_deck: std::collections::BTreeMap<i32, (i32, i32)> =
+        std::collections::BTreeMap::new();
+    for c in inside {
+        if let Some((f, a)) = frame_extent(c) {
+            extent_by_deck
+                .entry(c.deck_ordinal)
+                .and_modify(|e| {
+                    e.0 = e.0.min(f);
+                    e.1 = e.1.max(a);
+                })
+                .or_insert((f, a));
+        }
+    }
+    let inside_set: std::collections::BTreeSet<&str> =
+        inside.iter().map(|c| c.compartment_no.as_str()).collect();
+
+    let mut via: std::collections::BTreeMap<&str, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for c in compartments {
+        if inside_set.contains(c.compartment_no.as_str()) {
+            continue;
+        }
+        let Some((of, oa)) = frame_extent(c) else {
+            continue;
+        };
+        // Across the frame boundary: within reach of any zone space on this deck.
+        let near = inside.iter().any(|i| {
+            i.deck_ordinal == c.deck_ordinal
+                && frame_extent(i).is_some_and(|(f, a)| (of - a).max(f - oa) <= BOUNDARY_FRAMES)
+        });
+        if near {
+            via.entry(c.compartment_no.as_str())
+                .or_default()
+                .insert("frame_boundary".to_owned());
+        }
+        // On the deck directly above or below a zone deck, inside the zone's
+        // frame extent there. `below` is the deck under this space: the space
+        // sits ABOVE the zone when the zone occupies the deck below it.
+        let (above, below) = neighbour_decks(c.deck_ordinal);
+        for (deck, word) in [(below, "deck_above"), (above, "deck_below")] {
+            let Some(deck) = deck else { continue };
+            if let Some(&(lo, hi)) = extent_by_deck.get(&deck) {
+                if of <= hi && oa >= lo {
+                    via.entry(c.compartment_no.as_str())
+                        .or_default()
+                        .insert(word.to_owned());
+                }
+            }
+        }
+    }
+    // Coupled: an edge with one end in the zone and one end outside, either way.
+    for e in graph.edges() {
+        let (from, to) = (e.from.as_str(), e.to.as_str());
+        let outside = match (inside_set.contains(from), inside_set.contains(to)) {
+            (true, false) => to,
+            (false, true) => from,
+            _ => continue,
+        };
+        if let Some(c) = compartments
+            .iter()
+            .find(|c| c.compartment_no.as_str() == outside)
+        {
+            via.entry(c.compartment_no.as_str())
+                .or_default()
+                .insert(format!("coupled:{}", e.code.as_str()));
+        }
+    }
+    via
+}
+
+/// `GET /api/vessels/:id/zones/:zone/adjacent` — the spaces next door to a
+/// zone, each saying why it counts as next door (docs/zone-scheme.md):
+/// across the frame boundary on the same deck, on the deck directly above or
+/// below inside the zone's frame extent, or coupled into the zone by a path
+/// the rules bind to. Served with each space's authorization state and the
+/// field conditions live in it at the instant, so a zone-focused screen can
+/// blot out the rest of the hull and still show what is about to reach in.
+///
+/// Computed here, once, from the register, the geometry and the coupling
+/// graph; the screens draw it and never re-derive it.
+pub(crate) async fn zone_adjacent(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path((id, zone)): Path<(Uuid, String)>,
+    Query(as_of): Query<AsOf>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let at = as_of.resolve(&state, &state.store.get_vessel(&scope, vessel).await?)?;
+    let mut compartments = state.store.list_compartments(&scope, vessel).await?;
+    overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
+    let inside: Vec<&wadl_store::model::CompartmentSummary> =
+        compartments.iter().filter(|c| c.zone == zone).collect();
+    if inside.is_empty() {
+        return Err(ApiError::NotFound);
+    }
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
+    let via = adjacency_reasons(&compartments, &inside, &inputs.graph);
+
+    let mut adjacent: Vec<Value> = compartments
+        .iter()
+        .filter_map(|c| {
+            let ways = via.get(c.compartment_no.as_str())?;
+            let decision = inputs.decide(&c.compartment_no, scopes.for_compartment(c));
+            let live: Vec<Value> = inputs
+                .live()
+                .filter(|h| h.origin == c.compartment_no)
+                .map(|h| json!({ "kind": h.kind, "label": h.label }))
+                .collect();
+            Some(json!({
+                "compartment": c.compartment_no,
+                "name": c.name,
+                "zone": c.zone,
+                "deck_code": c.deck_code,
+                "deck_ordinal": c.deck_ordinal,
+                "frame": c.frame,
+                "side": c.side,
+                "via": ways,
+                "state": decision.state,
+                "permits_work": decision.permits_work(),
+                "hazards": live,
+            }))
+        })
+        .collect();
+    // Worst first: what refuses work next door is what a zone manager reads
+    // first; then what carries a live condition; then by placard.
+    adjacent.sort_by_key(|r| {
+        (
+            r["permits_work"].as_bool().unwrap_or(true),
+            r["hazards"].as_array().map_or(0, Vec::len) == 0,
+            r["compartment"].as_str().unwrap_or("").to_owned(),
+        )
+    });
+    Ok(Json(json!({
+        "zone": zone,
+        "as_of": at,
+        "inside": inside.iter().map(|c| &c.compartment_no).collect::<Vec<_>>(),
+        "adjacent": adjacent,
+        "basis": format!(
+            "next door = within {BOUNDARY_FRAMES} frames of a zone space on the same deck, on the deck directly above or below inside the zone's frame extent there, or coupled to a zone space by a path the rules bind to; extents surveyed where the geometry register has them, placard frames otherwise"
+        ),
     })))
 }
 
@@ -1690,7 +2085,7 @@ pub(crate) struct ImportZones {
 /// including the spaces it would put out of bounds — without storing anything.
 pub(crate) async fn import_zones(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -1698,32 +2093,8 @@ pub(crate) async fn import_zones(
     let vessel = VesselId::from_uuid(id);
     state.store.get_vessel(&scope, vessel).await?;
     let body: ImportZones = read_import_body(req).await?;
-
-    let mut rejections: Vec<String> = Vec::new();
-    if body.label.trim().is_empty() {
-        rejections.push("the chart carries no label".to_owned());
-    }
-    if body.bounds.is_empty() {
-        rejections.push("the chart carries no bounds".to_owned());
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for b in &body.bounds {
-        if b.zone.trim().is_empty() {
-            rejections.push(format!(
-                "a bound {}–{} names no zone",
-                b.lo_frame, b.hi_frame
-            ));
-        }
-        if b.lo_frame > b.hi_frame {
-            rejections.push(format!(
-                "{}: lo frame {} is aft of hi frame {}",
-                b.zone, b.lo_frame, b.hi_frame
-            ));
-        }
-        if !seen.insert(b.zone.as_str()) {
-            rejections.push(format!("{} is bounded twice", b.zone));
-        }
-    }
+    let decks = state.store.list_decks(&scope, vessel).await?;
+    let rejections = zone_rejections(&body, &decks);
     if !rejections.is_empty() {
         return Err(ApiError::OutOfRange(format!(
             "the chart was refused whole: {}",
@@ -1732,7 +2103,7 @@ pub(crate) async fn import_zones(
     }
 
     let compartments = state.store.list_compartments(&scope, vessel).await?;
-    let audit = zone_audit(&compartments, &body.bounds);
+    let audit = zone_audit(&compartments, &decks, &body.bounds);
     if dry.dry_run.unwrap_or(false) {
         return Ok(Json(json!({
             "stored": false,
@@ -1754,12 +2125,101 @@ pub(crate) async fn import_zones(
             },
         )
         .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "zone_register",
+        Some(&label),
+        json!({ "zones": zones }),
+    )
+    .await?;
     Ok(Json(json!({
         "stored": true,
         "label": label,
         "zones": zones,
         "audit": audit,
     })))
+}
+
+/// Every reason a candidate zone chart is refused whole: no label, no
+/// bounds, a bound naming no zone, frames aft-to-forward, a block naming one
+/// deck of its band or a deck the register does not carry, a top deck below
+/// its bottom, or the same block twice. Capped so the refusal stays readable.
+fn zone_rejections(body: &ImportZones, decks: &[wadl_store::model::DeckSummary]) -> Vec<String> {
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the chart carries no label".to_owned());
+    }
+    if body.bounds.is_empty() {
+        rejections.push("the chart carries no bounds".to_owned());
+    }
+    let ordinal: std::collections::BTreeMap<&str, i32> =
+        decks.iter().map(|d| (d.code.as_str(), d.ordinal)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for b in &body.bounds {
+        if b.zone.trim().is_empty() {
+            rejections.push(format!(
+                "a bound {}–{} names no zone",
+                b.lo_frame, b.hi_frame
+            ));
+        }
+        if b.lo_frame > b.hi_frame {
+            rejections.push(format!(
+                "{}: lo frame {} is aft of hi frame {}",
+                b.zone, b.lo_frame, b.hi_frame
+            ));
+        }
+        // A block names both decks of its band or neither; the decks must be
+        // ones the register carries, and the top must not sit below the bottom.
+        match (&b.top_deck, &b.bottom_deck) {
+            (None, None) => {}
+            (Some(top), Some(bottom)) => {
+                for code in [top, bottom] {
+                    if !ordinal.contains_key(code.as_str()) {
+                        rejections.push(format!(
+                            "{}: deck {code:?} is not one this hull's register carries",
+                            b.zone
+                        ));
+                    }
+                }
+                if let (Some(t), Some(bo)) =
+                    (ordinal.get(top.as_str()), ordinal.get(bottom.as_str()))
+                {
+                    if t > bo {
+                        rejections.push(format!(
+                            "{}: top deck {top} sits below bottom deck {bottom}",
+                            b.zone
+                        ));
+                    }
+                }
+            }
+            _ => rejections.push(format!(
+                "{}: a block names one deck of its band, not both",
+                b.zone
+            )),
+        }
+        // The same zone may own several blocks; the same block twice is a
+        // copy-paste error the chart should not carry.
+        if !seen.insert((
+            b.zone.as_str(),
+            b.lo_frame,
+            b.hi_frame,
+            b.top_deck.as_deref(),
+            b.bottom_deck.as_deref(),
+        )) {
+            rejections.push(format!(
+                "{} Fr {}–{} is listed twice",
+                b.zone, b.lo_frame, b.hi_frame
+            ));
+        }
+    }
+    if rejections.len() > 12 {
+        rejections.truncate(12);
+        rejections.push("…".to_owned());
+    }
+    rejections
 }
 
 /// The body of a budget-book import: one line per work item.
@@ -1781,7 +2241,7 @@ pub(crate) struct ImportBudgets {
 /// book WOULD produce against the current register, storing nothing.
 pub(crate) async fn import_budgets(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(dry): Query<DryRun>,
     req: axum::extract::Request,
@@ -1835,6 +2295,16 @@ pub(crate) async fn import_budgets(
     let label = book.label.clone();
     let items = book.items.len();
     state.store.set_budget_book(&scope, vessel, book).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "budget_book",
+        Some(&label),
+        json!({ "items": items }),
+    )
+    .await?;
     let activities = state.store.list_activities(&scope, vessel).await?;
     let reconciliation = reconcile(&state, &scope, vessel, &activities).await?;
     Ok(Json(json!({
@@ -1892,29 +2362,1427 @@ fn reconcile_against(
 /// work items.
 pub(crate) async fn revert_budgets(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.clear_budget_book(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "budget_book",
+        None,
+        json!({}),
+    )
+    .await?;
+    Ok(Json(json!({ "reverted": true })))
+}
+
+/// The body of a manning-book import: one line per trade.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportManning {
+    /// Where the book came from, named wherever its numbers are used.
+    pub(crate) label: String,
+    /// The crew lines.
+    pub(crate) crews: Vec<wadl_store::model::ManningCrewSummary>,
+}
+
+/// The hull's manning book, or `null` when none is loaded — in which case the
+/// boards show demand only and say so.
+pub(crate) async fn get_manning(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let book = state.store.manning_book(&scope, vessel).await?;
+    Ok(Json(json!({
+        "book": book.map(|b| json!({ "label": b.label, "crews": b.crews })),
+    })))
+}
+
+/// Ingests a manning book as the hull's crew-supply authority.
+///
+/// The demand side of crew planning is computed from the register (a window's
+/// scheduled hours over the window). This door is the SUPPLY side — the people
+/// the yard actually has per trade, per half-shift — and it is the only way a
+/// headcount enters: the platform never invents one. All-or-nothing, same as
+/// every document door: refused whole, previewed with `?dry_run=true`,
+/// reverted whole.
+pub(crate) async fn import_manning(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportManning = read_import_body(req).await?;
+
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the book carries no label".to_owned());
+    }
+    if body.crews.is_empty() {
+        rejections.push("the book carries no crews".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for crew in &body.crews {
+        if crew.trade.trim().is_empty() {
+            rejections.push("a line names no trade".to_owned());
+        }
+        if crew.headcount < 0 {
+            rejections.push(format!("{}: negative headcount", crew.trade));
+        }
+        if !seen.insert(crew.trade.as_str()) {
+            rejections.push(format!("{} is manned twice", crew.trade));
+        }
+    }
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the book was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    // The preview names which register trades the book does and does not
+    // cover — a book that spells "Electrical" as "ELEC" would otherwise store
+    // cleanly and then match nothing, which is worse than a refusal.
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let register_trades: std::collections::BTreeSet<&str> = activities
+        .iter()
+        .filter(|a| !a.is_milestone)
+        .map(|a| a.trade.as_str())
+        .collect();
+    let book_trades: std::collections::BTreeSet<&str> =
+        body.crews.iter().map(|c| c.trade.as_str()).collect();
+    let unmatched_book: Vec<&&str> = book_trades.difference(&register_trades).collect();
+    let uncovered_register: Vec<&&str> = register_trades.difference(&book_trades).collect();
+    let coverage = json!({
+        "book_trades_matching_no_register_trade": unmatched_book,
+        "register_trades_with_no_manning_line": uncovered_register,
+    });
+
+    let book = wadl_store::memory::ManningBook {
+        label: body.label,
+        crews: body.crews,
+    };
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": book.label,
+            "crews": book.crews.len(),
+            "coverage": coverage,
+        })));
+    }
+    let label = book.label.clone();
+    let crews = book.crews.len();
+    state.store.set_manning_book(&scope, vessel, book).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "manning_book",
+        Some(&label),
+        json!({ "crews": crews }),
+    )
+    .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "crews": crews,
+        "coverage": coverage,
+    })))
+}
+
+/// The body of a geometry-register import (`docs/geometry-accuracy.md`).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportGeometry {
+    /// Where the register came from, e.g. a C&A drawing extract.
+    pub(crate) label: String,
+    /// Surveyed frame extents, one row per space.
+    #[serde(default)]
+    pub(crate) spaces: Vec<wadl_store::model::SpaceGeometrySummary>,
+    /// Deck coverage bands — where each deck physically exists.
+    #[serde(default)]
+    pub(crate) decks: Vec<wadl_store::model::DeckCoverageSummary>,
+}
+
+/// The findings a geometry register raises against the current compartment
+/// register. Computed at dry-run AND on every read, so they cannot go stale:
+/// the placard number encodes the forward boundary, which makes a survey that
+/// disagrees with it a computable finding; a space outside its deck's coverage
+/// bands is a transcription error wearing coordinates.
+fn geometry_findings(
+    register: &wadl_store::memory::GeometryRegister,
+    compartments: &[wadl_store::model::CompartmentSummary],
+) -> Value {
+    const EXAMPLES: usize = 8;
+    let known: std::collections::BTreeMap<&str, &wadl_store::model::CompartmentSummary> =
+        compartments
+            .iter()
+            .map(|c| (c.compartment_no.as_str(), c))
+            .collect();
+    let mut bands: std::collections::BTreeMap<&str, Vec<(i32, i32)>> =
+        std::collections::BTreeMap::new();
+    for d in &register.decks {
+        bands
+            .entry(d.deck_code.as_str())
+            .or_default()
+            .push((d.lo_frame, d.hi_frame));
+    }
+    // Coalesce overlapping or touching bands before any containment check: a
+    // deck delineated 20..210 and 210..248 is continuous plating, and a space
+    // surveyed 205..215 lies entirely on it — flagging that as "outside
+    // coverage" would send a person to investigate a finding the data does
+    // not support.
+    for deck_bands in bands.values_mut() {
+        deck_bands.sort_unstable();
+        let mut merged: Vec<(i32, i32)> = Vec::with_capacity(deck_bands.len());
+        for &(lo, hi) in deck_bands.iter() {
+            match merged.last_mut() {
+                Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+                _ => merged.push((lo, hi)),
+            }
+        }
+        *deck_bands = merged;
+    }
+
+    let mut placard_disagreements: Vec<Value> = Vec::new();
+    let mut outside_coverage: Vec<Value> = Vec::new();
+    let mut unknown = 0_usize;
+    let mut unknown_examples: Vec<&str> = Vec::new();
+    let mut surveyed = 0_usize;
+    for g in &register.spaces {
+        let Some(c) = known.get(g.compartment_no.as_str()) else {
+            unknown += 1;
+            if unknown_examples.len() < EXAMPLES {
+                unknown_examples.push(&g.compartment_no);
+            }
+            continue;
+        };
+        surveyed += 1;
+        if let Some(usn) = c.compartment_no.parse_usn() {
+            if usn.frame.get() != g.fwd_frame {
+                placard_disagreements.push(json!({
+                    "compartment_no": g.compartment_no,
+                    "placard_frame": usn.frame.get(),
+                    "surveyed_fwd": g.fwd_frame,
+                }));
+            }
+        }
+        if let Some(deck_bands) = bands.get(c.deck_code.as_str()) {
+            let inside = deck_bands
+                .iter()
+                .any(|&(lo, hi)| g.fwd_frame >= lo && g.aft_frame <= hi);
+            if !inside {
+                outside_coverage.push(json!({
+                    "compartment_no": g.compartment_no,
+                    "deck_code": c.deck_code,
+                    "fwd_frame": g.fwd_frame,
+                    "aft_frame": g.aft_frame,
+                }));
+            }
+        }
+    }
+    json!({
+        "surveyed": surveyed,
+        "register_total": compartments.len(),
+        "placard_disagreements": placard_disagreements,
+        "outside_deck_coverage": outside_coverage,
+        "unknown_spaces": { "count": unknown, "examples": unknown_examples },
+    })
+}
+
+/// The hull's geometry register with its live findings, or `null` — placard
+/// parses all round, and the surface says so.
+pub(crate) async fn get_geometry(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let Some(register) = state.store.geometry_register(&scope, vessel).await? else {
+        state.store.get_vessel(&scope, vessel).await?;
+        return Ok(Json(
+            json!({ "register": Value::Null, "findings": Value::Null }),
+        ));
+    };
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let findings = geometry_findings(&register, &compartments);
+    Ok(Json(json!({
+        "register": {
+            "label": register.label,
+            "spaces": register.spaces.len(),
+            "decks": register.decks,
+        },
+        "findings": findings,
+    })))
+}
+
+/// Ingests a geometry register: surveyed frame extents per space and coverage
+/// bands per deck. Refusals are structural (the file is malformed);
+/// disagreements with the register are FINDINGS — previewed before Confirm,
+/// served on every read — because a survey that contradicts a placard is
+/// exactly the thing a person should look at, not a thing to hide.
+pub(crate) async fn import_geometry(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportGeometry = read_import_body(req).await?;
+
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the register carries no label".to_owned());
+    }
+    if body.spaces.is_empty() && body.decks.is_empty() {
+        rejections.push("the register carries neither spaces nor deck bands".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for g in &body.spaces {
+        if g.compartment_no.trim().is_empty() {
+            rejections.push("a space row names no compartment".to_owned());
+        }
+        if g.fwd_frame > g.aft_frame {
+            rejections.push(format!(
+                "{}: fwd frame {} is aft of aft frame {}",
+                g.compartment_no, g.fwd_frame, g.aft_frame
+            ));
+        }
+        if g.fwd_frame < 0 {
+            rejections.push(format!("{}: negative frame", g.compartment_no));
+        }
+        if !seen.insert(g.compartment_no.as_str()) {
+            rejections.push(format!("{} is surveyed twice", g.compartment_no));
+        }
+    }
+    let mut seen_bands = std::collections::BTreeSet::new();
+    for d in &body.decks {
+        if d.lo_frame > d.hi_frame || d.lo_frame < 0 {
+            rejections.push(format!(
+                "deck {}: band {}..{} is not a forward-to-aft interval",
+                d.deck_code, d.lo_frame, d.hi_frame
+            ));
+        }
+        if !seen_bands.insert((d.deck_code.as_str(), d.lo_frame, d.hi_frame)) {
+            rejections.push(format!(
+                "deck {}: band {}..{} is delineated twice",
+                d.deck_code, d.lo_frame, d.hi_frame
+            ));
+        }
+    }
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the register was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let register = wadl_store::memory::GeometryRegister {
+        label: body.label,
+        spaces: body.spaces,
+        decks: body.decks,
+    };
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let findings = geometry_findings(&register, &compartments);
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": register.label,
+            "spaces": register.spaces.len(),
+            "deck_bands": register.decks.len(),
+            "findings": findings,
+        })));
+    }
+    let label = register.label.clone();
+    let spaces = register.spaces.len();
+    let deck_bands = register.decks.len();
+    state
+        .store
+        .set_geometry_register(&scope, vessel, register)
+        .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "geometry_register",
+        Some(&label),
+        json!({ "spaces": spaces, "deck_bands": deck_bands }),
+    )
+    .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "spaces": spaces,
+        "deck_bands": deck_bands,
+        "findings": findings,
+    })))
+}
+
+/// Discards the geometry register; positions return to placard parses.
+pub(crate) async fn revert_geometry(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_geometry_register(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "geometry_register",
+        None,
+        json!({}),
+    )
+    .await?;
+    Ok(Json(json!({ "reverted": true })))
+}
+
+/// Discards the ingested manning book; the boards return to demand only.
+pub(crate) async fn revert_manning(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_manning_book(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "manning_book",
+        None,
+        json!({}),
+    )
+    .await?;
     Ok(Json(json!({ "reverted": true })))
 }
 
 /// Discards the ingested zone chart; the views return to inferred bands.
 pub(crate) async fn revert_zones(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let vessel = VesselId::from_uuid(id);
     state.store.clear_zone_register(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "zone_register",
+        None,
+        json!({}),
+    )
+    .await?;
     Ok(Json(json!({ "reverted": true })))
+}
+
+/* ------------------------------------------------------- the ship itself */
+
+/// The body of a compartment-register import: the hull's decks and spaces.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportRegister {
+    /// Where the list came from, e.g. the yard's compartment list extract.
+    pub(crate) label: String,
+    /// The decks, with ordinals ascending downward.
+    #[serde(default)]
+    pub(crate) decks: Vec<wadl_store::model::RegisterDeckSummary>,
+    /// One row per space.
+    #[serde(default)]
+    pub(crate) spaces: Vec<wadl_store::model::RegisterSpaceSummary>,
+}
+
+/// The hull's compartment register as served: the ingested document if one
+/// is loaded, and either way what the reads are currently built from.
+pub(crate) async fn get_register(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let register = state.store.compartment_register(&scope, vessel).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let decks = state.store.list_decks(&scope, vessel).await?;
+    Ok(Json(json!({
+        "register": register.as_ref().map(|r| json!({
+            "label": r.label,
+            "decks": r.decks.len(),
+            "spaces": r.spaces.len(),
+        })),
+        "served": if register.is_some() { "ingested" } else { "seeded" },
+        "spaces_served": compartments.len(),
+        "decks_served": decks.len(),
+    })))
+}
+
+/// What a candidate register would change: placards the numbering scheme
+/// cannot place and that carry no frame, decks with nothing on them, live
+/// field conditions whose space the new register does not carry, and
+/// scheduled work located to spaces it does not carry. Computed at dry-run
+/// so the consequences are on the table before Confirm.
+async fn register_findings(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    body: &ImportRegister,
+) -> Result<Value, ApiError> {
+    let known: std::collections::BTreeSet<&str> = body
+        .spaces
+        .iter()
+        .map(|s| s.compartment_no.as_str())
+        .collect();
+    let unplaceable: Vec<&str> = body
+        .spaces
+        .iter()
+        .filter(|s| {
+            s.frame.is_none()
+                && CompartmentNo::new(s.compartment_no.as_str())
+                    .parse_usn()
+                    .is_none()
+        })
+        .map(|s| s.compartment_no.as_str())
+        .collect();
+    let empty_decks: Vec<&str> = body
+        .decks
+        .iter()
+        .filter(|d| !body.spaces.iter().any(|s| s.deck_code == d.code))
+        .map(|d| d.code.as_str())
+        .collect();
+    let hazards = state
+        .store
+        .live_hazards(scope, vessel, state.clock.now())
+        .await?;
+    let orphaned_hazards: Vec<Value> = hazards
+        .iter()
+        .filter(|h| !known.contains(h.origin.as_str()))
+        .map(|h| json!({ "compartment": h.origin, "label": h.label }))
+        .collect();
+    let activities = state.store.list_activities(scope, vessel).await?;
+    let orphaned_activities = activities
+        .iter()
+        .filter(|a| {
+            a.compartment_no
+                .as_ref()
+                .is_some_and(|no| !known.contains(no.as_str()))
+        })
+        .count();
+    Ok(json!({
+        "unplaceable": unplaceable,
+        "empty_decks": empty_decks,
+        "orphaned_hazards": orphaned_hazards,
+        "activities_losing_their_space": orphaned_activities,
+    }))
+}
+
+/// Every reason a candidate register is refused whole: no label, no decks or
+/// spaces, a deck listed twice or sharing an ordinal, a placard listed twice
+/// or on a deck the register does not carry, a side that is not one of the
+/// three the hull has. Capped so the refusal stays readable.
+fn register_rejections(body: &ImportRegister) -> Vec<String> {
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the register carries no label".to_owned());
+    }
+    if body.decks.is_empty() {
+        rejections.push("the register carries no decks".to_owned());
+    }
+    if body.spaces.is_empty() {
+        rejections.push("the register carries no spaces".to_owned());
+    }
+    let mut deck_codes = std::collections::BTreeSet::new();
+    let mut ordinals = std::collections::BTreeSet::new();
+    for d in &body.decks {
+        if d.code.trim().is_empty() {
+            rejections.push(format!("a deck at ordinal {} has no code", d.ordinal));
+        }
+        if !deck_codes.insert(d.code.as_str()) {
+            rejections.push(format!("deck {} is listed twice", d.code));
+        }
+        if !ordinals.insert(d.ordinal) {
+            rejections.push(format!(
+                "deck {} shares ordinal {} with another deck",
+                d.code, d.ordinal
+            ));
+        }
+    }
+    let mut placards = std::collections::BTreeSet::new();
+    for s in &body.spaces {
+        if s.compartment_no.trim().is_empty() {
+            rejections.push("a space row has no placard".to_owned());
+        }
+        if !placards.insert(s.compartment_no.as_str()) {
+            rejections.push(format!("{} is listed twice", s.compartment_no));
+        }
+        if !deck_codes.contains(s.deck_code.as_str()) {
+            rejections.push(format!(
+                "{} is on deck {:?}, which the register does not list",
+                s.compartment_no, s.deck_code
+            ));
+        }
+        if let Some(side) = s.side.as_deref() {
+            if !matches!(side, "port" | "starboard" | "centreline") {
+                rejections.push(format!(
+                    "{}: side {side:?} is not port, starboard or centreline",
+                    s.compartment_no
+                ));
+            }
+        }
+    }
+    if rejections.len() > 12 {
+        rejections.truncate(12);
+        rejections.push("…".to_owned());
+    }
+    rejections
+}
+
+/// Ingests the hull's own compartment register — the ship, through the
+/// product. All-or-nothing with every reason listed; `?dry_run=true` previews
+/// the findings and stores nothing. Once stored, every read serves it and
+/// the seeded register stops existing for this hull.
+pub(crate) async fn import_register(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportRegister = read_import_body(req).await?;
+
+    let rejections = register_rejections(&body);
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the register was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let findings = register_findings(&state, &scope, vessel, &body).await?;
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": body.label,
+            "decks": body.decks.len(),
+            "spaces": body.spaces.len(),
+            "findings": findings,
+        })));
+    }
+    let label = body.label.clone();
+    let (decks, spaces) = (body.decks.len(), body.spaces.len());
+    state
+        .store
+        .set_compartment_register(
+            &scope,
+            vessel,
+            wadl_store::memory::CompartmentRegister {
+                label: body.label,
+                decks: body.decks,
+                spaces: body.spaces,
+            },
+        )
+        .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "compartment_register",
+        Some(&label),
+        json!({ "decks": decks, "spaces": spaces }),
+    )
+    .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "decks": decks,
+        "spaces": spaces,
+        "findings": findings,
+    })))
+}
+
+/// Discards the ingested compartment register; the seed is served again.
+pub(crate) async fn revert_register(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state
+        .store
+        .clear_compartment_register(&scope, vessel)
+        .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "compartment_register",
+        None,
+        json!({}),
+    )
+    .await?;
+    Ok(Json(json!({ "reverted": true })))
+}
+
+/// The body of a coupling-register import.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportCouplings {
+    /// Where the list came from.
+    pub(crate) label: String,
+    /// Authored rows.
+    #[serde(default)]
+    pub(crate) edges: Vec<wadl_store::model::CouplingRowSummary>,
+    /// Also propose `deck_penetration` edges from deck order and frame
+    /// overlap — "directly above" derived from the register rather than
+    /// authored one pair at a time.
+    #[serde(default)]
+    pub(crate) derive_vertical: bool,
+}
+
+/// The hull's coupling register as served, with the coupling types a row
+/// may name and how many edges the cascade currently walks.
+pub(crate) async fn get_couplings(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let register = state.store.coupling_register(&scope, vessel).await?;
+    let graph = state.store.adjacency_graph(&scope, vessel).await?;
+    let types = state.store.coupling_types(&scope, vessel).await?;
+    Ok(Json(json!({
+        "register": register.as_ref().map(|r| json!({
+            "label": r.label,
+            "edges": r.edges.len(),
+            "authored": r.edges.iter().filter(|e| e.provenance == "authored").count(),
+            "derived": r.edges.iter().filter(|e| e.provenance == "derived").count(),
+        })),
+        "served": if register.is_some() { "ingested" } else { "seeded" },
+        "edges_served": graph.edge_count(),
+        "types": types,
+    })))
+}
+
+use crate::documents::derive_vertical_edges;
+
+/// Every reason a candidate coupling register is refused whole: no label,
+/// nothing to store, a coupling type the hull's rules do not bind to, an end
+/// that is not on the register, a space coupled to itself, a row listed
+/// twice, or a provenance that is neither authored nor derived.
+fn coupling_rejections(
+    body: &ImportCouplings,
+    types: &[wadl_store::model::CouplingTypeSummary],
+    compartments: &[wadl_store::model::CompartmentSummary],
+) -> Vec<String> {
+    let known: std::collections::BTreeSet<&str> = compartments
+        .iter()
+        .map(|c| c.compartment_no.as_str())
+        .collect();
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the register carries no label".to_owned());
+    }
+    if body.edges.is_empty() && !body.derive_vertical {
+        rejections.push("the register carries no edges and asks for none to be derived".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for e in &body.edges {
+        if !types.iter().any(|t| t.code == e.code) {
+            rejections.push(format!(
+                "{} → {}: coupling type {:?} is not one this hull's rules know ({})",
+                e.from,
+                e.to,
+                e.code,
+                types
+                    .iter()
+                    .map(|t| t.code.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for no in [&e.from, &e.to] {
+            if !known.contains(no.as_str()) {
+                rejections.push(format!("{no} is not on this hull's register"));
+            }
+        }
+        if e.from == e.to {
+            rejections.push(format!("{} is coupled to itself", e.from));
+        }
+        if !seen.insert((e.from.as_str(), e.to.as_str(), e.code.as_str())) {
+            rejections.push(format!(
+                "{} → {} ({}) is listed twice",
+                e.from, e.to, e.code
+            ));
+        }
+        if !matches!(e.provenance.as_str(), "authored" | "derived") {
+            rejections.push(format!(
+                "{} → {}: provenance must be authored or derived",
+                e.from, e.to
+            ));
+        }
+    }
+    if rejections.len() > 12 {
+        rejections.truncate(12);
+        rejections.push("…".to_owned());
+    }
+    rejections
+}
+
+/// Ingests the hull's coupling register — the paths a hazard can travel.
+/// Rows are validated against the coupling types the hull's rules bind to
+/// and against the compartment register; `derive_vertical` adds proposed
+/// deck penetrations, each marked `derived`. All-or-nothing; `?dry_run=true`
+/// previews, including every derived edge, and stores nothing.
+pub(crate) async fn import_couplings(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportCouplings = read_import_body(req).await?;
+    let types = state.store.coupling_types(&scope, vessel).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let rejections = coupling_rejections(&body, &types, &compartments);
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the register was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let mut compartments = compartments;
+    overlay_geometry(&state, &scope, vessel, &mut compartments).await?;
+    let derived = if body.derive_vertical {
+        derive_vertical_edges(&compartments, &body.edges)
+    } else {
+        Vec::new()
+    };
+    let authored = body.edges.len();
+    let mut edges = body.edges;
+    edges.extend(derived.iter().cloned());
+    let preview: Vec<&wadl_store::model::CouplingRowSummary> = derived.iter().take(50).collect();
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": body.label,
+            "authored": authored,
+            "derived": derived.len(),
+            "derived_edges": preview,
+            "edges": edges.len(),
+        })));
+    }
+    let label = body.label.clone();
+    let total = edges.len();
+    state
+        .store
+        .set_coupling_register(
+            &scope,
+            vessel,
+            wadl_store::memory::CouplingRegister {
+                label: body.label,
+                edges,
+            },
+        )
+        .await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REPLACED",
+        "coupling_register",
+        Some(&label),
+        json!({ "authored": authored, "derived": derived.len() }),
+    )
+    .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": label,
+        "authored": authored,
+        "derived": derived.len(),
+        "derived_edges": preview,
+        "edges": total,
+    })))
+}
+
+/// Discards the ingested coupling register; the seeded edges are walked again.
+pub(crate) async fn revert_couplings(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.clear_coupling_register(&scope, vessel).await?;
+    ledger_document(
+        &state,
+        &scope,
+        vessel,
+        "DOCUMENT_REVERTED",
+        "coupling_register",
+        None,
+        json!({}),
+    )
+    .await?;
+    Ok(Json(json!({ "reverted": true })))
+}
+
+/// One line of a hazard log — the day's tag-out or permit list.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HazardLogRow {
+    /// The origin space.
+    compartment: String,
+    /// The hazard kind, in the engine's serde names.
+    kind: wadl_engine::HazardKind,
+    /// The fact as the deck says it.
+    label: String,
+    /// When it was raised, epoch ms; defaults to the wall clock.
+    #[serde(default)]
+    since_ms: Option<i64>,
+}
+
+/// The body of a hazard-log import.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ImportHazardLog {
+    /// Where the log came from, e.g. the tag-out log's morning export.
+    pub(crate) label: String,
+    /// The lines.
+    #[serde(default)]
+    pub(crate) rows: Vec<HazardLogRow>,
+}
+
+/// Every reason a hazard log is refused whole: no label, no rows, a row
+/// without a label, a row on a space the hull does not carry, or a row raised
+/// in the future. Capped so the refusal stays readable.
+fn hazard_log_rejections(
+    body: &ImportHazardLog,
+    register: &[wadl_store::model::CompartmentSummary],
+    now_ms: i64,
+) -> Vec<String> {
+    let known: std::collections::BTreeSet<&str> =
+        register.iter().map(|c| c.compartment_no.as_str()).collect();
+    let mut rejections: Vec<String> = Vec::new();
+    if body.label.trim().is_empty() {
+        rejections.push("the log carries no label".to_owned());
+    }
+    if body.rows.is_empty() {
+        rejections.push("the log carries no rows".to_owned());
+    }
+    for (n, row) in body.rows.iter().enumerate() {
+        let line = n + 1;
+        if row.label.trim().is_empty() {
+            rejections.push(format!("line {line}: no label"));
+        }
+        if !known.contains(row.compartment.trim()) {
+            rejections.push(format!(
+                "line {line}: {} is not on this hull's register",
+                row.compartment.trim()
+            ));
+        }
+        if row.since_ms.is_some_and(|s| s > now_ms) {
+            rejections.push(format!("line {line}: raised in the future"));
+        }
+    }
+    if rejections.len() > 12 {
+        rejections.truncate(12);
+        rejections.push("…".to_owned());
+    }
+    rejections
+}
+
+/// Raises one logged row and ledgers it as `HAZARD_RAISED`, naming the log
+/// it came from so the entry reads the same as a raise made by hand.
+async fn raise_logged_row(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    log_label: &str,
+    row: &HazardLogRow,
+    now_ms: i64,
+) -> Result<wadl_engine::Hazard, ApiError> {
+    let compartment = row.compartment.trim();
+    let label = row.label.trim();
+    let since_ms = row.since_ms.unwrap_or(now_ms);
+    let hazard = state
+        .store
+        .raise_hazard(scope, vessel, compartment, row.kind, since_ms, label)
+        .await?;
+    let detail = json!({
+        "compartment": compartment,
+        "kind": row.kind,
+        "label": label,
+        "since_ms": since_ms,
+        "raised_by_org": scope.org.to_string(),
+        "from_log": log_label,
+        "at_ms": now_ms,
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    state
+        .store
+        .append_audit(
+            scope,
+            vessel,
+            "HAZARD_RAISED",
+            &detail,
+            Some(compartment),
+            now_ms,
+        )
+        .await?;
+    Ok(hazard)
+}
+
+/// Raises the field conditions in a hazard log that are not already live.
+///
+/// The same validation as a single raise, applied to the whole file before
+/// any row lands: an unknown space, an empty label or a future instant
+/// refuses the log whole. A row whose fact is already live is skipped, not
+/// refused — the morning log lists what is open, and most of it was open
+/// yesterday too. `?dry_run=true` answers with what would be raised and what
+/// is already live, storing nothing. Each raise lands as `HAZARD_RAISED`,
+/// and the commit as one `HAZARD_LOG_IMPORTED` with the counts.
+pub(crate) async fn import_hazard_log(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    Query(dry): Query<DryRun>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body: ImportHazardLog = read_import_body(req).await?;
+    let now = state.clock.now();
+    let now_ms = now.epoch_millis();
+
+    let register = state.store.list_compartments(&scope, vessel).await?;
+    let rejections = hazard_log_rejections(&body, &register, now_ms);
+    if !rejections.is_empty() {
+        return Err(ApiError::OutOfRange(format!(
+            "the log was refused whole: {}",
+            rejections.join("; ")
+        )));
+    }
+
+    let live = state.store.live_hazards(&scope, vessel, now).await?;
+    let is_live = |row: &HazardLogRow| {
+        live.iter()
+            .any(|h| h.origin.as_str() == row.compartment.trim() && h.kind == row.kind)
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut would_raise: Vec<&HazardLogRow> = Vec::new();
+    let mut already_live: Vec<Value> = Vec::new();
+    for row in &body.rows {
+        let key = (
+            row.compartment.trim().to_owned(),
+            json!(row.kind).to_string(),
+        );
+        if is_live(row) || !seen.insert(key) {
+            already_live.push(json!({ "compartment": row.compartment.trim(), "kind": row.kind }));
+        } else {
+            would_raise.push(row);
+        }
+    }
+    let preview: Vec<Value> = would_raise
+        .iter()
+        .map(|r| json!({ "compartment": r.compartment.trim(), "kind": r.kind, "label": r.label.trim() }))
+        .collect();
+    if dry.dry_run.unwrap_or(false) {
+        return Ok(Json(json!({
+            "stored": false,
+            "label": body.label,
+            "rows": body.rows.len(),
+            "would_raise": preview,
+            "already_live": already_live,
+        })));
+    }
+
+    let mut raised = Vec::with_capacity(would_raise.len());
+    for row in would_raise {
+        raised.push(raise_logged_row(&state, &scope, vessel, &body.label, row, now_ms).await?);
+    }
+    let summary = json!({
+        "label": body.label,
+        "raised": raised.len(),
+        "already_live": already_live.len(),
+        "by_org": scope.org.to_string(),
+        "at_ms": now_ms,
+    });
+    let summary = serde_json::to_string(&summary).unwrap_or_default();
+    state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "HAZARD_LOG_IMPORTED",
+            &summary,
+            None,
+            now_ms,
+        )
+        .await?;
+    Ok(Json(json!({
+        "stored": true,
+        "label": body.label,
+        "rows": body.rows.len(),
+        "raised": raised,
+        "already_live": already_live,
+    })))
+}
+
+/// A schedule change proposal, as posted: the activity, the window the
+/// planner proposes (absent for a hold pending verification), and why.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ProposalBody {
+    /// The activity code, as the schedule of record spells it.
+    activity: String,
+    /// The proposed start, epoch ms.
+    #[serde(default)]
+    start_ms: Option<i64>,
+    /// The proposed finish, epoch ms.
+    #[serde(default)]
+    end_ms: Option<i64>,
+    /// `engine_window` (the engine's own alternative), `manual` (a planner's
+    /// window, engine-checked), or `hold_pending_verification` (no date can
+    /// honestly be promised; the proposal is the hold).
+    #[serde(default)]
+    kind: Option<String>,
+    /// Why — pressed for; a proposal without a reason is refused.
+    #[serde(default)]
+    reason: String,
+    /// The instant the board was read at.
+    #[serde(default)]
+    as_of: Option<i64>,
+}
+
+/// Day-granular window equality: P6 carries times, a planner reads dates,
+/// and "reflected" means the export moved the work to the proposed days.
+pub(crate) fn same_days(a: &Value, b: Option<wadl_domain::time::Window>) -> bool {
+    const DAY: i64 = 86_400_000;
+    let (Some(a_start), Some(a_end), Some(b)) = (
+        a.get("start").and_then(Value::as_i64),
+        a.get("end").and_then(Value::as_i64),
+        b,
+    ) else {
+        return false;
+    };
+    a_start.div_euclid(DAY) == b.start.epoch_millis().div_euclid(DAY)
+        && a_end.div_euclid(DAY) == b.end.epoch_millis().div_euclid(DAY)
+}
+
+/// Where a proposal stands, derived on every read from the ledger and the
+/// schedule currently served — never stored, so the past does not change
+/// because somebody acted in the present:
+/// `open` (the activity still sits where it was), `reflected` (the served
+/// schedule now carries the proposed days — P6 took it), `superseded` (the
+/// activity moved, but not to the proposal), `dropped` (the activity is no
+/// longer on the register), `withdrawn` (a later ledger entry took it back).
+fn proposal_status(
+    detail: &Value,
+    current: Option<&wadl_store::model::ActivitySummary>,
+    withdrawn: bool,
+) -> &'static str {
+    if withdrawn {
+        return "withdrawn";
+    }
+    let Some(a) = current else {
+        return "dropped";
+    };
+    let to = &detail["to"];
+    if !to.is_null() && same_days(to, a.planned) {
+        return "reflected";
+    }
+    if same_days(&detail["from"], a.planned) {
+        "open"
+    } else {
+        "superseded"
+    }
+}
+
+/// The proposals in the ledger, joined to the schedule currently served.
+/// Newest first, with the withdrawals folded in as status.
+pub(crate) async fn proposal_rows(
+    state: &AppState,
+    scope: &wadl_store::TenantScope,
+    vessel: VesselId,
+    current: &[wadl_store::model::ActivitySummary],
+) -> Result<Vec<Value>, ApiError> {
+    let ledger = state.store.list_audit(scope, vessel, None).await?;
+    let by_code: std::collections::BTreeMap<&str, &wadl_store::model::ActivitySummary> =
+        current.iter().map(|a| (a.code.as_str(), a)).collect();
+    let withdrawn: std::collections::BTreeSet<i64> = ledger
+        .iter()
+        .filter(|r| r.action == "SCHEDULE_CHANGE_WITHDRAWN")
+        .filter_map(|r| serde_json::from_str::<Value>(&r.detail).ok())
+        .filter_map(|d| d.get("seq").and_then(Value::as_i64))
+        .collect();
+    Ok(ledger
+        .iter()
+        .filter(|r| r.action == "SCHEDULE_CHANGE_PROPOSED")
+        .filter_map(|r| {
+            let detail = serde_json::from_str::<Value>(&r.detail).ok()?;
+            let code = detail.get("activity")?.as_str()?.to_owned();
+            let status = proposal_status(
+                &detail,
+                by_code.get(code.as_str()).copied(),
+                withdrawn.contains(&r.seq),
+            );
+            let mut row = detail;
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("seq".to_owned(), json!(r.seq));
+                obj.insert("entry_hash".to_owned(), json!(r.entry_hash));
+                obj.insert("proposed_at_ms".to_owned(), json!(r.occurred_at_ms));
+                obj.insert("status".to_owned(), json!(status));
+                obj.insert(
+                    "planned_now".to_owned(),
+                    json!(by_code.get(code.as_str()).and_then(|a| a.planned)),
+                );
+            }
+            Some(row)
+        })
+        .collect())
+}
+
+/// The kind and window a proposal carries, or why it is refused: no reason,
+/// a dated kind without both instants, a finish not after its start, a kind
+/// the product does not know.
+fn proposed_window(
+    body: &ProposalBody,
+) -> Result<(String, Option<wadl_domain::time::Window>), ApiError> {
+    if body.reason.trim().is_empty() {
+        return Err(ApiError::OutOfRange(
+            "a proposal needs a reason — P6 will be asked to move work on the strength of it"
+                .to_owned(),
+        ));
+    }
+    let kind = body.kind.clone().unwrap_or_else(|| {
+        if body.start_ms.is_some() {
+            "manual".to_owned()
+        } else {
+            "hold_pending_verification".to_owned()
+        }
+    });
+    let window = match kind.as_str() {
+        "hold_pending_verification" => None,
+        "engine_window" | "manual" => {
+            let (Some(start), Some(end)) = (body.start_ms, body.end_ms) else {
+                return Err(ApiError::OutOfRange(format!(
+                    "a {kind} proposal needs start_ms and end_ms"
+                )));
+            };
+            if end <= start {
+                return Err(ApiError::OutOfRange(
+                    "the proposed finish is not after the proposed start".to_owned(),
+                ));
+            }
+            Some(wadl_domain::time::Window::new(
+                Timestamp::from_epoch_millis(start),
+                Timestamp::from_epoch_millis(end),
+            ))
+        }
+        other => {
+            return Err(ApiError::OutOfRange(format!(
+                "kind must be engine_window, manual or hold_pending_verification, got {other:?}"
+            )))
+        }
+    };
+    Ok((kind, window))
+}
+
+/// `POST /api/vessels/:id/schedule-proposals` — records a schedule change
+/// proposal: the path from a refusal on this board back to P6.
+///
+/// Nothing here moves a date. The proposal is checked by the engine over
+/// the proposed window under the hazards live at the instant (so a planner
+/// never sends P6 a window the hull would refuse without knowing it), its
+/// knock-on is read off the schedule's own logic, and the whole record —
+/// what was proposed, from where, why, with what verdict — lands in the
+/// ledger as `SCHEDULE_CHANGE_PROPOSED`, subject the activity. The export
+/// to P6 is built from these rows; the next XER import says which of them
+/// P6 reflected.
+pub(crate) async fn propose_schedule_change(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<ProposalBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    let hull_row = state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let (kind, window) = proposed_window(&body)?;
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let Some(a) = activities.iter().find(|a| a.code == body.activity) else {
+        return Err(ApiError::OutOfRange(format!(
+            "activity {:?} is not on this hull's schedule of record",
+            body.activity
+        )));
+    };
+    let at = AsOf { as_of: body.as_of }.resolve(&state, &hull_row)?;
+
+    // The engine's word on the proposed window, under the hazards live at the
+    // instant and the rows bound to this activity's work: a proposal is never
+    // sent blind.
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let scopes =
+        crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, std::iter::once(a));
+    let hull = inputs.hull_under(scopes.for_activity(a));
+    let verdict =
+        window.map(|w| wadl_issues::executability(&hull, a.compartment_no.as_ref(), Some(w)));
+    // Knock-on, read finish-to-start off the schedule's own logic.
+    let edges = state.store.list_schedule_edges(&scope, vessel).await?;
+    let pushes: Vec<&str> = match window {
+        Some(w) => edges
+            .iter()
+            .filter(|e| e.pred_code == a.code)
+            .filter_map(|e| {
+                let succ = activities.iter().find(|s| s.code == e.succ_code)?;
+                (succ.planned?.start < w.end).then_some(e.succ_code.as_str())
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let now_ms = state.clock.now().epoch_millis();
+    let detail = json!({
+        "activity": a.code,
+        "name": a.name,
+        "compartment": a.compartment_no,
+        "trade": a.trade,
+        "from": a.planned,
+        "to": window,
+        "kind": kind,
+        "reason": body.reason.trim(),
+        "verdict": verdict,
+        "pushes": pushes,
+        "knock_on_basis": "finish-to-start, lags not applied",
+        "as_of_ms": at.epoch_millis(),
+        "proposed_by_org": scope.org.to_string(),
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "SCHEDULE_CHANGE_PROPOSED",
+            &detail,
+            Some(&a.code),
+            now_ms,
+        )
+        .await?;
+    let rows = proposal_rows(&state, &scope, vessel, &activities).await?;
+    let proposal = rows
+        .into_iter()
+        .find(|r| r["seq"].as_i64() == Some(record.seq))
+        .unwrap_or(Value::Null);
+    Ok(Json(json!({ "proposal": proposal, "recorded": record })))
+}
+
+/// `GET /api/vessels/:id/schedule-proposals` — every proposal in the
+/// ledger with where it stands against the schedule currently served.
+pub(crate) async fn list_schedule_proposals(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let activities = state.store.list_activities(&scope, vessel).await?;
+    let rows = proposal_rows(&state, &scope, vessel, &activities).await?;
+    let count = |s: &str| rows.iter().filter(|r| r["status"] == s).count();
+    Ok(Json(json!({
+        "as_of": state.clock.now(),
+        "schedule_source": state.store.schedule_source(&scope, vessel).await?,
+        "counts": {
+            "open": count("open"),
+            "reflected": count("reflected"),
+            "superseded": count("superseded"),
+            "dropped": count("dropped"),
+            "withdrawn": count("withdrawn"),
+        },
+        "proposals": rows,
+        "status_basis": "derived on every read: reflected when the served schedule carries the proposed days; superseded when the activity moved elsewhere; dropped when it left the register; withdrawn by a later ledger entry",
+    })))
+}
+
+/// A withdrawal, as posted.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct WithdrawBody {
+    /// The proposal's ledger sequence.
+    seq: i64,
+    #[serde(default)]
+    reason: String,
+}
+
+/// `POST /api/vessels/:id/schedule-proposals/withdraw` — takes a proposal
+/// back, as a later ledger entry; the original stays in the chain.
+pub(crate) async fn withdraw_schedule_proposal(
+    State(state): State<AppState>,
+    Caller { scope, .. }: Caller,
+    Path(id): Path<Uuid>,
+    body: Result<Json<WithdrawBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let vessel = VesselId::from_uuid(id);
+    state.store.get_vessel(&scope, vessel).await?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return Err(body_rejection(&rejection)),
+    };
+    let ledger = state.store.list_audit(&scope, vessel, None).await?;
+    let Some(original) = ledger
+        .iter()
+        .find(|r| r.seq == body.seq && r.action == "SCHEDULE_CHANGE_PROPOSED")
+    else {
+        return Err(ApiError::OutOfRange(format!(
+            "ledger entry {} is not a schedule change proposal on this hull",
+            body.seq
+        )));
+    };
+    let now_ms = state.clock.now().epoch_millis();
+    let detail = json!({
+        "seq": body.seq,
+        "activity": original.subject_ref,
+        "reason": body.reason.trim(),
+        "withdrawn_by_org": scope.org.to_string(),
+    });
+    let detail = serde_json::to_string(&detail).unwrap_or_default();
+    let record = state
+        .store
+        .append_audit(
+            &scope,
+            vessel,
+            "SCHEDULE_CHANGE_WITHDRAWN",
+            &detail,
+            original.subject_ref.as_deref(),
+            now_ms,
+        )
+        .await?;
+    Ok(Json(json!({ "withdrawn": body.seq, "recorded": record })))
 }
 
 /// The distributed packages on a hull.
 pub(crate) async fn list_packages(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let packages = state
@@ -1933,7 +3801,7 @@ pub(crate) async fn list_packages(
 /// one held compartment strands man-hours it does not contain.
 pub(crate) async fn get_package(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path((id, code)): Path<(Uuid, String)>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1942,18 +3810,16 @@ pub(crate) async fn get_package(
     let package = state.store.get_package(&scope, vessel, &code).await?;
     let analysis = package.analyse();
 
-    // The engine's inputs, loaded once for the whole footprint.
-    let graph = state.store.adjacency_graph(&scope, vessel).await?;
-    let hazards = state.store.live_hazards(&scope, vessel).await?;
-    let rules = state.store.rules_in_force(&scope, vessel).await?;
+    // The engine's inputs, loaded once for the whole footprint; each space
+    // is read under the rows bound to its register category.
+    let inputs = crate::rule_table::engine_inputs(&state, &scope, vessel, at).await?;
+    let compartments = state.store.list_compartments(&scope, vessel).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
     let decide_space = |compartment: &CompartmentNo| {
-        evaluate(&EvaluationRequest {
-            subject: compartment,
-            graph: &graph,
-            rules: &rules,
-            hazards: &hazards,
-            at,
-        })
+        inputs.decide(
+            compartment,
+            scopes.get(None, scopes.category_of(Some(compartment))),
+        )
     };
 
     // Authorization as a distribution over the footprint.
@@ -2018,38 +3884,14 @@ async fn decide(
     at: Timestamp,
 ) -> Result<Decision, ApiError> {
     // Scope is enforced by each store call; the first failure short-circuits.
-    let graph = state.store.adjacency_graph(scope, vessel).await?;
-    let hazards = state.store.live_hazards(scope, vessel).await?;
-    let rules = state.store.rules_in_force(scope, vessel).await?;
+    let inputs = crate::rule_table::engine_inputs(state, scope, vessel, at).await?;
+    let compartments = state.store.list_compartments(scope, vessel).await?;
+    let scopes = crate::rule_table::RuleScopes::new(&inputs.rules, at, &compartments, []);
     let subject = CompartmentNo::new(compartment);
-    Ok(evaluate(&EvaluationRequest {
-        subject: &subject,
-        graph: &graph,
-        rules: &rules,
-        hazards: &hazards,
-        at,
-    }))
-}
-
-/// `GET /api/whoami` — the caller's resolved identity, as the server sees it.
-///
-/// Serves the outcome of the trust boundary rather than echoing headers: the
-/// tenant and hull assignments that every scoped query will actually run
-/// under, plus which identity mode admitted them. The shell uses this to show
-/// doors a caller can open instead of doors that exist (least privilege made
-/// visible), and an operator uses it to verify a proxy configuration end to
-/// end with one curl.
-pub(crate) async fn whoami(Caller(scope): Caller) -> Json<Value> {
-    Json(json!({
-        "org": scope.org.to_string(),
-        "assigned_vessels": scope
-            .assigned_vessels
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-        "identity_mode": crate::auth::identity_mode(),
-        "decision_support_only": true,
-    }))
+    Ok(inputs.decide(
+        &subject,
+        scopes.get(None, scopes.category_of(Some(&subject))),
+    ))
 }
 
 /// How a scheduled activity participates in a work-on-work conflict, judged
@@ -2097,7 +3939,7 @@ fn work_class(trade: &str, name: &str) -> Option<&'static str> {
 /// no screen has to re-explain it.
 pub(crate) async fn work_conflicts(
     State(state): State<AppState>,
-    Caller(scope): Caller,
+    Caller { scope, .. }: Caller,
     Path(id): Path<Uuid>,
     Query(as_of): Query<AsOf>,
 ) -> Result<Json<Value>, ApiError> {

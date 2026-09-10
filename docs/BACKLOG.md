@@ -121,10 +121,11 @@ each now has a designated role there.
 - **Modules with no view.** Daily Ops, Sequence Board, Conflicts & Risk,
   Deconfliction Cascade. The rail marks them `soon` rather than rendering an
   empty frame that reads as missing data (`MODULES` in `App.tsx`).
-- **Authentication.** The shell ships a fixed `DEMO_IDENTITY`. Tenant isolation
-  is enforced at the database (RLS, `docs/adr/0003`) and the API extracts a
-  caller scope, so this is a front door on a locked house — but it is still a
-  missing front door.
+- **Authentication.** The product authenticates nobody by design: the yard's
+  CAC-terminating proxy asserts the person, hulls and roles on its private hop
+  (`docs/identity-proxy-contract.md`), the shell boots from `/api/whoami`,
+  and the dev shim is a labelled DEMO MODE. What is still open is the yard's
+  side — the proxy configuration and the staging test in the contract.
 - **Register data for nine of twelve decks.** Three decks carry compartments;
   the rest are `plate only` and say so in the rail. Not a bug — the class
   register is real and the counts are honestly zero — but the Deck Explorer is

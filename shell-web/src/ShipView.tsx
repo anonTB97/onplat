@@ -28,7 +28,7 @@ import { clampZoom, planZoomAt, wheelFactor } from "./camera";
 import { plateSlice } from "./VerticalTrace";
 import { sheetForDeck } from "./deckSheets";
 import { ACTIVITY_STATUS, C, STATE_STYLE, zoneColour } from "./theme";
-import type { ZoneGeometry } from "./zones";
+import { bandCoversDeck, type ZoneGeometry } from "./zones";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -86,11 +86,15 @@ export function ShipView({
   zonesOn,
   zones,
   zoneAlerts,
+  focus,
   onPick,
 }: {
   decks: Deck[];
   rows: DeckStateRow[];
   activities: Activity[];
+  /** The zone in focus: its spaces and chips draw in full, next door draws
+   *  ringed, everything else ghosts — the hull keeps its shape. */
+  focus?: { zone: string; inside: Set<string>; adjacent: Map<string, { via: string[] }> } | null;
   /** The selected compartment — its box and chips ring in accent. */
   selected: string | null;
   /** The selected space's hazard route, compartment to compartment. */
@@ -380,14 +384,22 @@ export function ShipView({
                 const x2 = xOf(band.lo);
                 const [bandX, bandW] = x1 < x2 ? [x1, x2 - x1] : [x2, x1 - x2];
                 // Authored bounds draw solid — a chart's word; inferred bands
-                // stay dashed — this module's guess, and it says so.
+                // stay dashed — this module's guess, and it says so. A block
+                // is a rectangle over the LANES it covers: this is where the
+                // 3-D scheme becomes visible — the flight deck's zone stops at
+                // its lane, the plant's block reaches the inner bottom.
                 const dash = band.authored ? undefined : "7 5";
+                const covered = ordered.filter((d) => bandCoversDeck(band, d.ordinal));
+                const first = covered[0];
+                const last = covered[covered.length - 1];
+                if (first === undefined || last === undefined) return null;
+                const y0 = laneTop.get(first.code) ?? 0;
+                const y1 = (laneTop.get(last.code) ?? 0) + LANE_H;
                 return (
-                  <g key={band.zone} pointerEvents="none">
-                    <rect x={bandX} y={0} width={bandW} height={lanesH} fill={colour} opacity={0.06} />
-                    <line x1={bandX} y1={0} x2={bandX} y2={lanesH} stroke={colour} strokeWidth={band.authored ? 1.3 : 1} strokeDasharray={dash} opacity={0.5} />
-                    <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={lanesH} stroke={colour} strokeWidth={band.authored ? 1.3 : 1} strokeDasharray={dash} opacity={0.5} />
-                    <text x={bandX + 5} y={9} fill={colour} fontSize={9 / zoom} fontWeight={700} letterSpacing={0.8}>
+                  <g key={band.key} pointerEvents="none">
+                    <rect x={bandX} y={y0} width={bandW} height={y1 - y0} fill={colour} opacity={0.07} />
+                    <rect x={bandX} y={y0} width={bandW} height={y1 - y0} fill="none" stroke={colour} strokeWidth={band.authored ? 1.3 : 1} strokeDasharray={dash} opacity={0.55} />
+                    <text x={bandX + 5} y={y0 + 9} fill={colour} fontSize={9 / zoom} fontWeight={700} letterSpacing={0.8}>
                       {band.zone}
                     </text>
                   </g>
@@ -422,6 +434,10 @@ export function ShipView({
               const isSel = no === selected;
               const inViolation = involved.has(no);
               const dimmed = violationFocus && !inViolation;
+              // Zone focus: outside and not next door, the box is a ghost;
+              // next door keeps its state and wears a ring that says why.
+              const nextDoor = focus?.adjacent.get(no);
+              const ghost = focus ? !focus.inside.has(no) && nextDoor === undefined && !isSel : false;
               // Divided by zoom: the footprint's WIDTH is hull geometry and
               // grows with the drawing, but the strip height, text and strokes
               // are labels and keep their screen size.
@@ -431,12 +447,20 @@ export function ShipView({
                 <g
                   key={no}
                   onClick={() => onPick(r.compartment.deck_code, no)}
-                  style={{ cursor: "pointer" }}
-                  opacity={dimmed ? 0.45 : 1}
+                  style={{ cursor: ghost ? "default" : "pointer" }}
+                  opacity={ghost ? 0.12 : dimmed ? 0.45 : 1}
+                  pointerEvents={ghost ? "none" : undefined}
                 >
                   <title>
-                    {`${no} — ${r.compartment.name}\n${r.state}${r.permits_work ? "" : " — refuses work"} · ${r.compartment.zone}${r.clearing_authority ? `\ncleared by ${r.clearing_authority}` : ""}`}
+                    {`${no} — ${r.compartment.name}\n${r.state}${r.permits_work ? "" : " — refuses work"} · ${r.compartment.zone}${r.clearing_authority ? `\ncleared by ${r.clearing_authority}` : ""}${nextDoor ? `\nnext door to Zone ${focus?.zone}: ${nextDoor.via.join(", ")}` : ""}`}
                   </title>
+                  {nextDoor && (
+                    <rect
+                      x={c.x - boxHalfW - 3 * sc} y={y - 3 * sc}
+                      width={boxHalfW * 2 + 6 * sc} height={BOX_H * sc + 6 * sc} rx={4 * sc}
+                      fill="none" stroke={C.warn} strokeWidth={1.2 * sc} strokeDasharray={`${3 * sc} ${2 * sc}`} opacity={0.9}
+                    />
+                  )}
                   {/* The violation's own spaces get a halo, so the route reads
                       even where lit and dimmed boxes sit close. */}
                   {violationFocus && inViolation && (
@@ -490,7 +514,11 @@ export function ShipView({
                 const y = top + (10 + p.level * 12) * sc;
                 // The two focuses compose: a chip outside both the violation's
                 // route and the instant's window earns both dims.
+                const outsideFocus =
+                  focus !== null && focus !== undefined &&
+                  !focus.inside.has(p.compartment) && !focus.adjacent.has(p.compartment);
                 const dim =
+                  (outsideFocus ? 0.12 : 1) *
                   (violationFocus && !involved.has(p.compartment) ? 0.45 : 1) *
                   (windowFocus && !a.in_window ? 0.35 : 1);
                 return (
@@ -611,9 +639,11 @@ export function ShipView({
             <span style={{ width: 1, height: 12, background: LINE }} />
             <span
               style={{ color: zones.overlaps.length > 0 ? "#fbbf24" : C.ok }}
-              title="Each band is its zone's spaces' true extent, padded two frames — inferred from the register until a zones register carries authored bounds. Overlaps are reported as facts: legitimate where zones are functional rather than longitudinal, and the place to look hard where a scheme is supposed to partition."
+              title={zones.source
+                ? "Each block is the chart's word: a frame band on a band of decks, drawn over the lanes it covers. Overlaps are reported as facts on decks two zones share — the place to look hard where a scheme is supposed to partition."
+                : "Each band is its zone's spaces' true extent, padded two frames — inferred from the register until a zone chart carries authored blocks. Overlaps are reported as facts: legitimate where zones are functional rather than longitudinal, and the place to look hard where a scheme is supposed to partition."}
             >
-              bands inferred from the register ·{" "}
+              {zones.source ? `blocks authored by ${zones.source}` : "bands inferred from the register"} ·{" "}
               {zones.overlaps.length > 0
                 ? zones.overlaps
                     .map((o) => `${o.a}∩${o.b} Fr ${o.lo}–${o.hi} (${o.spaces} spaces)`)

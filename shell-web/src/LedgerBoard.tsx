@@ -38,6 +38,12 @@ const ACTION_STYLE: Record<string, { label: string; fg: string; bg: string; bord
     bg: "rgba(61,107,255,0.10)",
     border: "rgba(61,107,255,0.4)",
   },
+  RULE_TABLE_SIGNED: {
+    label: "RULE TABLE SIGNED",
+    fg: C.ok,
+    bg: "rgba(34,197,94,0.10)",
+    border: "rgba(34,197,94,0.45)",
+  },
 };
 
 const FALLBACK_STYLE = {
@@ -70,12 +76,48 @@ function summarise(e: AuditEntry): string {
     if (typeof d.disposition === "string") parts.push(d.disposition);
     if (typeof d.reason === "string" && d.reason) parts.push(`“${d.reason}”`);
     if (typeof d.note === "string" && d.note) parts.push(`“${d.note}”`);
+    // A signature carries the authority's statement and the hash it is of.
+    if (typeof d.statement === "string" && d.statement) parts.push(`“${d.statement}”`);
+    if (typeof d.table_hash === "string" && d.table_hash) parts.push(`hash ${d.table_hash.slice(0, 8)}`);
     const issue = d.issue as Record<string, unknown> | undefined;
     if (issue && typeof issue.kind === "string") parts.push(`finding: ${issue.kind}`);
+    // A document line names its kind and label: `yard_clock · CVN73-clock.csv`.
+    if (typeof d.kind === "string") parts.push(d.kind);
+    if (typeof d.label === "string" && d.label) parts.push(d.label);
     return parts.join(" · ") || "recorded without commentary";
   } catch {
     return e.detail.slice(0, 120);
   }
+}
+
+/** The By column's reading of a row: a person, the binary, or honesty about a row from before people were asserted. */
+function actorOf(e: AuditEntry): { text: string; title: string; tone: string; mono?: boolean } {
+  if (e.chain_version < 2 || e.actor_id === null) {
+    return {
+      text: "— before format 2",
+      title: `recorded before people were asserted (chain format ${e.chain_version}); the row still verifies`,
+      tone: C.dim,
+    };
+  }
+  if (e.actor_id.startsWith("system:")) {
+    return {
+      text: `⚙ ${e.actor_name ?? e.actor_id}`,
+      title: `the binary itself — ${e.actor_id} · chain format ${e.chain_version}`,
+      tone: C.dim,
+      mono: true,
+    };
+  }
+  return {
+    text: e.actor_name ?? e.actor_id,
+    title: `${e.actor_id}${e.actor_id.startsWith("dev:") ? " · dev shim (demo person, not a login)" : " · asserted by the identity proxy"} · chain format ${e.chain_version}`,
+    tone: C.bright,
+  };
+}
+
+/** The chain formats the served rows carry, for the header: `2`, or `1 → 2` across the switch. */
+function chainFormats(entries: AuditEntry[]): string {
+  const versions = [...new Set(entries.map((e) => e.chain_version))].sort((a, b) => a - b);
+  return versions.length === 0 ? "—" : versions.join(" → ");
 }
 
 export default function LedgerBoard({
@@ -120,8 +162,13 @@ export default function LedgerBoard({
         title="What was answered for, on the record"
         stats={[
           { value: report.entries.length, label: report.entries.length === 1 ? "entry" : "entries" },
+          {
+            value: chainFormats(report.entries),
+            label: "chain format",
+            title: "Format 2 hashes the person who acted into every row; rows from before people were asserted are format 1 and keep verifying in the same chain.",
+          },
         ]}
-        note="Every mitigation disposition and issue acknowledgement, append-only and hash-chained. Nothing here applies anything — the platform flags and prices, the yard acts; this is the part a board of inquiry asks about and the part no other system holds."
+        note="Every clearance, document commit, proposal, mitigation disposition and issue acknowledgement, append-only and hash-chained. Nothing here applies anything — the platform flags and prices, the yard acts; this is the part a board of inquiry asks about and the part no other system holds — and every row names the person who answered."
       />
 
       {/* The verdict, before the entries. */}
@@ -148,6 +195,15 @@ export default function LedgerBoard({
       ) : (
         <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 8 }}>
           <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 900 }}>
+            <thead>
+              <tr>
+                {["#", "When", "Recorded", "Subject", "What the record says", "By", "Hash"].map((h) => (
+                  <th key={h} style={{ ...td, textAlign: "left", fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: C.dim, fontWeight: 600 }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
             <tbody>
               {report.entries.map((e) => {
                 const style = ACTION_STYLE[e.action] ?? { ...FALLBACK_STYLE, label: e.action };
@@ -192,6 +248,17 @@ export default function LedgerBoard({
                         )}
                       </td>
                       <td style={{ ...td, minWidth: 240, color: C.bright }}>{summarise(e)}</td>
+                      {(() => {
+                        const by = actorOf(e);
+                        return (
+                          <td
+                            style={{ ...td, whiteSpace: "nowrap", width: 190, color: by.tone, fontFamily: by.mono ? "monospace" : undefined, fontSize: by.mono ? 10.5 : 12 }}
+                            title={by.title}
+                          >
+                            {by.text}
+                          </td>
+                        );
+                      })()}
                       <td
                         style={{ ...td, whiteSpace: "nowrap", fontFamily: "monospace", fontSize: 10, color: C.faint, width: 110 }}
                         title={`entry ${e.entry_hash}\nprev  ${e.prev_hash ?? "genesis"}`}
@@ -201,7 +268,7 @@ export default function LedgerBoard({
                     </tr>
                     {open && (
                       <tr style={{ background: "#101116" }}>
-                        <td colSpan={6} style={{ ...td, padding: "4px 14px 10px" }}>
+                        <td colSpan={7} style={{ ...td, padding: "4px 14px 10px" }}>
                           <pre style={{ margin: 0, fontSize: 10.5, color: "#8b93a2", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                             {(() => {
                               try {

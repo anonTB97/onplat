@@ -14,7 +14,7 @@ publish.workspace = true
 # surface to scan, smaller SBOM to justify, faster builds.
 [features]
 default = []
-postgres = ["dep:sqlx", "dep:serde_json"]
+postgres = ["dep:sqlx"]
 
 [dependencies]
 wadl-domain.workspace = true
@@ -26,14 +26,20 @@ async-trait.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 chrono.workspace = true
 sqlx = { workspace = true, optional = true }
-# The pg store's document payloads (ingested schedule/zones/budgets) and rule
-# payloads travel as JSON; the demo store needs none of this.
-serde_json = { workspace = true, optional = true }
+# Document payloads travel as JSON on PostgreSQL, and since S13 two of the
+# read models are JSON by contract on both stores (the field map a run was
+# read through and the survey of the file — the store never depends on the
+# ingest crate, so it holds them as values). Already in every binary through
+# wadl-api; the featureless tree gains nothing new.
+serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+# The ledger tests parse a JSON export written by the build before chain
+# format 2, exactly as `wadl verify-ledger` is handed one.
+serde_json.workspace = true
 
 [lints]
 workspace = true

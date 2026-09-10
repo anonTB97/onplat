@@ -20,6 +20,8 @@ uuid.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 insta.workspace = true
+# Tests only: the stored-payload contract is asserted from a JSON literal.
+serde_json.workspace = true
 
 [lints]
 workspace = true

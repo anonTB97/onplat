@@ -1,11 +1,12 @@
 //! The HTTP surface for Shipyard AI Onboard.
 //!
 //! Thin by policy: handlers resolve a [`wadl_store::TenantScope`], call the
-//! store or the decision engine, and shape the result. The two invariants that
-//! matter most here are enforced structurally — every scoped handler runs the
-//! [`auth`] extractor first, so no tenant data is touched without a scope, and
-//! authorization state is read *through* [`wadl_engine`], never computed in a
-//! handler.
+//! store or the decision engine, and shape the result. Three invariants are
+//! enforced structurally — every scoped handler runs the [`auth`] extractor
+//! first, so no tenant data is touched without a scope; every write route is
+//! judged by the [`roles`] gate against one capability table before its
+//! handler runs; and authorization state is read *through* [`wadl_engine`],
+//! never computed in a handler.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::doc_markdown)]
@@ -20,15 +21,22 @@
     )
 )]
 
-mod auth;
+pub mod auth;
+pub mod documents;
 mod error;
 mod handlers;
 pub mod hardening;
+pub mod roles;
 pub mod routes;
+mod rule_table;
 pub mod schedule;
+mod schedule_door;
+pub mod version;
+pub mod yard_clock;
 
 use std::sync::Arc;
 
+use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -55,10 +63,14 @@ impl AppState {
 }
 
 /// Builds the router. The registered routes match [`routes::inventory`].
+// A route table, one line per route: its length is the API's size, and
+// splitting it would hide the inventory the leak tests and the SSP are
+// generated from.
+#[allow(clippy::too_many_lines)]
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
-        .route("/api/whoami", get(handlers::whoami))
+        .route("/api/whoami", get(roles::whoami))
         .route("/api/vessels", get(handlers::list_vessels))
         .route("/api/vessels/:id", get(handlers::get_vessel))
         .route(
@@ -105,12 +117,24 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/vessels/:id/ledger", get(handlers::ledger))
         .route(
+            "/api/vessels/:id/hazards",
+            get(handlers::list_hazards).post(handlers::raise_hazard),
+        )
+        .route(
+            "/api/vessels/:id/hazards/clear",
+            post(handlers::clear_hazard),
+        )
+        .route(
             "/api/vessels/:id/zones",
             get(handlers::zones).post(handlers::import_zones),
         )
         .route(
             "/api/vessels/:id/zones/revert",
             post(handlers::revert_zones),
+        )
+        .route(
+            "/api/vessels/:id/zones/:zone/adjacent",
+            get(handlers::zone_adjacent),
         )
         .route(
             "/api/vessels/:id/budget-book",
@@ -121,12 +145,100 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::revert_budgets),
         )
         .route(
+            "/api/vessels/:id/manning-book",
+            get(handlers::get_manning).post(handlers::import_manning),
+        )
+        .route(
+            "/api/vessels/:id/manning-book/revert",
+            post(handlers::revert_manning),
+        )
+        .route(
+            "/api/vessels/:id/geometry",
+            get(handlers::get_geometry).post(handlers::import_geometry),
+        )
+        .route(
+            "/api/vessels/:id/geometry/revert",
+            post(handlers::revert_geometry),
+        )
+        .route(
+            "/api/vessels/:id/register",
+            get(handlers::get_register).post(handlers::import_register),
+        )
+        .route(
+            "/api/vessels/:id/register/revert",
+            post(handlers::revert_register),
+        )
+        .route(
+            "/api/vessels/:id/couplings",
+            get(handlers::get_couplings).post(handlers::import_couplings),
+        )
+        .route(
+            "/api/vessels/:id/couplings/revert",
+            post(handlers::revert_couplings),
+        )
+        .route(
+            "/api/vessels/:id/hazards/import",
+            post(handlers::import_hazard_log),
+        )
+        .route(
             "/api/vessels/:id/schedule-of-record",
-            post(handlers::import_schedule),
+            post(schedule_door::import_schedule),
         )
         .route(
             "/api/vessels/:id/schedule-of-record/revert",
-            post(handlers::revert_schedule),
+            post(schedule_door::revert_schedule),
+        )
+        .route(
+            "/api/vessels/:id/field-map",
+            get(schedule_door::get_field_map).post(schedule_door::import_field_map),
+        )
+        .route(
+            "/api/vessels/:id/field-map/revert",
+            post(schedule_door::revert_field_map),
+        )
+        .route(
+            "/api/vessels/:id/schedule-runs",
+            get(schedule_door::list_schedule_runs),
+        )
+        .route(
+            "/api/vessels/:id/schedule-runs/detail",
+            get(schedule_door::schedule_run_detail),
+        )
+        .route(
+            "/api/vessels/:id/schedule-runs/diff",
+            get(schedule_door::diff_schedule_runs),
+        )
+        .route(
+            "/api/vessels/:id/schedule-runs/serve",
+            post(schedule_door::serve_schedule_run),
+        )
+        .route(
+            "/api/vessels/:id/yard-clock",
+            get(yard_clock::get_yard_clock).post(yard_clock::import_yard_clock),
+        )
+        .route(
+            "/api/vessels/:id/yard-clock/revert",
+            post(yard_clock::revert_yard_clock),
+        )
+        .route(
+            "/api/vessels/:id/rule-table",
+            get(rule_table::get_rule_table).post(rule_table::import_rule_table),
+        )
+        .route(
+            "/api/vessels/:id/rule-table/revert",
+            post(rule_table::revert_rule_table),
+        )
+        .route(
+            "/api/vessels/:id/rule-table/sign",
+            post(rule_table::sign_rule_table),
+        )
+        .route(
+            "/api/vessels/:id/schedule-proposals",
+            get(handlers::list_schedule_proposals).post(handlers::propose_schedule_change),
+        )
+        .route(
+            "/api/vessels/:id/schedule-proposals/withdraw",
+            post(handlers::withdraw_schedule_proposal),
         )
         .route(
             "/api/vessels/:id/compartments/:no/decision",
@@ -134,6 +246,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/vessels/:id/packages", get(handlers::list_packages))
         .route("/api/vessels/:id/packages/:no", get(handlers::get_package))
+        // The capability gate: `route_layer` (not `layer`) so it runs only
+        // for a matched route and sees `MatchedPath` — a 404 for an unknown
+        // path never reaches it.
+        .route_layer(middleware::from_fn(roles::gate))
         .with_state(state)
 }
 

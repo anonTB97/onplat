@@ -66,6 +66,7 @@ fn coating(since: i64) -> Hazard {
         kind: HazardKind::CoatingOpen,
         since: at(since),
         label: "CT-3160-4 · final coat, curing".to_owned(),
+        ended: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn energised_bus(since: i64) -> Hazard {
         kind: HazardKind::EnergisedBus,
         since: at(since),
         label: "Bus 3-SG-2 energised".to_owned(),
+        ended: None,
     }
 }
 

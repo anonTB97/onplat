@@ -81,6 +81,86 @@ one:
 
 ## Field mapping
 
+### The field map — the yard's conventions as data
+
+A yard's P6 does not name its fields the way the sample does. Rather than a
+code change per yard, the conventions are a per-hull document, kind
+`p6_field_map` (`wadl_ingest::field_map::FieldMap`,
+`reference/cvn73/CVN73-fieldmap.json`, loaded by `WADL_DEMO_DOCS`):
+
+```json
+{ "compartment": { "source": "udf", "name": "compartment" },
+  "work_item":   { "source": "udf", "name": "wi_number" },
+  "work_type":   { "source": "none" },
+  "trade":       { "source": "resource" },
+  "projects": [],
+  "placards_from_names": true }
+```
+
+`source` is `udf` (`UDFTYPE.udf_type_name` or `udf_type_label`, trimmed,
+case-insensitive — a label-only match is a finding), `activity_code`
+(`ACTVTYPE.actv_code_type` → `ACTVCODE.short_name` via `TASKACTV`),
+`resource` (trade only: the first labor `TASKRSRC` → `RSRC.rsrc_short_name`)
+or `none`. `projects` names the `proj_short_name`s to serve; empty is every
+project. The default above **is** the pre-map behaviour, so a hull with no
+map keeps working. The map is refused whole for a `resource` outside the
+trade, a blank name or a duplicate project; a named field the served export
+does not carry is a finding, never a refusal.
+
+The map is chosen where the file is: the door's dry run returns
+`fields_seen` — every UDF with its row count, every activity code type,
+resource and task types, section counts, no schedule content — and the
+Data Sources card builds its selects from it. Every change re-runs the dry
+run, so the located count moves before anything is stored. A map that
+differs from the stored one is committed with the run, as its own ledgered
+document. `wadl ingest-xer --input f.xer --survey` prints the same survey
+for a yard to mail back.
+
+### Encoding
+
+P6 on Windows writes Windows-1252 by default. The door reads the bytes in
+the browser — strict UTF-8 first (a byte-order mark stripped), Windows-1252
+when that fails — and the body carries `encoding` so the run records which
+branch was taken and that the browser took it (`decoded_by: browser`). The
+boot loader and the CLI take the same two branches on the server
+(`wadl_ingest::encoding::decode_xer`, a hand-rolled 128-entry WHATWG table,
+no decoder crate). One shared literal pins both decoders: bytes
+`93 94 E9 96 80` are `“ ” é – €`. UTF-16 exports would need a third branch.
+
+### Quarantine, exclusion, and what refuses the file
+
+The parser already rejected rows it could not read; the door used to refuse
+the whole file on the first one. Now a row that cannot be honestly accepted
+is **quarantined** with its 1-based line, table, code, class and reason —
+classes `unparseable_date`, `backwards_window`, `unknown_status`, `no_code`,
+`no_name`, `width`, `cross_project_logic`, `unknown_task_in_logic`,
+`structure` — and the rest of the file is served. The quarantine is in the
+preview, on the card (folded at 25, the count always said), in the run and
+in the `SCHEDULE_REPLACED` ledger line. The file is refused whole (422) only
+when there is no `TASK` section, when no activity survives, when the
+parser's cell ceiling is hit, or when an inline map is malformed.
+
+Three kinds of row are **excluded and listed**, not quarantined: `TT_LOE`
+(level of effort is not work), `TT_WBS` (a summary row), and every row in a
+project the map does not serve — with a relationship that crosses into an
+excluded project quarantined as `cross_project_logic`. `TT_FinMile` is a key
+event beside `TT_Mile`.
+
+### Runs
+
+Every commit is a run (`ingest_run`, 0008, finally has its writer:
+`0018_schedule_runs_and_field_map.sql`): the label, the encoding and who
+decoded, the map used, the counts, the quarantine and the exclusions, the
+person and the door (`door`, `boot`, `cli`), and the served document itself.
+`/timeframe` and `/activities` carry the served run's summary and the shell's
+breadcrumb reads it — *reading CVN73-PIA26-full.xer · imported 09/04 06:12 by
+…*. Any two runs diff in the door's delta shape; any prior run can be served
+again (`POST /schedule-runs/serve`), ledgered `SCHEDULE_REPLACED` with
+`reverted_to_run: true` — a revert to a prior import, not a re-parse.
+Activity ids are stable from `(hull, task_code)` so an open inspector survives
+a re-baseline. The in-memory store keeps the rows of the newest 12 runs;
+PostgreSQL keeps every run.
+
 ### Dates — the part the time dimension needs
 
 P6 carries **three** date pairs per activity and they mean different things. Using
@@ -121,9 +201,9 @@ and P6 has no native concept of it. In descending order of trustworthiness:
 
 | Where it lives | Grade | Notes |
 |---|---|---|
-| A dedicated UDF, controlled format | `high` | The sample's `UDFTYPE 501`. Ask for it. |
-| An activity code with a compartment dimension | `medium` | Confirm the code dictionary, not the manual. |
-| A WBS level that happens to be compartments | `medium` | Usually only true for some branches. |
+| A dedicated UDF, controlled format | `high` | The sample's `UDFTYPE 501`. Ask for it. Field map `{ "source": "udf", "name": … }` — by name or label, whatever the yard called it. |
+| An activity code with a compartment dimension | `medium` | Confirm the code dictionary, not the manual. Field map `{ "source": "activity_code", "name": … }`. |
+| A WBS level that happens to be compartments | `medium` | Usually only true for some branches. No field-map source yet; `wbs_area` is the zone hint. |
 | Parsed out of `task_name` | `low` | For a pilot only. |
 | Absent | `low`, value `NULL` | Say so. Do not guess. |
 
@@ -140,18 +220,24 @@ than only the happy path. The validator fails if that gap is ever filled in.
 
 ### Man-hours
 
-`TASKRSRC.target_qty` summed per activity, with `remain_qty` for what is left.
-Loaded late in many yards — the crosswalk grades this `medium` — so an activity
+`TASKRSRC.target_qty` summed per activity **over labor assignments only**
+(`RSRC.rsrc_type = RT_Labor`), with `remain_qty` for what is left. Material
+and equipment assignments are counted and set aside (`material_skipped`,
+`equipment_skipped` on the run) — a staging pallet is not in anyone's
+man-hours; a resource with no `rsrc_type` is counted as labor with a
+finding. Loaded late in many yards — the crosswalk grades this `medium` — so an activity
 with dates and no hours is normal, not an error. Fall back to duration × crew
 size and **flag it as derived**; an estimate that cannot be told apart from a
 loaded figure will end up in a stranded-hours number that gets read aloud.
 
 ### Trade
 
-`TASKRSRC.rsrc_id` → `RSRC.rsrc_short_name` where resources are modelled per
-trade. Where they are modelled per crew or only loaded on cost-significant
-activities, fall back to an activity-code prefix and confirm the convention. The
-sample models it the good way (`SM-PRES`, `SM-ELEC`, …).
+`TASKRSRC.rsrc_id` → `RSRC.rsrc_short_name` of the first labor assignment,
+where resources are modelled per trade (field map `trade: { "source":
+"resource" }`, the default). Where they are modelled per crew or only loaded
+on cost-significant activities, point the map at a UDF or an activity code
+instead and confirm the convention. The sample models it the good way
+(`SM-PRES`, `SM-ELEC`, …).
 
 ### WBS
 
@@ -221,6 +307,8 @@ permits it.
 - **`phys_complete_pct`** — physical, duration-based and units-based percent
   complete give different answers, so `status_code` is used and percent complete
   is advisory (crosswalk's position, kept).
-- **Multi-project / EPS** — one project per hull is assumed. Multiple hulls per
-  project needs a mapping table before anything is trusted.
+- **Multiple hulls in one project** — the field map serves one or more
+  projects per hull (the other way round), and says *N projects in this
+  export* when no project is named. One project spanning several hulls still
+  needs a mapping table before anything is trusted.
 - **Baseline variance** — `target_*` is stored but nothing reads it yet.

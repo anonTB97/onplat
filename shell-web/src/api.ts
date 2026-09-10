@@ -1,6 +1,14 @@
-// Thin API client. Identity is a milestone-1 header shim (x-org-id +
-// x-assigned-vessels), matching wadl-api's auth extractor; a real session
-// replaces it later. No external hosts — same-origin only.
+// Thin API client. Identity is whatever `identity.ts` resolved from `/health`:
+// the dev shim's five headers in DEMO MODE, nothing behind the yard's proxy
+// (`docs/identity-proxy-contract.md`). Every write surfaces the server's
+// refusal as its sentence — a 403 is the yard's words about who may, never a
+// bare status. No external hosts — same-origin only.
+
+import type { YardClockInfo } from "./clock";
+import { identityHeaders, problemSentence, type Identity, type ProblemBody } from "./identity";
+import type { YardClock } from "./yardClock";
+
+export type { Identity } from "./identity";
 
 /** A half-open interval, `[start, end)`. Epoch milliseconds, as the API sends. */
 export interface Window {
@@ -30,6 +38,15 @@ export interface Timeframe {
   now: number;
   availability_code: string;
   availability: Window | null;
+  /** The clock the hull is on — the yard's document, or the UTC default,
+   *  and which. Served with the first read the shell makes per hull so every
+   *  board renders in the yard's clock from its first paint. Optional only
+   *  for an API older than the clock. */
+  yard_clock?: YardClockInfo;
+  /** The run the served schedule of record came from — label, when, by
+   *  whom — for the breadcrumb. `null` for the generated register; absent
+   *  only on an API older than the run history. */
+  schedule_run?: ScheduleRunSummary | null;
 }
 
 /**
@@ -46,16 +63,52 @@ function withAsOf(path: string, asOf: AsOf): string {
   return asOf === null ? path : `${path}${path.includes("?") ? "&" : "?"}as_of=${asOf}`;
 }
 
-export interface Identity {
-  org: string;
-  assignedVessels: string[];
+function headers(id: Identity): HeadersInit {
+  return identityHeaders(id);
 }
 
-function headers(id: Identity): HeadersInit {
-  return {
-    "x-org-id": id.org,
-    "x-assigned-vessels": id.assignedVessels.join(","),
-  };
+/**
+ * A refused write, as the server's sentence. `message` is the problem's
+ * `detail` — for a 403, "Foreman may not record a clearance — clear_hazard
+ * is held by Ship Super and Safety" — and `String(err)` is the same sentence,
+ * so no screen has to know this class to show the words.
+ */
+export class ApiRefusal extends Error {
+  readonly status: number;
+  /** The capability a 403 named, if it did. */
+  readonly capability: string | undefined;
+  /** The caller's role codes as the 403 saw them. */
+  readonly roles: string[];
+  constructor(status: number, message: string, problem: ProblemBody | null) {
+    super(message);
+    this.name = "ApiRefusal";
+    this.status = status;
+    this.capability = problem?.capability;
+    this.roles = problem?.roles ?? [];
+  }
+  override toString(): string {
+    return this.message;
+  }
+}
+
+/**
+ * A write's refusal as the sentence the server wrote, not the JSON it came
+ * in. A `problem+json` body's `detail` is the sentence (a 403's names the
+ * role and who holds the capability); a door that answered with reasons but
+ * no `detail` keeps its text; a bare status names the door.
+ */
+async function doorRefusal(res: Response, door: string): Promise<ApiRefusal> {
+  const text = await res.text().catch(() => "");
+  let problem: ProblemBody | null = null;
+  try {
+    problem = JSON.parse(text) as ProblemBody;
+  } catch {
+    problem = null;
+  }
+  const fallback = text && res.status !== 403
+    ? `${door} → ${res.status}: ${text.slice(0, 600)}`
+    : `${door} → ${res.status}`;
+  return new ApiRefusal(res.status, problemSentence(problem, fallback), problem);
 }
 
 export async function listVessels(id: Identity): Promise<VesselSummary[]> {
@@ -65,16 +118,45 @@ export async function listVessels(id: Identity): Promise<VesselSummary[]> {
 }
 
 /**
+ * `/health`: which trust boundary is armed, and the release stamp — the
+ * commit, its instant and the migration set the binary was built against,
+ * beside the store's own migration state. `version`, `schema_state` and
+ * `store` are optional so an older server still boots the shell.
+ */
+export interface Health {
+  status: string;
+  identity_mode: string;
+  version?: { git: string; built_at: string; schema: string; document_schema: number };
+  schema_state?: string;
+  store?: { backend: string; reachable: boolean; schema_version: string | null };
+}
+
+/** `/health`, read before anything is asserted (no identity headers: it is unscoped). */
+export async function health(): Promise<Health> {
+  const res = await fetch("/health");
+  if (!res.ok) throw new Error(`GET /health → ${res.status}`);
+  return (await res.json()) as Health;
+}
+
+/**
  * The caller's identity as the SERVER resolved it — not an echo of the headers
  * the shell sent. `identity_mode` names the trust boundary that admitted the
- * request (`dev-headers` or `proxy-asserted`), which is how the shell can tell
- * the operator whether they are on the development shim or behind the
- * accredited proxy.
+ * request (`dev-headers` or `proxy-asserted`); `person` is who the ledger
+ * will name; `capabilities` is what the role matrix grants, and `hulls` is
+ * the list every picker is built from. The matrix itself rides along so a
+ * refusal can be worded here exactly as the server would word it.
  */
 export interface WhoAmI {
   org: string;
   assigned_vessels: string[];
   identity_mode: string;
+  person: { id: string; name: string; source: string };
+  roles: string[];
+  capabilities: string[];
+  hulls: VesselSummary[];
+  role_matrix: Record<string, string[]>;
+  warnings: string[];
+  markings: string[];
   decision_support_only: boolean;
 }
 
@@ -143,6 +225,9 @@ export interface Decision {
 
 export interface Compartment {
   frame: number | null;
+  /** Surveyed frame extent from the geometry register; null = pin only. */
+  fwd_frame: number | null;
+  aft_frame: number | null;
   side: string;
   geometry_source: string;
   compartment_no: string;
@@ -417,6 +502,89 @@ export async function compartmentState(
   return (await res.json()) as { compartment: string; decision: Decision };
 }
 
+/* ----------------------------------------------------------------- hazards */
+
+/** A live recorded field condition — the fact behind the trace's verdicts. */
+export interface LiveHazard {
+  /** The origin space. */
+  origin: string;
+  /** The engine's kind name, e.g. `energised_bus`. */
+  kind: string;
+  /** When it was raised, epoch ms. */
+  since: number;
+  /** Human label, e.g. `Bus 3-SG-2 energised — no verified zero-energy state`. */
+  label: string;
+}
+
+/**
+ * Raises a field condition on the hull — the day's tag-out, coating ticket,
+ * hot-work permit or stop-work — against a space the register knows. The
+ * server refuses a space it does not know, an empty label, a future instant,
+ * and a second live fact of the same kind in the same space; lands
+ * `HAZARD_RAISED` in the ledger; and every verdict re-derives on the next
+ * read. The caller refetches, never repaints.
+ */
+export async function raiseHazard(
+  id: Identity,
+  vesselId: string,
+  body: { compartment: string; kind: string; label: string; since_ms?: number },
+): Promise<{ hazard: LiveHazard; recorded: unknown }> {
+  const res = await fetch(`/api/vessels/${vesselId}/hazards`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await doorRefusal(res, "raise hazard");
+  return (await res.json()) as { hazard: LiveHazard; recorded: unknown };
+}
+
+/** The hazard kinds the engine evaluates, in yard words, for a raise form. */
+export const HAZARD_KINDS: { kind: string; label: string; gloss: string }[] = [
+  { kind: "hot_work_live", label: "Hot work live", gloss: "a welding, cutting or grinding permit is open here" },
+  { kind: "coating_open", label: "Coating open", gloss: "a coating or preservation ticket is curing here" },
+  { kind: "energised_bus", label: "Energised bus", gloss: "a bus is live with no verified zero-energy state" },
+  { kind: "flammable_stow", label: "Flammable stow", gloss: "flammables are stowed or open here" },
+  { kind: "stop_work", label: "Stop-work", gloss: "an inspection authority has posted a stop-work" },
+];
+
+// The raw live hazards on a hull. Served separately from the traces so the
+// surface can show WHAT is shut (the fact) alongside WHY (its consequences).
+export async function listHazards(
+  id: Identity,
+  vesselId: string,
+  asOf: AsOf = null,
+): Promise<LiveHazard[]> {
+  // Hazards are read as of the instant like every verdict: a hazard cleared
+  // on Friday is still a live fact on Thursday's board.
+  const res = await fetch(withAsOf(`/api/vessels/${vesselId}/hazards`, asOf), {
+    headers: headers(id),
+  });
+  if (!res.ok) throw new Error(`hazards → ${res.status}`);
+  const body = (await res.json()) as { hazards: LiveHazard[] };
+  return body.hazards;
+}
+
+/**
+ * Records an administrative clearance: the crew verified the field condition
+ * ended (tags hung, gas-free sighted) and someone with the authority says so,
+ * with the basis. The server closes the fact, appends `HAZARD_CLEARED` to the
+ * ledger, and every verdict the hazard drove re-derives clean on the next
+ * read — the caller's job is to refetch, not to repaint.
+ */
+export async function clearHazard(
+  id: Identity,
+  vesselId: string,
+  input: { compartment: string; kind: string; basis: string },
+): Promise<{ cleared: LiveHazard[] }> {
+  const res = await fetch(`/api/vessels/${vesselId}/hazards/clear`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw await doorRefusal(res, "clearance");
+  return (await res.json()) as { cleared: LiveHazard[] };
+}
+
 /* ------------------------------------------------------------- mitigations */
 
 /**
@@ -539,7 +707,7 @@ export async function recordDecision(
       body: JSON.stringify(body),
     },
   );
-  if (!res.ok) throw new Error(`decision → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "decision");
   return (await res.json()) as AuditRecord;
 }
 
@@ -565,6 +733,12 @@ export interface Activity {
   /** The schedule's top-level WBS bucket — a zone hint at best, never a location. */
   wbs_area: string | null;
   trade: string;
+  /** The work type the field map read for this row — what the rule table
+   *  binds to. null when the map names no field for it. */
+  work_type?: string | null;
+  /** How many rules in force bind to this row's work type in its space —
+   *  the set it was judged by. Absent on a register served before S14. */
+  rules_bound?: number;
   planned: Window | null;
   budget_hours: number;
   earned_hours: number;
@@ -678,7 +852,7 @@ export async function acknowledgeIssue(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ key, note }),
   });
-  if (!res.ok) throw new Error(`acknowledge → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "acknowledge");
 }
 
 export async function listIssues(
@@ -781,10 +955,98 @@ export async function scheduleAlternatives(
   return (await res.json()) as ScheduleAlternatives;
 }
 
+/* ------------------------------------------------------ schedule proposals */
+
+/** Where a proposal stands, derived on every read from the ledger and the
+ *  schedule currently served — never stored. */
+export type ProposalStatus = "open" | "reflected" | "superseded" | "dropped" | "withdrawn";
+
+/** One schedule change proposal — the path from a refusal here back to P6. */
+export interface ScheduleProposal {
+  seq: number;
+  entry_hash: string;
+  proposed_at_ms: number;
+  activity: string;
+  name: string;
+  compartment: string | null;
+  trade: string;
+  from: Window | null;
+  /** The proposed window; null for a hold pending verification. */
+  to: Window | null;
+  kind: "engine_window" | "manual" | "hold_pending_verification";
+  reason: string;
+  /** The engine's verdict on the proposed window under the hazards live at the instant. */
+  verdict: Executability | null;
+  /** Successors whose planned start falls before the proposed finish. */
+  pushes: string[];
+  knock_on_basis: string;
+  status: ProposalStatus;
+  /** Where the activity sits on the schedule served now. */
+  planned_now: Window | null;
+}
+
+export interface ProposalList {
+  as_of: number;
+  schedule_source: string | null;
+  counts: Record<ProposalStatus, number>;
+  proposals: ScheduleProposal[];
+  status_basis: string;
+}
+
+/**
+ * Records a schedule change proposal. Nothing moves: the engine checks the
+ * proposed window under the live hazards, the knock-on is read off the
+ * schedule's logic, and the whole record lands in the ledger. The export to
+ * P6 is built from these; the next XER import says which P6 reflected.
+ */
+export async function proposeScheduleChange(
+  id: Identity,
+  vesselId: string,
+  body: {
+    activity: string;
+    start_ms?: number;
+    end_ms?: number;
+    kind: ScheduleProposal["kind"];
+    reason: string;
+    as_of: AsOf;
+  },
+): Promise<{ proposal: ScheduleProposal; recorded: AuditRecord }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-proposals`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await doorRefusal(res, "proposal");
+  return (await res.json()) as { proposal: ScheduleProposal; recorded: AuditRecord };
+}
+
+export async function listProposals(id: Identity, vesselId: string): Promise<ProposalList> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-proposals`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`proposals → ${res.status}`);
+  return (await res.json()) as ProposalList;
+}
+
+/** Takes a proposal back as a later ledger entry; the original stays in the chain. */
+export async function withdrawProposal(
+  id: Identity,
+  vesselId: string,
+  seq: number,
+  reason: string,
+): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-proposals/withdraw`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ seq, reason }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "withdrawal");
+}
+
 export interface ActivityRegister {
   as_of: number;
   /** null = the generated demo register; a label = the ingested export it came from. */
   schedule_source: string | null;
+  /** The run the served register came from; null for the generated one. */
+  schedule_run?: ScheduleRunSummary | null;
   reconciliation: {
     /** What the hours answer to: an ingested budget book's label, or null =
      *  the seeded work items. "Reconciles" is only as strong as this. */
@@ -799,24 +1061,175 @@ export interface ActivityRegister {
   mapping: MappingReport;
   /** The schedule's logic — what the dates were computed from. */
   edges: ScheduleEdge[];
+  /** Whose rules judged the rows: the seed or a committed table, and
+   *  whether the safety authority has signed it. Absent before S14. */
+  rules?: { source: "seed" | "document"; label: string; signed: boolean };
   activities: Activity[];
 }
 
-/** Imports a P6 XER export as the hull's schedule of record. All-or-nothing:
- *  one rejected line refuses the whole file, with the reasons in the error. */
+/* ------------------------------------------------- the P6 field map and runs */
+
+/** The encodings the door reads — which branch the browser's decoder took. */
+export type XerEncoding = "utf-8" | "windows-1252";
+
+/**
+ * Where one slot of the field map reads from: a UDF by name or label, an
+ * activity code type, the first labor resource (trade only), or nothing.
+ */
+export type FieldSource =
+  | { source: "udf"; name: string }
+  | { source: "activity_code"; name: string }
+  | { source: "resource" }
+  | { source: "none" };
+
+/** The four slots, in card order. */
+export const FIELD_SLOTS = ["compartment", "work_item", "work_type", "trade"] as const;
+export type FieldSlot = (typeof FIELD_SLOTS)[number];
+
+/**
+ * The yard's export conventions as data — which XER field carries the
+ * compartment, the work item, the work type and the trade; which projects
+ * to serve; whether to read placards out of task names when the compartment
+ * field is silent. One per hull; the default is today's convention.
+ */
+export interface FieldMap {
+  compartment: FieldSource;
+  work_item: FieldSource;
+  work_type: FieldSource;
+  trade: FieldSource;
+  /** `proj_short_name`s to serve; empty = every project in the file. */
+  projects: string[];
+  placards_from_names: boolean;
+}
+
+/** Today's convention, exactly — what a hull with no map on file imports through. */
+export const DEFAULT_FIELD_MAP: FieldMap = {
+  compartment: { source: "udf", name: "compartment" },
+  work_item: { source: "udf", name: "wi_number" },
+  work_type: { source: "none" },
+  trade: { source: "resource" },
+  projects: [],
+  placards_from_names: true,
+};
+
+/**
+ * The survey of an export: which fields it carries and how full they are —
+ * no schedule content. The field-map selects are built from it.
+ */
+export interface FieldsSeen {
+  projects: { id: string; short_name: string; tasks: number }[];
+  udfs: { name: string; label: string | null; table: string | null; values: number }[];
+  activity_code_types: { name: string; values: number }[];
+  resource_types: Record<string, number>;
+  has_rsrc_type: boolean;
+  task_types: Record<string, number>;
+  sections: Record<string, number>;
+}
+
+/** Who a run was imported by, and through which door. */
+export interface ImportedBy {
+  org: string;
+  /** The person the identity hop asserted; null when the binary acted alone. */
+  person: string | null;
+  /** `door`, `boot` or `cli`. */
+  via: string;
+}
+
+/** What one import counted. */
+export interface RunCounts {
+  task_rows: number;
+  served: number;
+  work: number;
+  key_events: number;
+  quarantined: number;
+  excluded_loe: number;
+  excluded_wbs: number;
+  excluded_project: number;
+  edges: number;
+  edges_quarantined: number;
+  material_skipped: number;
+  equipment_skipped: number;
+}
+
+/** One row the import could not honestly accept, and why. */
+export interface QuarantinedRow {
+  /** 1-based line in the export. */
+  line: number;
+  /** `TASK`, `TASKPRED`. */
+  table: string;
+  code: string | null;
+  /** `unparseable_date`, `width`, `cross_project_logic`… */
+  class: string;
+  reason: string;
+}
+
+/** A schedule run as the list and the breadcrumb read it — everything but its rows. */
+export interface ScheduleRunSummary {
+  run_id: string;
+  /** 1, 2, 3… per hull. */
+  seq: number;
+  label: string;
+  imported_at_ms: number;
+  imported_by: ImportedBy;
+  encoding: string;
+  /** `browser`, `server` or `caller`. */
+  decoded_by: string;
+  projects_served: string[];
+  counts: RunCounts;
+  field_map: FieldMap;
+  /** Whether this run's rows are the ones served now. */
+  served: boolean;
+  schema_version: number;
+}
+
+/** What one run found and set aside — the detail behind the counts. */
+export interface ScheduleRunReport {
+  quarantine: QuarantinedRow[];
+  excluded_loe: string[];
+  excluded_wbs: string[];
+  excluded_project: [string, string][];
+  fields_seen: FieldsSeen;
+  findings: string[];
+}
+
+/** What a run as it would be recorded says about itself, on the preview. */
+export interface RunPreview {
+  encoding: string;
+  decoded_by: string;
+  projects_served: string[];
+  counts: RunCounts;
+  field_map: FieldMap;
+  /** `inline` (the body carried one), `document` (the stored map), `default`. */
+  field_map_source: "inline" | "document" | "default";
+}
+
+/** What the door needs beside the text: which decoder branch the browser
+ *  took, and the map to read the file through instead of the stored one. */
+export interface ScheduleDoorOptions {
+  encoding: XerEncoding;
+  fieldMap?: FieldMap;
+}
+
+/**
+ * Imports a P6 XER export as the hull's schedule of record. Rows the parser
+ * cannot honestly accept are quarantined with their reasons and served in
+ * the response; the file is refused whole (422, the reasons in the error)
+ * only when no activity survives. Every commit is a run.
+ */
 export async function importSchedule(
   id: Identity,
   vesselId: string,
   label: string,
   xer: string,
-): Promise<{ label: string; activities: number; edges: number; delta: ScheduleDelta }> {
+  opts: ScheduleDoorOptions,
+): Promise<ImportPreview & { run_id: string; seq: number }> {
   const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record`, {
     method: "POST",
     headers: { ...headers(id), "content-type": "application/json" },
-    body: JSON.stringify({ label, xer }),
+    body: JSON.stringify({ label, xer, encoding: opts.encoding, field_map: opts.fieldMap }),
   });
-  if (!res.ok) throw new Error(`import → ${res.status}: ${await res.text()}`);
-  return (await res.json()) as { label: string; activities: number; edges: number; delta: ScheduleDelta };
+  if (!res.ok) throw await doorRefusal(res, "import");
+  return (await res.json()) as ImportPreview & { run_id: string; seq: number };
 }
 
 /**
@@ -863,6 +1276,8 @@ export interface ScheduleDelta {
   refused_after: number;
   newly_refused: { count: number; examples: DeltaExample[] };
   newly_clear: { count: number; examples: DeltaExample[] };
+  /** Which open proposals the incoming export reflects, to the day. */
+  proposals?: { open: number; reflected: string[]; still_open: string[] };
 }
 
 export interface ImportPreview {
@@ -872,6 +1287,20 @@ export interface ImportPreview {
   reconciliation: { mismatches: ReconciliationMismatch[]; unmapped_budget_hours: number };
   mapping: MappingReport;
   delta: ScheduleDelta;
+  /** The run as it would be recorded. */
+  run: RunPreview;
+  /** The survey of the file's own fields — the selects are built from it. */
+  fields_seen: FieldsSeen;
+  /** Every row set aside, with its line and reason. */
+  quarantine: QuarantinedRow[];
+  /** Rows excluded and listed, not lost: level-of-effort, WBS summaries,
+   *  and `[code, project]` for projects the map does not serve. */
+  exclusions: { loe: string[]; wbs: string[]; project: [string, string][] };
+  /** The map's and the clock's findings — none of which refused. */
+  findings: string[];
+  /** The clock the export's wall clock was read in. */
+  clock?: { zone: string; label: string | null };
+  wall_clock_findings?: string[];
 }
 
 /** Dry-runs an import: everything the import would say, nothing it would do. */
@@ -880,23 +1309,121 @@ export async function previewSchedule(
   vesselId: string,
   label: string,
   xer: string,
+  opts: ScheduleDoorOptions,
 ): Promise<ImportPreview> {
   const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record?dry_run=true`, {
     method: "POST",
     headers: { ...headers(id), "content-type": "application/json" },
-    body: JSON.stringify({ label, xer }),
+    body: JSON.stringify({ label, xer, encoding: opts.encoding, field_map: opts.fieldMap }),
   });
-  if (!res.ok) throw new Error(`preview → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "preview");
   return (await res.json()) as ImportPreview;
 }
 
-/** Reverts to the generated register, discarding the ingested schedule. */
+/** Reverts to the generated register, discarding the ingested schedule.
+ *  The runs stay: history is history, and any of them can be served again. */
 export async function revertSchedule(id: Identity, vesselId: string): Promise<void> {
   const res = await fetch(`/api/vessels/${vesselId}/schedule-of-record/revert`, {
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "revert");
+}
+
+/** The field map in effect, where it came from, and the served run's survey. */
+export interface FieldMapInfo {
+  source: "document" | "default";
+  label: string | null;
+  map: FieldMap;
+  /** null when no run is served (the generated register). */
+  fields_seen: FieldsSeen | null;
+}
+
+export async function getFieldMap(id: Identity, vesselId: string): Promise<FieldMapInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/field-map`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`field map → ${res.status}`);
+  return (await res.json()) as FieldMapInfo;
+}
+
+/** Stores the hull's field map — refused whole with every reason (422);
+ *  findings against the served run's survey warn without refusing. */
+export async function importFieldMap(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  map: FieldMap,
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; map: FieldMap; findings: string[] }> {
+  const res = await fetch(`/api/vessels/${vesselId}/field-map${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, map }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "field map");
+  return (await res.json()) as never;
+}
+
+/** Back to today's convention — the next import reads the default names. */
+export async function revertFieldMap(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/field-map/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "field map revert");
+}
+
+/** Every import, newest first, with the served one pointed to. */
+export async function listScheduleRuns(
+  id: Identity,
+  vesselId: string,
+): Promise<{ served: string | null; runs: ScheduleRunSummary[] }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-runs`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`schedule runs → ${res.status}`);
+  return (await res.json()) as never;
+}
+
+/** One run's summary and report, without its rows. */
+export async function scheduleRunDetail(
+  id: Identity,
+  vesselId: string,
+  runId: string,
+): Promise<{ summary: ScheduleRunSummary; report: ScheduleRunReport }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-runs/detail?run=${encodeURIComponent(runId)}`, {
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "run detail");
+  return (await res.json()) as never;
+}
+
+/** What `run` changes against `against` (the served run when omitted), in
+ *  the door's delta shape, under today's hazards. */
+export async function diffScheduleRuns(
+  id: Identity,
+  vesselId: string,
+  runId: string,
+  against?: string,
+): Promise<{ run: ScheduleRunSummary; against: ScheduleRunSummary; delta: ScheduleDelta }> {
+  const q = `run=${encodeURIComponent(runId)}${against ? `&against=${encodeURIComponent(against)}` : ""}`;
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-runs/diff?${q}`, { headers: headers(id) });
+  if (!res.ok) throw await doorRefusal(res, "run diff");
+  return (await res.json()) as never;
+}
+
+/** A prior run's rows become the served schedule of record — a revert to an
+ *  earlier import, ledgered `SCHEDULE_REPLACED` naming both runs. 409 when
+ *  the store no longer holds the run's rows. */
+export async function serveScheduleRun(
+  id: Identity,
+  vesselId: string,
+  runId: string,
+): Promise<{ served: ScheduleRunSummary; delta: ScheduleDelta }> {
+  const res = await fetch(`/api/vessels/${vesselId}/schedule-runs/serve`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ run_id: runId }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "serve run");
+  return (await res.json()) as never;
 }
 
 export async function listActivities(
@@ -925,6 +1452,14 @@ export interface AuditEntry {
   occurred_at_ms: number;
   entry_hash: string;
   prev_hash: string | null;
+  /** The person who acted, as the identity hop asserted them; null on rows
+   *  written before people were asserted (chain format 1). */
+  actor_id: string | null;
+  /** That person's display name at the time — hashed with the id from
+   *  format 2 on, so a later rename does not rewrite history. */
+  actor_name: string | null;
+  /** 1 before people were asserted; 2 from the row that first named one. */
+  chain_version: number;
 }
 
 /** The ledger with its chain re-verified server-side on this very read. */
@@ -948,6 +1483,11 @@ export interface ZoneBound {
   zone: string;
   lo_frame: number;
   hi_frame: number;
+  /** The block's deck band, by register deck code — a zone is a block of
+   *  decks as well as a band of frames (docs/zone-scheme.md). Absent on
+   *  both: the block spans every deck. */
+  top_deck?: string | null;
+  bottom_deck?: string | null;
 }
 
 /** The server's join of chart to register — computed once, on the API. */
@@ -957,8 +1497,11 @@ export interface ZoneAudit {
     compartment: string;
     zone: string;
     frame: number;
+    deck_code: string;
     lo_frame: number;
     hi_frame: number;
+    /** The zone's blocks, in words — "Fr 96–191 on 2nd–2ndplat; Fr 116–175 on hold–db". */
+    bounds: string;
   }[];
   /** Zones carrying spaces the chart does not bound. */
   unbounded_zones: string[];
@@ -971,6 +1514,48 @@ export interface ZoneChart {
   source: string | null;
   bounds: ZoneBound[];
   audit: ZoneAudit;
+}
+
+/** One space next door to a zone, and why it counts as next door. */
+export interface AdjacentSpace {
+  compartment: string;
+  name: string;
+  zone: string;
+  deck_code: string;
+  deck_ordinal: number;
+  frame: number | null;
+  side: string;
+  /** `frame_boundary`, `deck_above`, `deck_below`, `coupled:<code>` — every reason that applies. */
+  via: string[];
+  state: DecisionState;
+  permits_work: boolean;
+  /** Field conditions live in the space at the instant. */
+  hazards: { kind: string; label: string }[];
+}
+
+/** The spaces next door to a zone — the server's answer (docs/zone-scheme.md). */
+export interface ZoneAdjacency {
+  zone: string;
+  as_of: number;
+  inside: string[];
+  adjacent: AdjacentSpace[];
+  basis: string;
+}
+
+// What is about to reach into a zone from outside it: served once from the
+// register, the geometry and the coupling graph, never re-derived here.
+export async function zoneAdjacent(
+  id: Identity,
+  vesselId: string,
+  zone: string,
+  asOf: AsOf = null,
+): Promise<ZoneAdjacency> {
+  const res = await fetch(
+    withAsOf(`/api/vessels/${vesselId}/zones/${encodeURIComponent(zone)}/adjacent`, asOf),
+    { headers: headers(id) },
+  );
+  if (!res.ok) throw new Error(`zone adjacency → ${res.status}`);
+  return (await res.json()) as ZoneAdjacency;
 }
 
 export async function getZoneChart(id: Identity, vesselId: string): Promise<ZoneChart> {
@@ -992,7 +1577,7 @@ export async function importZoneChart(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, bounds }),
   });
-  if (!res.ok) throw new Error(`zone chart → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "zone chart");
   return (await res.json()) as { stored: boolean; label: string; zones: number; audit: ZoneAudit };
 }
 
@@ -1001,7 +1586,7 @@ export async function revertZoneChart(id: Identity, vesselId: string): Promise<v
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`zones revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "zones revert");
 }
 
 /* -------------------------------------------------------------- budget book */
@@ -1038,7 +1623,7 @@ export async function importBudgetBook(
     headers: { ...headers(id), "content-type": "application/json" },
     body: JSON.stringify({ label, items }),
   });
-  if (!res.ok) throw new Error(`budget book → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw await doorRefusal(res, "budget book");
   return (await res.json()) as never;
 }
 
@@ -1047,5 +1632,538 @@ export async function revertBudgetBook(id: Identity, vesselId: string): Promise<
     method: "POST",
     headers: headers(id),
   });
-  if (!res.ok) throw new Error(`budget book revert → ${res.status}`);
+  if (!res.ok) throw await doorRefusal(res, "budget book revert");
+}
+
+/** One line of the manning book: people a trade has, per half-shift. */
+export interface ManningCrew {
+  trade: string;
+  headcount: number;
+}
+
+/** The supply side of crew planning — imported, never invented. */
+export interface ManningBook {
+  label: string;
+  crews: ManningCrew[];
+}
+
+/** Which register trades a candidate book does and does not cover. */
+export interface ManningCoverage {
+  book_trades_matching_no_register_trade: string[];
+  register_trades_with_no_manning_line: string[];
+}
+
+// The hull's manning book, or null — in which case every crew read shows
+// demand only and says so.
+export async function getManningBook(id: Identity, vesselId: string): Promise<ManningBook | null> {
+  const res = await fetch(`/api/vessels/${vesselId}/manning-book`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`manning book → ${res.status}`);
+  const body = (await res.json()) as { book: ManningBook | null };
+  return body.book;
+}
+
+/** Ingests a manning book, all-or-nothing. `dryRun` previews trade coverage. */
+export async function importManningBook(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  crews: ManningCrew[],
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; crews: number; coverage: ManningCoverage }> {
+  const res = await fetch(
+    `/api/vessels/${vesselId}/manning-book${dryRun ? "?dry_run=true" : ""}`,
+    {
+      method: "POST",
+      headers: { ...headers(id), "content-type": "application/json" },
+      body: JSON.stringify({ label, crews }),
+    },
+  );
+  if (!res.ok) throw await doorRefusal(res, "manning book");
+  return (await res.json()) as never;
+}
+
+export async function revertManningBook(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/manning-book/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "manning book revert");
+}
+
+/* ------------------------------------------------------------ the yard clock */
+
+/** One finding the clock door makes without refusing. */
+export interface ClockDoorFinding {
+  severity: "warn" | "info";
+  text: string;
+}
+
+/** What the clock door previews: the wall clock now, this year's transitions
+ *  as local readings, today's shifts as instants, and which clock the served
+ *  schedule of record was parsed in. */
+export interface ClockPreview {
+  now_local: string;
+  offset_now: string;
+  transitions: { at_ms: number; local: string; to: string }[];
+  shifts_today: { name: string; start_ms: number; end_ms: number; local: string }[];
+  schedule_of_record: { label: string; parsed_in: string | null } | null;
+}
+
+/** The hull's clock in effect, with the wall clock and offset right now. */
+export async function getYardClock(
+  id: Identity,
+  vesselId: string,
+): Promise<YardClockInfo & { now_local: string; offset_now: string }> {
+  const res = await fetch(`/api/vessels/${vesselId}/yard-clock`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`yard clock → ${res.status}`);
+  return (await res.json()) as never;
+}
+
+/** Ingests the yard's clock, refused whole with every reason (422 — the
+ *  server's sentence is the error). `dryRun` previews the findings and this
+ *  year's transitions and stores nothing. */
+export async function importYardClock(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  clock: YardClock,
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; findings: ClockDoorFinding[]; preview: ClockPreview }> {
+  const res = await fetch(`/api/vessels/${vesselId}/yard-clock${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, clock }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "yard clock");
+  return (await res.json()) as never;
+}
+
+/** Back to the UTC default — every clock on screen carries a Z again. */
+export async function revertYardClock(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/yard-clock/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "yard clock revert");
+}
+
+/* ------------------------------------------------------------ the rule table */
+
+/** One finding the rule door makes without refusing. */
+export interface RuleDoorFinding {
+  severity: "warn" | "info";
+  text: string;
+}
+
+/** What one compiled row does: the entry as the engine holds it. */
+export interface RuleEntryReport {
+  hazard: string;
+  /** The engine's reach, as serde spells it: `"SameSpace"` or `{ Coupled: { code, max_hops } }`. */
+  applies: "SameSpace" | { Coupled: { code: string; max_hops: number } };
+  state: string;
+  hold: number | null;
+  hold_from: "raise" | "end";
+  clearing_authority: string;
+  work_types: string[];
+  categories: string[];
+  effective_from: string;
+  effective_to: string;
+}
+
+/** What a row fires on today, against the hull as it stands. */
+export interface FiresOn {
+  hazards: number;
+  spaces: string[];
+  space_count: number;
+  activities_bound: number;
+}
+
+/** One row of the table's report, in file order — compiled or not, with its
+ *  sentence when not. */
+export interface RowReport {
+  rule: string;
+  ordinal: number;
+  line: number;
+  name: string;
+  kind: string;
+  compiled: boolean;
+  why_not: string | null;
+  entry: RuleEntryReport | null;
+  version: string | null;
+  fires_on: FiresOn | null;
+}
+
+/** The safety authority's signature on a rule table: who, when, of what. */
+export interface SignOff {
+  signed_at_ms: number;
+  signer_id: string;
+  signer_name: string;
+  statement: string;
+  table_hash: string;
+  /** The version ids signed — every entry in force at signing. */
+  rows: string[];
+  ledger_seq: number;
+}
+
+/** The work-type audit: what the schedule carries, what the table names. */
+export interface WorkTypeAudit {
+  on_schedule: { work_type: string; activities: number }[];
+  bound: string[];
+  unbound_on_schedule: string[];
+  unseen_in_table: string[];
+}
+
+/** The table in force: the committed document, or the seed in the document's layout. */
+export interface RuleTableInfo {
+  source: "seed" | "document";
+  label: string;
+  table_hash: string;
+  rows_total: number;
+  rows_in_force: number;
+  rows: RowReport[];
+  signoff: SignOff | null;
+  work_types: WorkTypeAudit;
+  findings: RuleDoorFinding[];
+}
+
+/** Which spaces change state right now if the table replaces the one in force. */
+export interface RuleTableMoved {
+  spaces: number;
+  examples: { compartment: string; before: string; after: string; rule: string }[];
+}
+
+/** What the rule door previews before Confirm. */
+export interface RuleTablePreview {
+  rows: RowReport[];
+  in_force: number;
+  replaces: { source: "seed" | "document"; label: string };
+  work_types: WorkTypeAudit;
+  moved: RuleTableMoved;
+}
+
+/** The rule door's answer to a dry run or a commit. */
+export interface RuleTableImport {
+  stored: boolean;
+  label: string;
+  table_hash: string;
+  findings: RuleDoorFinding[];
+  preview: RuleTablePreview;
+}
+
+/** The table in force with every row's report and the signature. */
+export async function getRuleTable(id: Identity, vesselId: string): Promise<RuleTableInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`rule table → ${res.status}`);
+  return (await res.json()) as RuleTableInfo;
+}
+
+/** The in-force set exported in the handoff layout — what the sitting starts from. */
+export async function exportRuleTableCsv(id: Identity, vesselId: string): Promise<string> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table?format=csv`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`rule table export → ${res.status}`);
+  return await res.text();
+}
+
+/** The safety authority's CSV through the door, refused whole with every
+ *  reason (422 — the server's sentence is the error). `dryRun` previews
+ *  every row against the hull and stores nothing. */
+export async function importRuleTable(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  csv: string,
+  dryRun: boolean,
+): Promise<RuleTableImport> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, csv }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "rule table");
+  return (await res.json()) as RuleTableImport;
+}
+
+/** Back to the seed — every trace carries the seed's ids again. */
+export async function revertRuleTable(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "rule table revert");
+}
+
+/** The safety authority signs the stored table's hash — refused without a
+ *  document, with a stale hash, or when that hash is already signed. */
+export async function signRuleTable(
+  id: Identity,
+  vesselId: string,
+  statement: string,
+  tableHash: string,
+): Promise<{ signed: boolean; signoff: SignOff }> {
+  const res = await fetch(`/api/vessels/${vesselId}/rule-table/sign`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ statement, table_hash: tableHash }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "rule table signature");
+  return (await res.json()) as { signed: boolean; signoff: SignOff };
+}
+
+/** One surveyed space of a geometry register (docs/geometry-accuracy.md). */
+export interface SpaceGeometry {
+  compartment_no: string;
+  fwd_frame: number;
+  aft_frame: number;
+}
+
+/** One coverage band: the frames where a deck physically exists. */
+export interface DeckBand {
+  deck_code: string;
+  lo_frame: number;
+  hi_frame: number;
+}
+
+/** The findings a geometry register raises against the register, live. */
+export interface GeometryFindings {
+  surveyed: number;
+  register_total: number;
+  placard_disagreements: { compartment_no: string; placard_frame: number; surveyed_fwd: number }[];
+  outside_deck_coverage: { compartment_no: string; deck_code: string; fwd_frame: number; aft_frame: number }[];
+  unknown_spaces: { count: number; examples: string[] };
+}
+
+/** The served geometry register, summarized, with its live findings. */
+export interface GeometryInfo {
+  register: { label: string; spaces: number; decks: DeckBand[] } | null;
+  findings: GeometryFindings | null;
+}
+
+// The hull's geometry register with its live findings — or nulls, and every
+// drawn position is a placard parse that says so.
+export async function getGeometry(id: Identity, vesselId: string): Promise<GeometryInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/geometry`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`geometry → ${res.status}`);
+  return (await res.json()) as GeometryInfo;
+}
+
+/** Ingests a geometry register, all-or-nothing. `dryRun` previews findings. */
+export async function importGeometry(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  spaces: SpaceGeometry[],
+  decks: DeckBand[],
+  dryRun: boolean,
+): Promise<{
+  stored: boolean;
+  label: string;
+  spaces: number;
+  deck_bands: number;
+  findings: GeometryFindings;
+}> {
+  const res = await fetch(`/api/vessels/${vesselId}/geometry${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, spaces, decks }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "geometry");
+  return (await res.json()) as never;
+}
+
+export async function revertGeometry(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/geometry/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "geometry revert");
+}
+
+/* ------------------------------------------ the ship, through the product */
+
+/** One deck of a compartment register, ordered downward by `ordinal`. */
+export interface RegisterDeck {
+  code: string;
+  label: string;
+  ordinal: number;
+}
+
+/** One space of a compartment register — the hull's own placard list. */
+export interface RegisterSpace {
+  compartment_no: string;
+  name: string;
+  deck_code: string;
+  zone: string;
+  category: string;
+  /** Frame station when the register carries it; else parsed from the placard. */
+  frame?: number;
+  /** `port`, `starboard` or `centreline` when the register carries it. */
+  side?: string;
+}
+
+/** What a candidate register would change, computed before Confirm. */
+export interface RegisterFindings {
+  /** Placards the numbering scheme cannot place and that carry no frame. */
+  unplaceable: string[];
+  /** Decks with no space on them. */
+  empty_decks: string[];
+  /** Live field conditions whose space the new register does not carry. */
+  orphaned_hazards: { compartment: string; label: string }[];
+  /** Scheduled activities located to spaces the new register does not carry. */
+  activities_losing_their_space: number;
+}
+
+/** The compartment register as served: ingested, or the seeded template. */
+export interface RegisterInfo {
+  register: { label: string; decks: number; spaces: number } | null;
+  served: "ingested" | "seeded";
+  spaces_served: number;
+  decks_served: number;
+}
+
+// The hull's compartment register — what every read is built from.
+export async function getRegister(id: Identity, vesselId: string): Promise<RegisterInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/register`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`register → ${res.status}`);
+  return (await res.json()) as RegisterInfo;
+}
+
+/**
+ * Ingests the hull's compartment register, all-or-nothing. `dryRun` previews
+ * the findings and stores nothing. Once stored, every screen serves it and
+ * the seeded register stops existing for this hull until a revert.
+ */
+export async function importRegister(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  decks: RegisterDeck[],
+  spaces: RegisterSpace[],
+  dryRun: boolean,
+): Promise<{ stored: boolean; label: string; decks: number; spaces: number; findings: RegisterFindings }> {
+  const res = await fetch(`/api/vessels/${vesselId}/register${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, decks, spaces }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "register");
+  return (await res.json()) as never;
+}
+
+export async function revertRegister(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/register/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "register revert");
+}
+
+/** One coupling: a physical path a hazard can travel between two spaces. */
+export interface CouplingRow {
+  from: string;
+  to: string;
+  /** The coupling type's code — what the rules bind to. */
+  code: string;
+  /** Store the reverse path too. */
+  symmetric?: boolean;
+  /** `authored` by a person, or `derived` by the door from deck order and frames. */
+  provenance?: "authored" | "derived";
+}
+
+/** A coupling type the hull's rules can bind to. */
+export interface CouplingType {
+  code: string;
+  propagates: string[];
+  max_reach: number;
+}
+
+/** The coupling register as served, and the graph the traces actually walk. */
+export interface CouplingsInfo {
+  register: { label: string; edges: number; authored: number; derived: number } | null;
+  served: "ingested" | "seeded";
+  edges_served: number;
+  types: CouplingType[];
+}
+
+// The hull's coupling register with the graph edge count the traces walk.
+export async function getCouplings(id: Identity, vesselId: string): Promise<CouplingsInfo> {
+  const res = await fetch(`/api/vessels/${vesselId}/couplings`, { headers: headers(id) });
+  if (!res.ok) throw new Error(`couplings → ${res.status}`);
+  return (await res.json()) as CouplingsInfo;
+}
+
+/**
+ * Ingests the hull's coupling register, all-or-nothing. `deriveVertical` asks
+ * the door to propose deck penetrations from deck order and frame overlap,
+ * each marked `derived`; `dryRun` previews every proposed edge and stores
+ * nothing.
+ */
+export async function importCouplings(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  edges: CouplingRow[],
+  deriveVertical: boolean,
+  dryRun: boolean,
+): Promise<{
+  stored: boolean;
+  label: string;
+  authored: number;
+  derived: number;
+  derived_edges: CouplingRow[];
+  edges: number;
+}> {
+  const res = await fetch(`/api/vessels/${vesselId}/couplings${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, edges, derive_vertical: deriveVertical }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "couplings");
+  return (await res.json()) as never;
+}
+
+export async function revertCouplings(id: Identity, vesselId: string): Promise<void> {
+  const res = await fetch(`/api/vessels/${vesselId}/couplings/revert`, {
+    method: "POST",
+    headers: headers(id),
+  });
+  if (!res.ok) throw await doorRefusal(res, "couplings revert");
+}
+
+/** One line of a hazard log — the day's tag-out or permit list. */
+export interface HazardLogRow {
+  compartment: string;
+  /** The engine's kind name, e.g. `energised_bus`. */
+  kind: string;
+  label: string;
+  /** When it was raised, epoch ms; the wall clock when absent. */
+  since_ms?: number;
+}
+
+/**
+ * Raises every field condition in a log that is not already live. The same
+ * validation as a single raise, applied to the whole file before any row
+ * lands; a row already live is skipped, not refused. `dryRun` answers with
+ * what would be raised and what is already live, storing nothing.
+ */
+export async function importHazardLog(
+  id: Identity,
+  vesselId: string,
+  label: string,
+  rows: HazardLogRow[],
+  dryRun: boolean,
+): Promise<{
+  stored: boolean;
+  label: string;
+  rows: number;
+  would_raise?: { compartment: string; kind: string; label: string }[];
+  raised?: LiveHazard[];
+  already_live: { compartment: string; kind: string }[];
+}> {
+  const res = await fetch(`/api/vessels/${vesselId}/hazards/import${dryRun ? "?dry_run=true" : ""}`, {
+    method: "POST",
+    headers: { ...headers(id), "content-type": "application/json" },
+    body: JSON.stringify({ label, rows }),
+  });
+  if (!res.ok) throw await doorRefusal(res, "hazard log");
+  return (await res.json()) as never;
 }

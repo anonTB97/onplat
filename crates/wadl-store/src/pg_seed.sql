@@ -210,8 +210,11 @@ ON CONFLICT (segment_id, compartment_no) DO NOTHING;
 INSERT INTO coupling_type (coupling_type_id, org_id, code, label, directional, propagates, default_max_hops) VALUES
   ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'deck_penetration', 'Deck penetration', true,  '{heat,vapour}', 1),
   ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'shared_bulkhead',  'Shared bulkhead',  false, '{heat,vapour}', 2),
-  ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'exhaust_trunk',    'Exhaust trunk',    true,  '{vapour}',      3)
-ON CONFLICT (coupling_type_id) DO NOTHING;
+  ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'exhaust_trunk',    'Exhaust trunk',    true,  '{vapour}',      3),
+  ('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000001', 'electrical_bus',   'Electrical bus',   false, '{energy}',      1)
+-- By natural key: a tenant that `wadl bootstrap-hull` already gave a type
+-- (under its own derived id) keeps it, and the seed still applies.
+ON CONFLICT (org_id, code) DO NOTHING;
 
 -- Directed rows; the symmetric bulkheads appear in both directions, as the
 -- schema requires.

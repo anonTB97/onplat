@@ -28,7 +28,13 @@ import { ModuleHeader } from "./ModuleHeader";
 import { chipStyle, C, mh } from "./theme";
 import { activityWindowHours, refusalOverlaps } from "./windowLoad";
 
-import { fmtDay, fmtStamp, fmtTime } from "./clock";
+import { currentClock, fmtDay, fmtStamp, fmtTime, zoneLabel } from "./clock";
+import { shiftChoices, shiftWindow, type Shift } from "./reports";
+import TomorrowBoard from "./TomorrowBoard";
+import { nextShift, nextShiftWord } from "./tomorrow";
+
+/** The fourth chip: the next shift after the instant, evaluated at its start. */
+const TOMORROW = "tomorrow";
 
 /** The activity's slot as a foreman reads it: times inside a day, else days. */
 const fmtSlot = (w: { start: number; end: number } | null): string => {
@@ -38,47 +44,30 @@ const fmtSlot = (w: { start: number; end: number } | null): string => {
     : `${fmtDay(w.start)} → ${fmtDay(w.end)}`;
 };
 
-const DAY = 86_400_000;
-const HOUR = 3_600_000;
-
 /** "1 activity", "4 activities" — a count that reads as written by a person. */
 const nActs = (n: number): string => `${n} ${n === 1 ? "activity" : "activities"}`;
 
-/**
- * The board's slice. "instant" is the register's own in-window mark — what is
- * planned at the moment on the time control. The three shifts are the yard's
- * working day around that same instant, so a superintendent can read tonight's
- * board this afternoon. All times are Z, like every clock in this shell.
- */
-type Shift = "instant" | "days" | "swing" | "night";
+// The board's slice. "instant" is the register's own in-window mark — what is
+// planned at the moment on the time control. The shifts are the yard's own,
+// from its clock document (`reports.ts::shiftChoices`), on the as-of LOCAL
+// day around that same instant, so a superintendent can read tonight's board
+// this afternoon. Every time on the board is the yard's wall clock; the zone
+// is said once, on the strip and in the printed footer.
 
-const SHIFTS: { id: Shift; label: string; gloss: string }[] = [
-  { id: "instant", label: "This instant", gloss: "planned at the moment on the time control" },
-  { id: "days", label: "Days 0700–1530", gloss: "first shift of the as-of day" },
-  { id: "swing", label: "Swing 1530–2400", gloss: "second shift of the as-of day" },
-  { id: "night", label: "Night 0000–0700", gloss: "third shift of the as-of day" },
-];
-
-/** The shift's window on the as-of day, or null for the instant mode. */
-function shiftWindow(asOfMs: number, shift: Shift): { start: number; end: number } | null {
-  if (shift === "instant") return null;
-  const midnight = Math.floor(asOfMs / DAY) * DAY;
-  switch (shift) {
-    case "days":
-      return { start: midnight + 7 * HOUR, end: midnight + 15.5 * HOUR };
-    case "swing":
-      return { start: midnight + 15.5 * HOUR, end: midnight + 24 * HOUR };
-    case "night":
-      return { start: midnight, end: midnight + 7 * HOUR };
-  }
-}
+/** Rows a trade's column shows before it folds — the morning's read, with
+ *  the rest counted in the header and one click away. */
+const COLUMN_ROWS = 25;
 
 export default function DailyOps({
   identity,
   vesselId,
   hullLabel,
   asOf,
+  clockEpoch,
   spaces,
+  verdictsOk,
+  zoneFocus = null,
+  role,
   onOpenSpace,
   onOpenJob,
 }: {
@@ -86,28 +75,53 @@ export default function DailyOps({
   vesselId: string;
   hullLabel: string;
   asOf: AsOf;
+  /** The zone in focus, shared through the shell — honoured by the Tomorrow
+   *  board (the shift board itself is the whole hull, as it always was). */
+  zoneFocus?: string | null;
+  /** The role producing a printed sheet. */
+  role: string;
+  /** Bumped by the app when the hull's yard clock changes, so the shift
+   *  windows below are recomputed in the new clock. */
+  clockEpoch: number;
   /** The hull's per-space verdicts at the same instant, from the app shell. */
   spaces: DeckStateRow[];
+  /**
+   * Whether `spaces` is a real answer: true once the verdict read succeeded,
+   * false when it failed, null while it is still loading. A failed read must
+   * not render as a board with no holds on it — that is the one lie a shift
+   * board can tell that sends a crew into a refused space.
+   */
+  verdictsOk: boolean | null;
   onOpenSpace: (compartment: string) => void;
   /** Opens the job card for a work-order code. */
   onOpenJob: (code: string) => void;
 }) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
+  const [source, setSource] = useState<string | null>(null);
   const [shift, setShift] = useState<Shift>("instant");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setError(null);
+    // Guarded against reordering: with the time control playing, a slow
+    // answer for one instant must not land after a faster later one.
+    let stale = false;
     listActivities(identity, vesselId, asOf)
       .then((r) => {
+        if (stale) return;
         setActivities(r.activities);
         setAsOfMs(r.as_of);
+        setSource(r.schedule_source);
       })
       .catch((e: unknown) => {
+        if (stale) return;
         setActivities(null);
         setError(String(e));
       });
+    return () => {
+      stale = true;
+    };
   }, [identity, vesselId, asOf]);
 
   const refused = useMemo(() => {
@@ -118,8 +132,28 @@ export default function DailyOps({
 
   // The slice: the in-window mark at the instant, or the chosen shift's window
   // on the as-of day. Undated work is in every slice — counted into each shift
-  // rather than hidden from all of them.
-  const win = asOfMs !== null ? shiftWindow(asOfMs, shift) : null;
+  // rather than hidden from all of them. The choices and the window come from
+  // the clock in effect; a shift name the new clock does not know falls back
+  // to the instant rather than to a window nobody named.
+  const choices = useMemo(() => shiftChoices(currentClock()), [clockEpoch]);
+  // Tomorrow: the first of the yard's shifts after the as-of instant, on
+  // this day or the next — a Swing reader sees Mids, a Mids reader sees Days.
+  // `clockEpoch` stands for the module clock the windows are placed in.
+  const next = useMemo(
+    () => (asOfMs !== null ? nextShift(currentClock(), asOfMs) : null),
+    [asOfMs, clockEpoch],
+  );
+  const tomorrowMode = shift === TOMORROW && next !== null;
+  const chosen = tomorrowMode ? TOMORROW : choices.some((c) => c.id === shift) ? shift : "instant";
+  const win = useMemo(
+    () =>
+      tomorrowMode && next
+        ? { start: next.start, end: next.end, label: next.label }
+        : asOfMs !== null
+          ? shiftWindow(asOfMs, chosen)
+          : null,
+    [asOfMs, chosen, clockEpoch, tomorrowMode, next],
+  );
   const inSlice = useMemo(() => {
     return (a: Activity): boolean => {
       if (win === null) return a.in_window;
@@ -150,6 +184,8 @@ export default function DailyOps({
       win !== null && refusalOverlaps(a, win.start, win.end);
   }, [win]);
 
+  /** Trade columns the reader unfolded past COLUMN_ROWS. */
+  const [unfolded, setUnfolded] = useState<Set<string>>(new Set());
   // Per trade, heaviest slice first — the order a superintendent walks the
   // morning meeting in. In shift mode the weight is the shift's own hours.
   const byTrade = useMemo(() => {
@@ -185,10 +221,14 @@ export default function DailyOps({
   });
   const chip = chipStyle;
 
+  const tomorrowChip =
+    next && asOfMs !== null ? `${nextShiftWord(currentClock(), asOfMs, next)} · ${next.label} · ${next.dayLabel}` : null;
   const sliceLabel =
-    win === null
-      ? `at ${asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}` : "now"}`
-      : `${SHIFTS.find((s) => s.id === shift)?.label ?? ""} · ${fmtDay(win.start)} (Z)`;
+    tomorrowMode && tomorrowChip
+      ? tomorrowChip
+      : win === null
+        ? `at ${asOfMs !== null ? `${fmtDay(asOfMs)} ${fmtTime(asOfMs)}` : "now"}`
+        : `${win.label} · ${fmtDay(win.start)}`;
 
   // The one-pager. Generated as its own monochrome document rather than
   // printing the app: a shift board goes up on a clipboard wall, where dark
@@ -248,7 +288,7 @@ export default function DailyOps({
       ${heldCount > 0 ? ` · ${heldCount} in a space the engine refuses now` : ""}
       ${doomedCount > 0 ? ` · ${doomedCount} not executable as planned` : ""}</p>
       ${eventRows}${rows}
-      <footer>Generated ${fmtStamp(Date.now())} · decision support only — flags risk; the planner decides. Does not modify the schedule.</footer>
+      <footer>Generated ${fmtStamp(Date.now())} · clocks: ${esc(zoneLabel(asOfMs ?? Date.now()))} · decision support only — flags risk; the planner decides. Does not modify the schedule.</footer>
       </body></html>`;
     const w = window.open("", "_blank", "width=900,height=700");
     if (!w) return;
@@ -263,7 +303,7 @@ export default function DailyOps({
       <ModuleHeader
         kicker={`Daily Ops · ${hullLabel}`}
         title="The shift board"
-        stats={[
+        stats={tomorrowMode ? [] : [
           { value: onShift.length, label: onShift.length === 1 ? "activity" : "activities", title: `Planned for ${sliceLabel}` },
           win !== null
             ? {
@@ -289,38 +329,87 @@ export default function DailyOps({
           },
         ]}
         note={
-          <>
-            Slice: <b style={{ color: C.bright }}>{sliceLabel}</b> — scrub the clock and the
-            shift moves with it; the full register is on the Sequence Board.
-          </>
+          tomorrowMode ? (
+            <>
+              Slice: <b style={{ color: C.bright }}>{sliceLabel}</b> — the next shift after the
+              instant on the time control, its holds evaluated by the engine at the shift&apos;s
+              start. Scrub the clock and the next shift moves with it.
+            </>
+          ) : (
+            <>
+              Slice: <b style={{ color: C.bright }}>{sliceLabel}</b> — scrub the clock and the
+              shift moves with it; the full register is on the Sequence Board.
+            </>
+          )
         }
       />
 
-      {/* The slice: this instant, or one of the yard's three shifts on the
-          as-of day — so tonight's board is readable this afternoon. */}
+      {verdictsOk === false && (
+        <div
+          role="alert"
+          style={{ margin: "0 0 12px", padding: "8px 12px", borderRadius: 6, border: `1px solid rgba(245,158,11,0.55)`, background: "rgba(245,158,11,0.12)", color: C.warn, fontSize: 12.5 }}
+        >
+          <b>Verdicts unavailable.</b> The engine did not answer for this instant, so no
+          space on this board carries a HELD badge. Do not read the absence as clearance —
+          reload, or check the API.
+        </div>
+      )}
+
+      {/* The slice: this instant, or one of the yard's shifts on the as-of
+          day — so tonight's board is readable this afternoon. */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        {SHIFTS.map((s) => (
-          <button key={s.id} style={chip(shift === s.id)} onClick={() => setShift(s.id)} title={s.gloss}>
+        {choices.map((s) => (
+          <button key={s.id} style={chip(chosen === s.id)} onClick={() => setShift(s.id)} title={s.gloss}>
             {s.label}
           </button>
         ))}
-        <button
-          style={{ ...chip(false), marginLeft: "auto" }}
-          onClick={printBoard}
-          title="A monochrome one-pager for the clipboard wall — the warnings survive a photocopier."
-        >
-          ⎙ Print board
-        </button>
+        {tomorrowChip && (
+          <button
+            style={{ ...chip(tomorrowMode), marginLeft: 6, borderStyle: tomorrowMode ? "solid" : "dashed" }}
+            onClick={() => setShift(TOMORROW)}
+            title={`The next shift after the instant on the time control, in the yard's clock (${currentClock().zone}): its work against the engine's verdicts AT THE SHIFT'S START, with the holds split into clearable tonight, clears on its own, and needs a plan.`}
+          >
+            {tomorrowChip}
+          </button>
+        )}
+        {!tomorrowMode && (
+          <button
+            style={{ ...chip(false), marginLeft: "auto" }}
+            onClick={printBoard}
+            title="A monochrome one-pager for the clipboard wall — the warnings survive a photocopier."
+          >
+            ⎙ Print board
+          </button>
+        )}
       </div>
 
-      {onShift.length === 0 && events.length === 0 && (
+      {tomorrowMode && next && asOfMs !== null && (
+        <TomorrowBoard
+          identity={identity}
+          vesselId={vesselId}
+          hullLabel={hullLabel}
+          clock={currentClock()}
+          shift={next}
+          asOfMs={asOfMs}
+          activities={activities}
+          spacesNow={spaces}
+          verdictsOk={verdictsOk}
+          zone={zoneFocus}
+          role={role}
+          scheduleSource={source}
+          onOpenSpace={onOpenSpace}
+          onOpenJob={onOpenJob}
+        />
+      )}
+
+      {!tomorrowMode && onShift.length === 0 && events.length === 0 && (
         <p style={{ color: C.dim, fontSize: 12.5 }}>
           Nothing is planned at this instant. Scrub the time control into the
           availability to see a shift.
         </p>
       )}
 
-      {events.length > 0 && (
+      {!tomorrowMode && events.length > 0 && (
         <div style={{ marginBottom: 14, padding: "8px 12px", border: `1px solid rgba(61,107,255,0.35)`, borderRadius: 8, background: "rgba(61,107,255,0.05)" }}>
           <div style={{ fontSize: 10, letterSpacing: 0.8, textTransform: "uppercase", color: C.accent, marginBottom: 4 }}>
             Key events in window
@@ -337,8 +426,8 @@ export default function DailyOps({
         </div>
       )}
 
-      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(430px,1fr))", alignItems: "start" }}>
-        {byTrade.map((g) => (
+      <div style={{ display: tomorrowMode ? "none" : "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill,minmax(430px,1fr))", alignItems: "start" }}>
+        {!tomorrowMode && byTrade.map((g) => (
           <section key={g.trade} style={{ border: `1px solid ${C.line}`, borderRadius: 8, background: C.panel }}>
             <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "8px 12px", borderBottom: `1px solid ${C.line}` }}>
               <b style={{ fontSize: 13 }}>{g.trade}</b>
@@ -353,7 +442,7 @@ export default function DailyOps({
               </span>
             </header>
             <div>
-              {g.list.map((a) => {
+              {(unfolded.has(g.trade) ? g.list : g.list.slice(0, COLUMN_ROWS)).map((a) => {
                 const heldNow = a.compartment_no !== null && refused.has(a.compartment_no);
                 const doomed = a.executability.verdict === "not_executable";
                 return (
@@ -443,6 +532,18 @@ export default function DailyOps({
                   </div>
                 );
               })}
+              {/* The fold: a trade with two hundred activities in the shift is
+                  counted in the header and shown in full on request; the
+                  first rows — largest remaining first — are the morning. */}
+              {!unfolded.has(g.trade) && g.list.length > COLUMN_ROWS && (
+                <button
+                  onClick={() => setUnfolded((s) => new Set(s).add(g.trade))}
+                  title="Show every activity in this trade's column. The header's counts and hours already cover all of them."
+                  style={{ width: "100%", textAlign: "left", font: "inherit", fontSize: 11, cursor: "pointer", padding: "7px 12px", color: C.accent, background: "transparent", border: "none", borderTop: `1px solid ${C.hairline}` }}
+                >
+                  + {g.list.length - COLUMN_ROWS} more in {g.trade} — show all
+                </button>
+              )}
             </div>
           </section>
         ))}

@@ -70,93 +70,16 @@ impl PgStore {
     /// # Errors
     /// [`StoreError::Backend`] if any statement fails.
     pub async fn seed_demo(&self) -> Result<(), StoreError> {
+        const YARD_ORG: uuid::Uuid = uuid::Uuid::from_u128(0x01);
         // The seed is many statements; `execute` on a raw multi-statement string
         // runs them in one implicit transaction.
         sqlx::raw_sql(SEED_SQL).execute(self.pool()).await?;
-        self.seed_demo_rules().await
-    }
-
-    /// Seeds the demo rule set programmatically from
-    /// [`wadl_engine::RuleSet::seed_usn_hot_work`], per the 0011 payload
-    /// contract: `trigger_expr` is the serde form of the engine's `RuleEntry`,
-    /// so what `rules_in_force` deserializes is byte-identical to what the
-    /// engine was written against. SQL literals here would be a hand-copied
-    /// shadow of that shape, and hand copies drift.
-    async fn seed_demo_rules(&self) -> Result<(), StoreError> {
-        use wadl_engine::rules::Applies;
-
-        const YARD_ORG: uuid::Uuid = uuid::Uuid::from_u128(0x01);
-        let entries = wadl_engine::RuleSet::seed_usn_hot_work();
-        let mut version_no: std::collections::BTreeMap<String, i32> =
-            std::collections::BTreeMap::new();
-        for entry in entries.entries() {
-            let rule_no: u128 = entry
-                .rule_code
-                .trim_start_matches('R')
-                .parse()
-                .map_err(|_| {
-                    StoreError::Backend(format!("unparseable rule code {:?}", entry.rule_code))
-                })?;
-            let rule_id = uuid::Uuid::from_u128(0x00E0_0000_0000 + rule_no);
-            sqlx::query(
-                "INSERT INTO rule (rule_id, org_id, code, name, kind)
-                 VALUES ($1, $2, $3, $3, 'hazard_cascade')
-                 ON CONFLICT (rule_id) DO NOTHING",
-            )
-            .bind(rule_id)
-            .bind(YARD_ORG)
-            .bind(&entry.rule_code)
-            .execute(self.pool())
-            .await?;
-
-            let version = version_no.entry(entry.rule_code.clone()).or_insert(0);
-            *version += 1;
-            let state = match entry.state {
-                wadl_engine::DecisionState::Allow => "ALLOW",
-                wadl_engine::DecisionState::Warn => "WARN",
-                wadl_engine::DecisionState::Block => "BLOCK",
-                wadl_engine::DecisionState::Suspend => "SUSPEND",
-            };
-            let max_hops: Option<i32> = match &entry.applies {
-                Applies::SameSpace => None,
-                Applies::Coupled { max_hops, .. } => Some(i32::from(max_hops.get())),
-            };
-            let trigger = serde_json::to_value(entry)
-                .map_err(|e| StoreError::Backend(format!("rule payload: {e}")))?;
-            let clearing = serde_json::json!({
-                "clearing_authority": entry.clearing_authority,
-                "hold_minutes": entry.hold.map(wadl_domain::units::Minutes::get),
-            });
-            sqlx::query(
-                "INSERT INTO rule_version
-                    (rule_version_id, rule_id, version_no, effective_from,
-                     trigger_expr, max_hops, result_state, clearing_expr,
-                     clearing_authority, waivable)
-                 VALUES ($1, $2, $3, timestamptz '2026-01-01 00:00Z',
-                         $4, $5, $6::decision_state, $7, $8, $9)
-                 ON CONFLICT (rule_version_id) DO NOTHING",
-            )
-            .bind(entry.rule_version.as_uuid())
-            .bind(rule_id)
-            .bind(*version)
-            .bind(trigger)
-            .bind(max_hops)
-            .bind(state)
-            .bind(clearing)
-            .bind(&entry.clearing_authority)
-            .bind(entry.waivable)
-            .execute(self.pool())
-            .await?;
-
-            sqlx::query(
-                "INSERT INTO rule_binding (rule_version_id, class_id, work_type, category)
-                 VALUES ($1, NULL, 'hot_work', NULL)
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(entry.rule_version.as_uuid())
-            .execute(self.pool())
-            .await?;
-        }
+        // The demo rule set is the baseline every tenant gets at bootstrap,
+        // installed through the same function (`pg_bootstrap`), so the seed
+        // and a bootstrapped pilot tenant evaluate one rule set.
+        let mut tx = self.pool().begin().await?;
+        crate::pg_bootstrap::install_baseline_rules(&mut tx, YARD_ORG, false).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -360,6 +283,8 @@ impl PgStore {
                 let from_register = stored_frame.is_some() && stored_side.is_some();
                 CompartmentSummary {
                     frame: stored_frame.or_else(|| parsed.as_ref().map(|u| u.frame.get())),
+                    fwd_frame: None,
+                    aft_frame: None,
                     side: stored_side.unwrap_or_else(|| {
                         parsed.as_ref().map_or_else(
                             || "unknown".to_owned(),
@@ -421,12 +346,40 @@ impl PgStore {
 // ============================================================================
 
 use wadl_domain::ids::{CouplingTypeId, SegmentId, WorkOrderId};
-use wadl_domain::units::{HopDepth, ManHours};
+use wadl_domain::units::{HopDepth, ManHours, Minutes};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
 use wadl_plan::{Package, Segment, SpaceWork};
 
-use crate::memory::{BudgetBook, ScheduleOfRecord, ZoneRegister};
+use crate::memory::{
+    BudgetBook, CompartmentRegister, CouplingRegister, FieldMapDoc, GeometryRegister, ManningBook,
+    RuleTableDoc, ScheduleOfRecord, SignOff, YardClockDoc, ZoneRegister,
+};
+use crate::model::{ScheduleRun, ScheduleRunReport, ScheduleRunSummary};
+
+/// The `ingested_document.kind` of the safety authority's rule table (0019).
+const RULE_TABLE_KIND: &str = "rule_table";
+
+/// The jsonb payload of a `geometry_register` document row: the register minus
+/// its label (the label is the document row's own column).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GeometryDoc {
+    spaces: Vec<crate::model::SpaceGeometrySummary>,
+    decks: Vec<crate::model::DeckCoverageSummary>,
+}
+
+/// The stored shape of a compartment register (label rides on the row).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RegisterDoc {
+    decks: Vec<crate::model::RegisterDeckSummary>,
+    spaces: Vec<crate::model::RegisterSpaceSummary>,
+}
+
+/// The stored shape of a coupling register.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CouplingDoc {
+    edges: Vec<crate::model::CouplingRowSummary>,
+}
 use crate::model::{
     ActivitySummary, AuditRecord, PackageSummary, ScheduleEdgeSummary, StrandedItem,
     StrandedReport, WorkOrderSummary,
@@ -482,6 +435,159 @@ fn hazard_kind(raw: &str) -> Result<HazardKind, StoreError> {
     }
 }
 
+/// A hazard kind's stored name — the inverse of [`hazard_kind`], kept beside
+/// it so the pair diverging is visible in one screenful.
+const fn kind_name(kind: HazardKind) -> &'static str {
+    match kind {
+        HazardKind::CoatingOpen => "coating_open",
+        HazardKind::HotWorkLive => "hot_work_live",
+        HazardKind::EnergisedBus => "energised_bus",
+        HazardKind::FlammableStow => "flammable_stow",
+        HazardKind::StopWork => "stop_work",
+    }
+}
+
+/// Stamps a document with the shape version this build writes, so a later
+/// reader can tell a document written before a field existed from one
+/// written after — and refuse, or migrate, rather than guess. Readers ignore
+/// the key; it is for the operator and the next schema.
+fn stamp_schema_version(doc: &mut serde_json::Value) {
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert(
+            "schema_version".to_owned(),
+            serde_json::Value::from(crate::DOCUMENT_SCHEMA_VERSION),
+        );
+    }
+}
+
+/// The upsert every document goes through, inside the caller's transaction
+/// so a run and its served document commit together or not at all.
+async fn upsert_document(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org: OrgId,
+    vessel: VesselId,
+    kind: &str,
+    label: &str,
+    mut doc: serde_json::Value,
+    run_id: Option<uuid::Uuid>,
+) -> Result<(), StoreError> {
+    stamp_schema_version(&mut doc);
+    sqlx::query(
+        "INSERT INTO ingested_document (org_id, vessel_id, kind, label, doc, run_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (vessel_id, kind)
+         DO UPDATE SET label = EXCLUDED.label, doc = EXCLUDED.doc,
+                       run_id = EXCLUDED.run_id, ingested_at = now()",
+    )
+    .bind(org.as_uuid())
+    .bind(vessel.as_uuid())
+    .bind(kind)
+    .bind(label)
+    .bind(doc)
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// The jsonb a schedule of record is stored as — the run's `doc` column and
+/// the served `ingested_document` row share it, so serving a prior run is a
+/// copy, not a conversion.
+fn sor_json(sor: &ScheduleOfRecord) -> serde_json::Value {
+    serde_json::json!({
+        "activities": sor.activities,
+        "edges": sor.edges,
+        "parsed_in": sor.parsed_in,
+    })
+}
+
+/// A schedule of record back from its jsonb and the row's label.
+fn sor_from_json(label: String, doc: &serde_json::Value) -> Result<ScheduleOfRecord, StoreError> {
+    let field = |name: &str| doc.get(name).cloned().unwrap_or_default();
+    Ok(ScheduleOfRecord {
+        label,
+        activities: serde_json::from_value(field("activities"))
+            .map_err(|e| StoreError::Backend(format!("schedule_of_record doc: {e}")))?,
+        edges: serde_json::from_value(field("edges"))
+            .map_err(|e| StoreError::Backend(format!("schedule_of_record doc: {e}")))?,
+        parsed_in: doc
+            .get("parsed_in")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+/// The `report` column: the run's report plus the summary's counts and
+/// projects, so the list read never touches `doc`.
+fn run_report_json(
+    summary: &ScheduleRunSummary,
+    report: &ScheduleRunReport,
+) -> Result<serde_json::Value, StoreError> {
+    let err = |e: serde_json::Error| StoreError::Backend(format!("schedule run report: {e}"));
+    let mut value = serde_json::to_value(report).map_err(err)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "counts".to_owned(),
+            serde_json::to_value(&summary.counts).map_err(err)?,
+        );
+        obj.insert(
+            "projects_served".to_owned(),
+            serde_json::to_value(&summary.projects_served).map_err(err)?,
+        );
+    }
+    Ok(value)
+}
+
+/// The columns every run read selects; `$1` is the hull. `served` is
+/// whether the hull's schedule-of-record document points at the run. A
+/// schedule run is an `ingest_run` row with a `seq` — assigned per hull at
+/// commit (0018); the table also carries provenance rows that are not runs
+/// (`wadl bootstrap-hull`'s, with no `seq`, no `report`, no `doc`), and a
+/// run read must never see one.
+const RUN_SELECT: &str = "SELECT r.run_id, r.seq, r.label, r.encoding, r.decoded_by, r.imported_by,
+                r.field_map, r.report, r.schema_version,
+                (EXTRACT(EPOCH FROM r.started_at) * 1000)::bigint AS imported_at_ms,
+                EXISTS (SELECT 1 FROM ingested_document d
+                         WHERE d.vessel_id = r.vessel_id AND d.kind = 'schedule_of_record'
+                           AND d.run_id = r.run_id) AS served
+           FROM ingest_run r
+          WHERE r.vessel_id = $1 AND r.seq IS NOT NULL";
+
+/// One `ingest_run` row to a summary.
+fn run_summary(row: &sqlx::postgres::PgRow) -> Result<ScheduleRunSummary, StoreError> {
+    let err =
+        |what: &str, e: serde_json::Error| StoreError::Backend(format!("ingest_run {what}: {e}"));
+    // Null-tolerant: a row without a report is read as empty counts, never
+    // a panic inside a read.
+    let report: serde_json::Value = row
+        .try_get::<Option<serde_json::Value>, _>("report")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let field = |name: &str| report.get(name).cloned().unwrap_or_default();
+    Ok(ScheduleRunSummary {
+        run_id: row.get("run_id"),
+        seq: i64::from(row.get::<Option<i32>, _>("seq").unwrap_or(0)),
+        label: row.get::<Option<String>, _>("label").unwrap_or_default(),
+        imported_at_ms: row.get("imported_at_ms"),
+        imported_by: serde_json::from_value(row.get::<serde_json::Value, _>("imported_by"))
+            .map_err(|e| err("imported_by", e))?,
+        encoding: row.get::<Option<String>, _>("encoding").unwrap_or_default(),
+        decoded_by: row
+            .get::<Option<String>, _>("decoded_by")
+            .unwrap_or_default(),
+        projects_served: serde_json::from_value(field("projects_served"))
+            .map_err(|e| err("report.projects_served", e))?,
+        counts: serde_json::from_value(field("counts")).map_err(|e| err("report.counts", e))?,
+        field_map: row.get("field_map"),
+        served: row.get("served"),
+        schema_version: row
+            .get::<Option<i32>, _>("schema_version")
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0),
+    })
+}
+
 impl PgStore {
     /// One ingested document for a hull, already scope-gated by the caller.
     async fn document(
@@ -502,7 +608,92 @@ impl PgStore {
         Ok(row.map(|r| (r.get("label"), r.get("doc"))))
     }
 
+    /// The hull's rule table document, if one is stored. The row's label is
+    /// the document's; the payload carries the rest (`header`, `rows`,
+    /// `entries`, `table_hash`, `signoff`) beside the schema stamp.
+    async fn rule_table_doc(
+        &self,
+        org: OrgId,
+        vessel: VesselId,
+    ) -> Result<Option<RuleTableDoc>, StoreError> {
+        self.document(org, vessel, RULE_TABLE_KIND)
+            .await?
+            .map(|(label, mut doc)| {
+                if let Some(obj) = doc.as_object_mut() {
+                    obj.insert("label".to_owned(), serde_json::Value::String(label));
+                }
+                serde_json::from_value(doc)
+                    .map_err(|e| StoreError::Backend(format!("rule_table doc: {e}")))
+            })
+            .transpose()
+    }
+
+    /// The hazards bearing on a decision at `at` — see
+    /// [`Repositories::hazards_bearing_on`]. Not cleared *as of the read
+    /// instant*, or cleared within the tail: a clearance stamped later than
+    /// `at` has not happened yet from that instant's point of view, so the
+    /// hazard is served (with `ended` set to that later instant, which the
+    /// engine reads as not yet) and the scrubbed board shows the hold that
+    /// was really there. `cleared_at + tail > $2` is that rule in SQL; with
+    /// a zero tail it is the live filter as it always was.
+    async fn bearing_on(
+        &self,
+        org: OrgId,
+        vessel: VesselId,
+        at: Timestamp,
+        tail: Minutes,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        let mut tx = self.with_tenant(org).await?;
+        let at = chrono::DateTime::from_timestamp_millis(at.epoch_millis())
+            .ok_or_else(|| StoreError::Backend("read instant out of range".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT compartment_no, kind, raised_at, label, cleared_at
+               FROM hazard
+              WHERE vessel_id = $1
+                AND (cleared_at IS NULL
+                     OR cleared_at + make_interval(mins => $3::int) > $2)
+              ORDER BY raised_at",
+        )
+        .bind(vessel.as_uuid())
+        .bind(at)
+        .bind(i32::try_from(tail.get()).unwrap_or(i32::MAX))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(Hazard {
+                    origin: CompartmentNo::new(row.get::<String, _>("compartment_no")),
+                    kind: hazard_kind(&row.get::<String, _>("kind"))?,
+                    since: ts(row.get("raised_at")),
+                    label: row.get("label"),
+                    ended: row
+                        .get::<Option<chrono::DateTime<chrono::Utc>>, _>("cleared_at")
+                        .map(ts),
+                })
+            })
+            .collect()
+    }
+
+    /// Writes a rule table document whole (label on the row, the rest as
+    /// the payload).
+    async fn put_rule_table(
+        &self,
+        org: OrgId,
+        vessel: VesselId,
+        doc: &RuleTableDoc,
+    ) -> Result<(), StoreError> {
+        let mut payload = serde_json::to_value(doc)
+            .map_err(|e| StoreError::Backend(format!("rule_table doc: {e}")))?;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.remove("label");
+        }
+        self.put_document(org, vessel, RULE_TABLE_KIND, &doc.label, payload)
+            .await
+    }
+
     /// Replaces (or installs) an ingested document — the all-or-nothing unit.
+    /// A document set this way is not a run's: `run_id` clears.
     async fn put_document(
         &self,
         org: OrgId,
@@ -512,20 +703,7 @@ impl PgStore {
         doc: serde_json::Value,
     ) -> Result<(), StoreError> {
         let mut tx = self.with_tenant(org).await?;
-        sqlx::query(
-            "INSERT INTO ingested_document (org_id, vessel_id, kind, label, doc)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (vessel_id, kind)
-             DO UPDATE SET label = EXCLUDED.label, doc = EXCLUDED.doc,
-                           ingested_at = now()",
-        )
-        .bind(org.as_uuid())
-        .bind(vessel.as_uuid())
-        .bind(kind)
-        .bind(label)
-        .bind(doc)
-        .execute(&mut *tx)
-        .await?;
+        upsert_document(&mut tx, org, vessel, kind, label, doc, None).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -647,6 +825,33 @@ impl PgStore {
 
 #[async_trait::async_trait]
 impl Repositories for PgStore {
+    async fn health(&self) -> crate::model::StoreHealth {
+        // One round trip, as the connecting role, outside any tenant scope:
+        // the migration the database is at is the answer, and reaching it
+        // proves the pool. Nothing tenant-owned is read.
+        let probe = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT max(version) FROM _sqlx_migrations WHERE success",
+        )
+        .fetch_one(self.pool())
+        .await;
+        match probe {
+            Ok(version) => crate::model::StoreHealth {
+                backend: "postgresql".to_owned(),
+                reachable: true,
+                schema_version: version.map(|v| v.to_string()),
+                document_schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+                detail: None,
+            },
+            Err(e) => crate::model::StoreHealth {
+                backend: "postgresql".to_owned(),
+                reachable: false,
+                schema_version: None,
+                document_schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+                detail: Some(e.to_string()),
+            },
+        }
+    }
+
     async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary> {
         // The trait's signature is infallible (the demo store cannot fail);
         // a backend failure here serves an empty portfolio rather than a lie.
@@ -666,6 +871,11 @@ impl Repositories for PgStore {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<Vec<CompartmentSummary>, StoreError> {
+        // The yard's own register, once ingested, IS the register — the same
+        // rule the demo store applies, from the same shared conversion.
+        if let Some(reg) = self.compartment_register(scope, vessel).await? {
+            return Ok(crate::memory::register_compartments(&reg));
+        }
         self.pg_list_compartments(scope, vessel).await
     }
 
@@ -674,6 +884,9 @@ impl Repositories for PgStore {
         scope: &TenantScope,
         vessel: VesselId,
     ) -> Result<Vec<DeckSummary>, StoreError> {
+        if let Some(reg) = self.compartment_register(scope, vessel).await? {
+            return Ok(crate::memory::register_decks(&reg));
+        }
         self.pg_list_decks(scope, vessel).await
     }
 
@@ -791,12 +1004,347 @@ impl Repositories for PgStore {
         sor: ScheduleOfRecord,
     ) -> Result<(), StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
-        let doc = serde_json::json!({
-            "activities": sor.activities,
-            "edges": sor.edges,
-        });
-        self.put_document(scope.org, vessel, "schedule_of_record", &sor.label, doc)
+        self.put_document(
+            scope.org,
+            vessel,
+            "schedule_of_record",
+            &sor.label,
+            sor_json(&sor),
+        )
+        .await
+    }
+
+    async fn schedule_parsed_in(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<String>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        // A record written before the field existed reads as "unknown".
+        Ok(self
+            .document(scope.org, vessel, "schedule_of_record")
+            .await?
+            .and_then(|(_, doc)| {
+                doc.get("parsed_in")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            }))
+    }
+
+    async fn yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<YardClockDoc>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "yard_clock")
+            .await?
+            .map(|(label, doc)| {
+                Ok(YardClockDoc {
+                    label,
+                    clock: serde_json::from_value(doc)
+                        .map_err(|e| StoreError::Backend(format!("yard_clock doc: {e}")))?,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: YardClockDoc,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let payload = serde_json::to_value(&doc.clock)
+            .map_err(|e| StoreError::Backend(format!("yard_clock doc: {e}")))?;
+        self.put_document(scope.org, vessel, "yard_clock", &doc.label, payload)
             .await
+    }
+
+    async fn clear_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "yard_clock").await
+    }
+
+    async fn field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<FieldMapDoc>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        // The map is wrapped (`{"map": …}`) so the row's schema_version stamp
+        // sits beside it, never inside it.
+        Ok(self
+            .document(scope.org, vessel, "p6_field_map")
+            .await?
+            .map(|(label, doc)| FieldMapDoc {
+                label,
+                map: doc.get("map").cloned().unwrap_or_default(),
+            }))
+    }
+
+    async fn set_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: FieldMapDoc,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let payload = serde_json::json!({ "map": doc.map });
+        self.put_document(scope.org, vessel, "p6_field_map", &doc.label, payload)
+            .await
+    }
+
+    async fn clear_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "p6_field_map")
+            .await
+    }
+
+    async fn rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<RuleTableDoc>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.rule_table_doc(scope.org, vessel).await
+    }
+
+    async fn set_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: RuleTableDoc,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.put_rule_table(scope.org, vessel, &doc).await
+    }
+
+    async fn clear_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, RULE_TABLE_KIND)
+            .await
+    }
+
+    async fn sign_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        signoff: SignOff,
+    ) -> Result<RuleTableDoc, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut doc = self
+            .rule_table_doc(scope.org, vessel)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        doc.signoff = Some(signoff);
+        self.put_rule_table(scope.org, vessel, &doc).await?;
+        Ok(doc)
+    }
+
+    async fn commit_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run: ScheduleRun,
+    ) -> Result<ScheduleRunSummary, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let Some(doc) = run.doc else {
+            return Err(StoreError::Backend(
+                "a schedule run must carry its document".to_owned(),
+            ));
+        };
+        let imported_at = chrono::DateTime::from_timestamp_millis(run.summary.imported_at_ms)
+            .ok_or_else(|| StoreError::Backend("imported_at out of range".to_owned()))?;
+        let run_id = crate::memory::mint_run_id(run.summary.imported_at_ms);
+        let report = run_report_json(&run.summary, &run.report)?;
+        let imported_by = serde_json::to_value(&run.summary.imported_by)
+            .map_err(|e| StoreError::Backend(format!("imported_by: {e}")))?;
+        let count = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
+        let sor = sor_json(&doc);
+        // Run row and served document in ONE transaction, serialized per hull
+        // by the same advisory lock the ledger takes, so two imports cannot
+        // both take the next seq.
+        let mut tx = self.with_tenant(scope.org).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(vessel.as_uuid().to_string())
+            .execute(&mut *tx)
+            .await?;
+        let seq: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(max(seq), 0) + 1 FROM ingest_run WHERE vessel_id = $1",
+        )
+        .bind(vessel.as_uuid())
+        .fetch_one(&mut *tx)
+        .await?;
+        let mut run_doc = sor.clone();
+        stamp_schema_version(&mut run_doc);
+        sqlx::query(
+            "INSERT INTO ingest_run
+                (run_id, org_id, source_system, source_file, started_at, finished_at,
+                 row_count, reject_count, vessel_id, seq, label, encoding, decoded_by,
+                 imported_by, field_map, report, doc, schema_version)
+             VALUES ($1, $2, 'primavera_p6', $3, $4, $4, $5, $6, $7, $8, $3, $9, $10,
+                     $11, $12, $13, $14, $15)",
+        )
+        .bind(run_id)
+        .bind(scope.org.as_uuid())
+        .bind(&run.summary.label)
+        .bind(imported_at)
+        .bind(count(run.summary.counts.served))
+        .bind(count(run.summary.counts.quarantined))
+        .bind(vessel.as_uuid())
+        .bind(seq)
+        .bind(&run.summary.encoding)
+        .bind(&run.summary.decoded_by)
+        .bind(imported_by)
+        .bind(&run.summary.field_map)
+        .bind(report)
+        .bind(run_doc)
+        .bind(i32::try_from(crate::DOCUMENT_SCHEMA_VERSION).unwrap_or(i32::MAX))
+        .execute(&mut *tx)
+        .await?;
+        upsert_document(
+            &mut tx,
+            scope.org,
+            vessel,
+            "schedule_of_record",
+            &doc.label,
+            sor,
+            Some(run_id),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ScheduleRunSummary {
+            run_id,
+            seq: i64::from(seq),
+            served: true,
+            schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+            ..run.summary
+        })
+    }
+
+    async fn list_schedule_runs(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<ScheduleRunSummary>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let rows = sqlx::query(&format!(
+            "{RUN_SELECT} ORDER BY r.seq DESC, r.started_at DESC"
+        ))
+        .bind(vessel.as_uuid())
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.iter().map(run_summary).collect()
+    }
+
+    async fn schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: uuid::Uuid,
+    ) -> Result<Option<ScheduleRun>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let row = sqlx::query(&format!(
+            "{} AND r.run_id = $2",
+            RUN_SELECT.replacen("SELECT r.run_id,", "SELECT r.doc, r.run_id,", 1)
+        ))
+        .bind(vessel.as_uuid())
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let summary = run_summary(&row)?;
+        let report_json: serde_json::Value = row.get("report");
+        let report: ScheduleRunReport = serde_json::from_value(report_json)
+            .map_err(|e| StoreError::Backend(format!("ingest_run report: {e}")))?;
+        let doc = row
+            .get::<Option<serde_json::Value>, _>("doc")
+            .map(|d| sor_from_json(summary.label.clone(), &d))
+            .transpose()?;
+        Ok(Some(ScheduleRun {
+            summary,
+            report,
+            doc,
+        }))
+    }
+
+    async fn serve_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: uuid::Uuid,
+    ) -> Result<ScheduleRunSummary, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let row = sqlx::query(
+            "SELECT label, doc FROM ingest_run
+                  WHERE vessel_id = $1 AND run_id = $2 AND seq IS NOT NULL",
+        )
+        .bind(vessel.as_uuid())
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+        let label: Option<String> = row.get("label");
+        let doc: Option<serde_json::Value> = row.get("doc");
+        let Some(doc) = doc else {
+            return Err(StoreError::Backend(format!(
+                "run {run_id} carries no document and cannot be served"
+            )));
+        };
+        upsert_document(
+            &mut tx,
+            scope.org,
+            vessel,
+            "schedule_of_record",
+            &label.unwrap_or_default(),
+            doc,
+            Some(run_id),
+        )
+        .await?;
+        tx.commit().await?;
+        self.schedule_run(scope, vessel, run_id)
+            .await?
+            .map(|run| run.summary)
+            .ok_or(StoreError::NotFound)
+    }
+
+    async fn served_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ScheduleRunSummary>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let row = sqlx::query(&format!(
+            "{RUN_SELECT} AND r.run_id = (SELECT d.run_id FROM ingested_document d
+                                          WHERE d.vessel_id = $1 AND d.kind = 'schedule_of_record')"
+        ))
+        .bind(vessel.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row.as_ref().map(run_summary).transpose()
     }
 
     async fn clear_schedule_of_record(
@@ -888,6 +1436,218 @@ impl Repositories for PgStore {
     ) -> Result<(), StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         self.delete_document(scope.org, vessel, "budget_book").await
+    }
+
+    async fn geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<GeometryRegister>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "geometry_register")
+            .await?
+            .map(|(label, doc)| {
+                let parts: GeometryDoc = serde_json::from_value(doc)
+                    .map_err(|e| StoreError::Backend(format!("geometry_register doc: {e}")))?;
+                Ok(GeometryRegister {
+                    label,
+                    spaces: parts.spaces,
+                    decks: parts.decks,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: GeometryRegister,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let doc = serde_json::to_value(GeometryDoc {
+            spaces: register.spaces,
+            decks: register.decks,
+        })
+        .map_err(|e| StoreError::Backend(format!("geometry_register doc: {e}")))?;
+        self.put_document(scope.org, vessel, "geometry_register", &register.label, doc)
+            .await
+    }
+
+    async fn clear_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "geometry_register")
+            .await
+    }
+
+    async fn compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<CompartmentRegister>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "compartment_register")
+            .await?
+            .map(|(label, doc)| {
+                let parts: RegisterDoc = serde_json::from_value(doc)
+                    .map_err(|e| StoreError::Backend(format!("compartment_register doc: {e}")))?;
+                Ok(CompartmentRegister {
+                    label,
+                    decks: parts.decks,
+                    spaces: parts.spaces,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: CompartmentRegister,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let doc = serde_json::to_value(RegisterDoc {
+            decks: register.decks,
+            spaces: register.spaces,
+        })
+        .map_err(|e| StoreError::Backend(format!("compartment_register doc: {e}")))?;
+        self.put_document(
+            scope.org,
+            vessel,
+            "compartment_register",
+            &register.label,
+            doc,
+        )
+        .await
+    }
+
+    async fn clear_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "compartment_register")
+            .await
+    }
+
+    async fn coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<CouplingRegister>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "coupling_register")
+            .await?
+            .map(|(label, doc)| {
+                let parts: CouplingDoc = serde_json::from_value(doc)
+                    .map_err(|e| StoreError::Backend(format!("coupling_register doc: {e}")))?;
+                Ok(CouplingRegister {
+                    label,
+                    edges: parts.edges,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: CouplingRegister,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let doc = serde_json::to_value(CouplingDoc {
+            edges: register.edges,
+        })
+        .map_err(|e| StoreError::Backend(format!("coupling_register doc: {e}")))?;
+        self.put_document(scope.org, vessel, "coupling_register", &register.label, doc)
+            .await
+    }
+
+    async fn clear_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "coupling_register")
+            .await
+    }
+
+    async fn coupling_types(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<crate::model::CouplingTypeSummary>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let rows = sqlx::query(
+            "SELECT coupling_type_id, code, propagates, default_max_hops
+               FROM coupling_type
+              ORDER BY code",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let hops: i32 = row.get("default_max_hops");
+                crate::model::CouplingTypeSummary {
+                    id: CouplingTypeId::from_uuid(row.get("coupling_type_id")),
+                    code: row.get("code"),
+                    propagates: row.get("propagates"),
+                    max_reach: u8::try_from(hops).unwrap_or(1),
+                }
+            })
+            .collect())
+    }
+
+    async fn manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ManningBook>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.document(scope.org, vessel, "manning_book")
+            .await?
+            .map(|(label, doc)| {
+                Ok(ManningBook {
+                    label,
+                    crews: serde_json::from_value(doc)
+                        .map_err(|e| StoreError::Backend(format!("manning_book doc: {e}")))?,
+                })
+            })
+            .transpose()
+    }
+
+    async fn set_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        book: ManningBook,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let doc = serde_json::to_value(&book.crews)
+            .map_err(|e| StoreError::Backend(format!("manning_book doc: {e}")))?;
+        self.put_document(scope.org, vessel, "manning_book", &book.label, doc)
+            .await
+    }
+
+    async fn clear_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.delete_document(scope.org, vessel, "manning_book")
+            .await
     }
 
     async fn stranded_hours(
@@ -992,6 +1752,10 @@ impl Repositories for PgStore {
         vessel: VesselId,
     ) -> Result<AdjacencyGraph, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
+        if let Some(reg) = self.coupling_register(scope, vessel).await? {
+            let types = self.coupling_types(scope, vessel).await?;
+            return crate::memory::register_graph(&reg, &types);
+        }
         let mut tx = self.with_tenant(scope.org).await?;
         // Class template minus this hull's suppressions. 'added'/'modified'
         // overrides follow once an authoring surface exists to create them;
@@ -1039,16 +1803,53 @@ impl Repositories for PgStore {
         &self,
         scope: &TenantScope,
         vessel: VesselId,
+        at: Timestamp,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.bearing_on(scope.org, vessel, at, Minutes::new(0))
+            .await
+    }
+
+    async fn hazards_bearing_on(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        at: Timestamp,
+        tail: Minutes,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        self.bearing_on(scope.org, vessel, at, tail).await
+    }
+
+    async fn clear_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: HazardKind,
+        basis: &str,
+        cleared_at_ms: i64,
     ) -> Result<Vec<Hazard>, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         let mut tx = self.with_tenant(scope.org).await?;
+        // Closure, not deletion (0011's contract): the row keeps its identity
+        // and gains when and on what basis its clearing authority ended it
+        // (0012). The `cleared_at IS NULL` guard makes a repeat clear return
+        // nothing rather than restamp history.
+        let cleared_at = chrono::DateTime::from_timestamp_millis(cleared_at_ms)
+            .ok_or_else(|| StoreError::Backend("cleared_at out of range".to_owned()))?;
         let rows = sqlx::query(
-            "SELECT compartment_no, kind, raised_at, label
-               FROM hazard
-              WHERE vessel_id = $1 AND cleared_at IS NULL
-              ORDER BY raised_at",
+            "UPDATE hazard
+                SET cleared_at = $4, cleared_basis = $5
+              WHERE vessel_id = $1 AND compartment_no = $2 AND kind = $3
+                AND cleared_at IS NULL
+              RETURNING compartment_no, kind, raised_at, label",
         )
         .bind(vessel.as_uuid())
+        .bind(compartment)
+        .bind(kind_name(kind))
+        .bind(cleared_at)
+        .bind(basis)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1059,9 +1860,47 @@ impl Repositories for PgStore {
                     kind: hazard_kind(&row.get::<String, _>("kind"))?,
                     since: ts(row.get("raised_at")),
                     label: row.get("label"),
+                    ended: None,
                 })
             })
             .collect()
+    }
+
+    async fn raise_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: HazardKind,
+        since_ms: i64,
+        label: &str,
+    ) -> Result<Hazard, StoreError> {
+        self.pg_get_vessel(scope, vessel).await?;
+        let mut tx = self.with_tenant(scope.org).await?;
+        let raised_at = chrono::DateTime::from_timestamp_millis(since_ms)
+            .ok_or_else(|| StoreError::Backend("raised_at out of range".to_owned()))?;
+        // The row's org is the caller's: RLS scopes the read back through the
+        // vessel, and the vessel is already known to be the caller's.
+        sqlx::query(
+            "INSERT INTO hazard (org_id, vessel_id, compartment_no, kind, raised_at, label)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(scope.org.as_uuid())
+        .bind(vessel.as_uuid())
+        .bind(compartment)
+        .bind(kind_name(kind))
+        .bind(raised_at)
+        .bind(label)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Hazard {
+            origin: CompartmentNo::new(compartment),
+            kind,
+            since: Timestamp::from_epoch_millis(since_ms),
+            label: label.to_owned(),
+            ended: None,
+        })
     }
 
     async fn rules_in_force(
@@ -1070,10 +1909,18 @@ impl Repositories for PgStore {
         vessel: VesselId,
     ) -> Result<RuleSet, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
+        // The committed rule table, when the hull has one, is the set in
+        // force; its entries carry their content-addressed ids.
+        if let Some(doc) = self.rule_table_doc(scope.org, vessel).await? {
+            return Ok(RuleSet::new(doc.entries));
+        }
         let mut tx = self.with_tenant(scope.org).await?;
-        // The payload contract from 0011: `trigger_expr` IS the engine's
-        // RuleEntry, so this is a deserialize, not a reconstruction. Bindings
-        // with no class apply to every hull; effective_to NULL means in force.
+        // Else the seed rows: the payload contract from 0011: `trigger_expr`
+        // IS the engine's RuleEntry, so this is a deserialize, not a
+        // reconstruction. Bindings with no class apply to every hull;
+        // effective_to NULL means in force (a retired seed version has it
+        // set). Work type and category are the entry's own binding, read by
+        // the call site through `RuleSet::bound_to`, not a SQL filter.
         let rows = sqlx::query(
             "SELECT rv.trigger_expr
                FROM rule_binding b
@@ -1108,54 +1955,19 @@ impl Repositories for PgStore {
         occurred_at_ms: i64,
     ) -> Result<AuditRecord, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
-        let occurred_at = chrono::DateTime::from_timestamp_millis(occurred_at_ms)
-            .ok_or_else(|| StoreError::Backend("occurred_at out of range".to_owned()))?;
-        // Chain lookup and insert in ONE transaction, serialized per hull by a
-        // transaction-scoped advisory lock — NOT `FOR UPDATE`, which needs the
-        // UPDATE privilege 0007 deliberately revokes from an append-only
-        // ledger. The lock releases at commit; two concurrent appends cannot
-        // both chain to the same predecessor.
         let mut tx = self.with_tenant(scope.org).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(vessel.as_uuid().to_string())
-            .execute(&mut *tx)
-            .await?;
-        let prev: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT entry_hash FROM audit_entry
-              WHERE vessel_id = $1 ORDER BY entry_id DESC LIMIT 1",
+        let record = append_audit_in(
+            &mut tx,
+            scope,
+            vessel,
+            action,
+            detail,
+            subject_ref,
+            occurred_at_ms,
         )
-        .bind(vessel.as_uuid())
-        .fetch_optional(&mut *tx)
-        .await?;
-        let entry_hash =
-            crate::ledger::compute_hash(prev.as_deref(), action, detail, occurred_at_ms);
-        let seq: i64 = sqlx::query_scalar(
-            "INSERT INTO audit_entry
-                (org_id, vessel_id, action, detail, subject_ref, occurred_at,
-                 prev_hash, entry_hash)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             RETURNING entry_id",
-        )
-        .bind(scope.org.as_uuid())
-        .bind(vessel.as_uuid())
-        .bind(action)
-        .bind(detail)
-        .bind(subject_ref)
-        .bind(occurred_at)
-        .bind(prev.as_deref())
-        .bind(entry_hash.as_slice())
-        .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(AuditRecord {
-            seq,
-            action: action.to_owned(),
-            detail: detail.to_owned(),
-            subject_ref: subject_ref.map(str::to_owned),
-            occurred_at_ms,
-            entry_hash: hex::encode(entry_hash),
-            prev_hash: prev.map(hex::encode),
-        })
+        Ok(record)
     }
 
     async fn list_audit(
@@ -1166,31 +1978,126 @@ impl Repositories for PgStore {
     ) -> Result<Vec<AuditRecord>, StoreError> {
         self.pg_get_vessel(scope, vessel).await?;
         let mut tx = self.with_tenant(scope.org).await?;
-        let rows = sqlx::query(
-            "SELECT entry_id, action, detail, subject_ref,
-                    (EXTRACT(EPOCH FROM occurred_at) * 1000)::bigint AS occurred_at_ms,
-                    prev_hash, entry_hash
-               FROM audit_entry
-              WHERE vessel_id = $1
-                AND ($2::text IS NULL OR subject_ref = $2)
-              ORDER BY entry_id DESC",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {AUDIT_COLUMNS}
+               FROM audit_entry a
+              WHERE a.vessel_id = $1
+                AND ($2::text IS NULL OR a.subject_ref = $2)
+              ORDER BY a.entry_id DESC"
+        ))
         .bind(vessel.as_uuid())
         .bind(subject_ref)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| AuditRecord {
-                seq: row.get("entry_id"),
-                action: row.get("action"),
-                detail: row.get("detail"),
-                subject_ref: row.get("subject_ref"),
-                occurred_at_ms: row.get("occurred_at_ms"),
-                entry_hash: hex::encode(row.get::<Vec<u8>, _>("entry_hash")),
-                prev_hash: row.get::<Option<Vec<u8>>, _>("prev_hash").map(hex::encode),
-            })
-            .collect())
+        Ok(rows.iter().map(audit_record_from_row).collect())
     }
+}
+
+/// The columns [`audit_record_from_row`] reads, for any `audit_entry` select
+/// (`a` is the table's alias).
+pub(crate) const AUDIT_COLUMNS: &str = "a.entry_id, a.action, a.detail, a.subject_ref,
+                    (EXTRACT(EPOCH FROM a.occurred_at) * 1000)::bigint AS occurred_at_ms,
+                    a.prev_hash, a.entry_hash, a.actor_id, a.actor_name, a.chain_version";
+
+/// One `audit_entry` row as the API serves it — the tenant-scoped read and
+/// the owner-mode chain walk (`audit_chains_all`) map rows through this one
+/// function so a ledger row reads the same whichever session read it.
+pub(crate) fn audit_record_from_row(row: &sqlx::postgres::PgRow) -> AuditRecord {
+    AuditRecord {
+        seq: row.get("entry_id"),
+        action: row.get("action"),
+        detail: row.get("detail"),
+        subject_ref: row.get("subject_ref"),
+        occurred_at_ms: row.get("occurred_at_ms"),
+        entry_hash: hex::encode(row.get::<Vec<u8>, _>("entry_hash")),
+        prev_hash: row.get::<Option<Vec<u8>>, _>("prev_hash").map(hex::encode),
+        actor_id: row.get("actor_id"),
+        actor_name: row.get("actor_name"),
+        // A version outside u8 is not a version this build can hash; 0 makes
+        // `verify_records` report it as a mismatch rather than silently
+        // reading it as format 1.
+        chain_version: u8::try_from(row.get::<i16, _>("chain_version")).unwrap_or(0),
+    }
+}
+
+/// Appends one ledger row inside `tx`, which must already run as the
+/// application role under the hull's tenant (`with_tenant`, or the owner-mode
+/// bootstrap after it switches role). The chain logic lives here once so a
+/// row written in the same transaction as the hull it names (`pg_bootstrap`)
+/// chains exactly like a row the API writes.
+///
+/// Chain lookup and insert in ONE transaction, serialized per hull by a
+/// transaction-scoped advisory lock — NOT `FOR UPDATE`, which needs the
+/// UPDATE privilege 0007 deliberately revokes from an append-only ledger. The
+/// lock releases at commit; two concurrent appends cannot both chain to the
+/// same predecessor.
+///
+/// # Errors
+/// [`StoreError::Backend`] on any statement failure or an instant out of range.
+pub(crate) async fn append_audit_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    scope: &TenantScope,
+    vessel: VesselId,
+    action: &str,
+    detail: &str,
+    subject_ref: Option<&str>,
+    occurred_at_ms: i64,
+) -> Result<AuditRecord, StoreError> {
+    let occurred_at = chrono::DateTime::from_timestamp_millis(occurred_at_ms)
+        .ok_or_else(|| StoreError::Backend("occurred_at out of range".to_owned()))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(vessel.as_uuid().to_string())
+        .execute(&mut **tx)
+        .await?;
+    let prev: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT entry_hash FROM audit_entry
+          WHERE vessel_id = $1 ORDER BY entry_id DESC LIMIT 1",
+    )
+    .bind(vessel.as_uuid())
+    .fetch_optional(&mut **tx)
+    .await?;
+    // Format 2 from migration 0017 on: the person is in the hash, and the
+    // table's check constraint refuses a format-2 row that names nobody.
+    let actor = &scope.actor;
+    let entry_hash = crate::ledger::compute_hash_v2(
+        prev.as_deref(),
+        action,
+        detail,
+        occurred_at_ms,
+        &actor.id,
+        &actor.name,
+    );
+    let seq: i64 = sqlx::query_scalar(
+        "INSERT INTO audit_entry
+            (org_id, vessel_id, action, detail, subject_ref, occurred_at,
+             prev_hash, entry_hash, actor_id, actor_name, chain_version)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING entry_id",
+    )
+    .bind(scope.org.as_uuid())
+    .bind(vessel.as_uuid())
+    .bind(action)
+    .bind(detail)
+    .bind(subject_ref)
+    .bind(occurred_at)
+    .bind(prev.as_deref())
+    .bind(entry_hash.as_slice())
+    .bind(&actor.id)
+    .bind(&actor.name)
+    .bind(i16::from(crate::ledger::CHAIN_VERSION))
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(AuditRecord {
+        seq,
+        action: action.to_owned(),
+        detail: detail.to_owned(),
+        subject_ref: subject_ref.map(str::to_owned),
+        occurred_at_ms,
+        entry_hash: hex::encode(entry_hash),
+        prev_hash: prev.map(hex::encode),
+        actor_id: Some(actor.id.clone()),
+        actor_name: Some(actor.name.clone()),
+        chain_version: crate::ledger::CHAIN_VERSION,
+    })
 }

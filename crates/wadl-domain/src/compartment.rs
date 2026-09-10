@@ -84,12 +84,13 @@ impl Side {
     }
 }
 
-/// A parsed USN compartment number: deck, frame, side, and usage letter.
+/// A parsed USN compartment number: deck, frame, side, and usage code.
 ///
-/// The `usage` letter (Q, E, L, M, A, …) is retained as printed. The schema
-/// note is deliberate: it is the compartment *category*, not this letter, that
-/// decides secure status and hazard defaults, so this type intentionally does
-/// not infer a category from the letter.
+/// The `usage` code (Q, E, L, M, A, … and the doubled tank codes AA, FF, GG,
+/// JJ) is retained as printed. The schema note is deliberate: it is the
+/// compartment *category*, not this code, that decides secure status and
+/// hazard defaults, so this type intentionally does not infer a category from
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UsnCompartment {
     /// Deck field as printed (`1`, `2`, `03`, …). Ordering across decks comes
@@ -99,16 +100,18 @@ pub struct UsnCompartment {
     pub frame: Frame,
     /// Athwartships side.
     pub side: Side,
-    /// Usage letter as printed.
-    pub usage: char,
+    /// Usage code as printed: one or two uppercase letters.
+    pub usage: String,
 }
 
 impl UsnCompartment {
-    /// Parses `deck-frame-side-usage`, e.g. `4-110-2-W`. Returns `None` unless
-    /// there are exactly four hyphen-separated fields, the frame parses as an
-    /// integer, the side parses as a non-negative integer, and the usage is a
-    /// single character. Nothing here guesses: a malformed number is `None`,
-    /// not a best effort.
+    /// Parses `deck-frame-side-usage`, e.g. `4-110-2-W` or `5-140-0-FF`.
+    /// Returns `None` unless there are exactly four hyphen-separated fields,
+    /// the frame parses as an integer, the side parses as a non-negative
+    /// integer, and the usage is one or two uppercase ASCII letters — the
+    /// single letters of the general usage table and the doubled letters real
+    /// registers stamp on cargo, fuel, gasoline and JP-5 tanks. Nothing here
+    /// guesses: a malformed number is `None`, not a best effort.
     #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
         let mut fields = raw.split('-');
@@ -122,9 +125,9 @@ impl UsnCompartment {
 
         let frame = Frame::new(frame.parse::<i32>().ok()?);
         let side = Side::from_digit(side.parse::<u32>().ok()?);
-        let mut usage_chars = usage.chars();
-        let usage = usage_chars.next()?;
-        if usage_chars.next().is_some() {
+        let usage_ok =
+            matches!(usage.len(), 1 | 2) && usage.chars().all(|c| c.is_ascii_uppercase());
+        if !usage_ok {
             return None;
         }
 
@@ -132,7 +135,7 @@ impl UsnCompartment {
             deck: deck.to_owned(),
             frame,
             side,
-            usage,
+            usage: usage.to_owned(),
         })
     }
 }
@@ -154,7 +157,26 @@ mod tests {
         assert_eq!(c.deck, "4");
         assert_eq!(c.frame, Frame::new(110));
         assert_eq!(c.side, Side::Port);
-        assert_eq!(c.usage, 'W');
+        assert_eq!(c.usage, "W");
+    }
+
+    #[test]
+    fn doubled_tank_codes_parse_as_printed() {
+        // The doubled letters a real compartment list carries for cargo,
+        // fuel, gasoline and JP-5 tanks — the spaces hot-work rules care
+        // about most, and the ones a single-letter parser silently dropped.
+        let c = UsnCompartment::parse("5-140-0-JJ").unwrap();
+        assert_eq!(c.usage, "JJ");
+        assert_eq!(c.frame, Frame::new(140));
+        assert!(UsnCompartment::parse("6-88-2-FF").is_some());
+        assert!(
+            UsnCompartment::parse("6-88-2-ff").is_none(),
+            "lowercase is not a placard"
+        );
+        assert!(
+            UsnCompartment::parse("6-88-2-FFF").is_none(),
+            "three letters is not a code"
+        );
     }
 
     #[test]

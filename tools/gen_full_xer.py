@@ -9,6 +9,9 @@ handful of deliberate negative lags (overlaps written into the schedule's own
 logic — findings, not errors).
 
 The file exercises every grading path the ingest carries:
+  * every task carries a `work_type` UDF read off its step verb (hot_work,
+    coating, electrical, inspection, insulation, rigging, mechanical) — the
+    token the rule table binds rows to; the field map points at it,
   * most work locates through the compartment UDF (authored),
   * some locates only through a placard written in the task name (derived),
   * zone-level services carry no compartment at all but sit under their zone's
@@ -19,56 +22,80 @@ The file exercises every grading path the ingest carries:
 
 Deterministic: same seed, same file, byte for byte. Regenerate with
     python3 tools/gen_full_xer.py
+
+Scale (docs/stress-test.md): the same generator over a scaled register, a
+multi-year availability, and more chains per space —
+    python3 tools/gen_full_xer.py --register /tmp/scale/CVN73-register.csv \
+        --out /tmp/scale/CVN73-PIA26-scale.xer --months 30 --chain-scale 1.3
+`--months` stretches the availability (and its phase waves) from the shipped
+six; `--chain-scale` multiplies the work chains each space attracts. The
+defaults reproduce the shipped file byte for byte.
 """
 
+import argparse
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-random.seed(73)
+ARGS = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+ARGS.add_argument("--register", type=Path, default=None, help="compartment register to locate work to (default reference/cvn73)")
+ARGS.add_argument("--out", type=Path, default=None, help="output .xer (default reference/p6-sample/CVN73-PIA26-full.xer)")
+ARGS.add_argument("--months", type=int, default=6, help="availability length in 30-day months (default 6, the shipped PIA)")
+ARGS.add_argument("--chain-scale", type=float, default=1.0, help="multiplier on the work chains per space (default 1)")
+ARGS.add_argument("--seed", type=int, default=73, help="seed (the shipped file uses 73)")
+OPTS = ARGS.parse_args()
 
-OUT = Path(__file__).resolve().parent.parent / "reference/p6-sample/CVN73-PIA26-full.xer"
+random.seed(OPTS.seed)
+
+OUT = OPTS.out or (Path(__file__).resolve().parent.parent / "reference/p6-sample/CVN73-PIA26-full.xer")
 
 AV_START = datetime(2026, 7, 27, 6, 0)
-AV_END = datetime(2027, 1, 23, 18, 0)
+# Six months is 2027-01-23 18:00 — the shipped PIA's end, exactly.
+AV_END = AV_START + timedelta(days=30 * OPTS.months, hours=12)
 DATA_DATE = datetime(2026, 8, 10, 6, 0)
+# The phase waves stretch with the availability so a multi-year schedule is
+# staged across its whole length, not crammed into its first half-year.
+STRETCH = OPTS.months / 6
 
-# The hull's compartment register (compartment, zone, name) — the crosswalk
-# the yard actually holds. Mirrors the demo store's 24 spaces.
-SPACES = [
-    ("1-136-0-Q", "Z4", "Hangar Bay 2"),
-    ("3-185-0-L", "Z7", "CPO Living Space"),
-    ("4-102-2-E", "Z2", "Switchboard Room No. 1"),
-    ("4-110-2-W", "Z3", "Reserve Feed Water Tank"),
-    ("4-120-4-Q", "Z3", "Fan Room"),
-    ("4-141-0-C", "Z5", "Aft IC & Gyro Room"),
-    ("4-149-2-Q", "Z5", "Forced Draft Blower Room No. 3"),
-    ("2-160-2-Q", "Z6", "Uptake Space No. 3"),
-    ("3-156-2-Q", "Z6", "Auxiliary Machinery Room No. 4"),
-    ("3-160-2-Q", "Z6", "Passage & Trunk"),
-    ("3-164-2-Q", "Z6", "Ship's Store"),
-    ("4-160-2-Q", "Z6", "Pump Room No. 2"),
-    ("4-164-2-Q", "Z6", "Cable Trunk & IC Space"),
-    ("3-152-0-Q", "Z6", "Cableway Trunk Zone 3 overhead"),
-    ("3-184-0-Q", "Z7", "AC Plant No. 2 Machinery Room"),
-    ("1-160-0-Q", "Z6", "Hangar Bay 3"),
-    ("2-152-0-Q", "Z6", "Scullery"),
-    ("2-160-1-Q", "Z6", "Mess Decks"),
-    ("2-176-0-Q", "Z7", "Wardroom Terminal Space"),
-    ("3-140-0-Q", "Z5", "Cableway Trunk Fr 140"),
-    ("3-148-0-L", "Z5", "Chief Petty Officer Berthing"),
-    ("3-148-2-E", "Z5", "Switchgear Room No. 2"),
-    ("3-172-0-M", "Z7", "AC Plant No. 2"),
-    ("3-192-2-E", "Z7", "IC Terminal Room"),
-]
+# The hull's compartment register — the crosswalk the yard actually holds —
+# read from the generated document so the schedule locates to the spaces the
+# hull serves (tools/gen_cvn73_hull.py, docs/zone-scheme.md). Each entry is
+# (compartment, zone, name, category); the category sets how much work a
+# space attracts and which systems it attracts.
+REGISTER = OPTS.register or (Path(__file__).resolve().parent.parent / "reference/cvn73/CVN73-register.csv")
+SPACES = []
+for line in REGISTER.read_text().splitlines():
+    if not line or line.startswith("#"):
+        continue
+    cols = line.split(",")
+    if cols[0] == "space":
+        SPACES.append((cols[1], cols[4], cols[2], cols[5]))
 
 ZONES = {
-    "Z2": "Zone 2 — Forward Electrical & Stores",
-    "Z3": "Zone 3 — Forward Auxiliaries",
-    "Z4": "Zone 4 — Hangar & Midships",
-    "Z5": "Zone 5 — Aft Auxiliaries & Berthing",
-    "Z6": "Zone 6 — Aft Machinery & Mess",
-    "Z7": "Zone 7 — Aft Living & Plants",
+    "Z1": "Zone 1 — Flight Deck & Island",
+    "Z2": "Zone 2 — Hangar & Gallery",
+    "Z3": "Zone 3 — Forward Below-Decks",
+    "Z4": "Zone 4 — Propulsion Plant & Midships",
+    "Z5": "Zone 5 — Aft Below-Decks",
+    "Z6": "Zone 6 — Tanks, Voids & Inner Bottom",
+}
+
+# How many work chains a space attracts and which systems, by category. A
+# machinery room in a PIA carries a dozen jobs; a void carries a tank entry
+# and a coat. Weights index into SYSTEMS by SWLIN.
+CATEGORY_PROFILE = {
+    "Machinery / electrical": ((3, 6), {"560": 4, "505": 3, "300": 2, "512": 2, "130": 1, "631": 1, "508": 1}),
+    "Machinery / operational": ((2, 5), {"560": 3, "505": 2, "300": 2, "130": 2, "631": 1, "512": 1}),
+    "Electrical": ((2, 4), {"300": 5, "430": 2, "512": 1, "631": 1}),
+    "Reactor plant (restricted)": ((1, 3), {"560": 2, "505": 2, "300": 1, "130": 1}),
+    "Living": ((1, 3), {"631": 3, "512": 2, "300": 1, "430": 1, "508": 1}),
+    "Aviation": ((1, 4), {"130": 3, "631": 2, "560": 2, "505": 1, "300": 1}),
+    "Command & surveillance": ((1, 2), {"430": 3, "300": 2, "512": 1}),
+    "Stowage": ((0, 2), {"631": 3, "130": 1, "512": 1}),
+    "Magazine": ((1, 2), {"631": 2, "512": 1, "300": 1, "130": 1}),
+    "Passage / trunk": ((0, 2), {"631": 2, "508": 2, "512": 1, "300": 1}),
+    "Tanks & voids": ((1, 2), {"631": 4, "130": 2, "505": 1}),
+    "Fuel / JP-5": ((1, 3), {"505": 3, "631": 2, "130": 1, "560": 1}),
 }
 
 # Trades: (rsrc_id, short_name, long name, calendar)
@@ -137,8 +164,29 @@ ZONE_SERVICES = [
 # The availability's phase waves, as (offset-days-from-start, spread-days).
 WAVES = [(0, 25), (14, 45), (45, 70), (95, 60), (130, 45)]
 
-SEEDED_WI = {"Z2": "WI-1905", "Z3": "WI-3318", "Z4": "WI-4471",
-             "Z5": "WI-3905", "Z6": "WI-5571", "Z7": "WI-3402"}
+SEEDED_WI = {"Z1": "WI-4471", "Z2": "WI-1905", "Z3": "WI-3318",
+             "Z4": "WI-3905", "Z5": "WI-5571", "Z6": "WI-3402"}
+
+# The work type each task carries in its `work_type` UDF, read off the step
+# verb in the task's name — the token the rule table binds rows to (S14). The
+# first matching class wins, in this order; a name no verb claims is
+# `mechanical`. Milestones carry none: a key event is not work.
+WORK_TYPES = [
+    ("hot_work", ("weld", "crop", "cut out", "grind", "burn")),
+    ("coating", ("blast", "prime", "top coat", "cure")),
+    ("electrical", ("de-energize", "pull & land", "megger", "energize")),
+    ("inspection", ("ndt", "survey", "inspect", "test", "ring-out")),
+    ("insulation", ("strip lagging", "asbestos", "re-insulate", "sheathing")),
+    ("rigging", ("scaffolding", "rig")),
+]
+
+
+def work_type_of(name):
+    lowered = name.lower()
+    for token, verbs in WORK_TYPES:
+        if any(v in lowered for v in verbs):
+            return token
+    return "mechanical"
 
 lines = []
 task_rows = []
@@ -231,6 +279,9 @@ def add_task(name, wbs, trade, start, end, *, milestone=False, compartment=None,
     if wi:
         udf_id += 1
         udf_rows.append((902, tid, wi))
+    if not milestone:
+        udf_id += 1
+        udf_rows.append((903, tid, work_type_of(name)))
     return tid, code
 
 
@@ -242,6 +293,7 @@ def link(pred, succ, kind="PR_FS", lag_hr=0):
 
 def wave_window(phase, dur_days):
     off, spread = WAVES[min(phase, len(WAVES) - 1)]
+    off, spread = off * STRETCH, spread * STRETCH
     start = AV_START + timedelta(days=off + random.uniform(0, spread), hours=random.choice([0, 2, 4]))
     end = start + timedelta(days=dur_days)
     return start, min(end, AV_END - timedelta(days=1))
@@ -249,9 +301,17 @@ def wave_window(phase, dur_days):
 
 # ---- Per-space work chains ---------------------------------------------
 zone_last_steps = {z: [] for z in ZONES}
-for space, zone, space_name in SPACES:
-    n_chains = random.randint(9, 14)
-    picks = random.choices(SYSTEMS, k=n_chains)
+SYSTEM_BY_SWLIN = {s[0]: s for s in SYSTEMS}
+for space, zone, space_name, category in SPACES:
+    (lo, hi), weights = CATEGORY_PROFILE.get(category, ((1, 3), {"631": 2, "560": 1}))
+    n_chains = random.randint(lo, hi)
+    if OPTS.chain_scale != 1.0:
+        # Scaled after the draw, so the shipped file's random sequence is
+        # untouched at the default.
+        n_chains = max(n_chains, round(n_chains * OPTS.chain_scale))
+    picks = random.choices(
+        [SYSTEM_BY_SWLIN[k] for k in weights], weights=list(weights.values()), k=n_chains,
+    )
     for ci, (swlin, _, trade, sys_names, steps) in enumerate(picks):
         sys_name = random.choice(sys_names).replace("{n}", f"{random.randint(1, 9)}{chr(65 + ci % 6)}")
         wi = SEEDED_WI[zone] if random.random() < 0.22 else f"WI-{random.randint(6000, 9899)}"
@@ -388,6 +448,7 @@ w("%T\tUDFTYPE")
 w("%F\tudf_type_id\tudf_type_name\tudf_type_label\tlogical_data_type")
 w("%R\t901\tcompartment\tCompartment\tFT_TEXT")
 w("%R\t902\twi_number\tWork Item\tFT_TEXT")
+w("%R\t903\twork_type\tWork Type\tFT_TEXT")
 w("%T\tTASK")
 w("%F\ttask_id\tproj_id\twbs_id\tclndr_id\ttask_code\ttask_name\ttask_type\tstatus_code"
   "\ttarget_start_date\ttarget_end_date\tearly_start_date\tearly_end_date"
@@ -415,3 +476,8 @@ print(f"{OUT.name}: {n_tasks} tasks ({n_miles} milestones) · {len(pred_rows)} r
       f"{len(rsrc_rows)} assignments · {len(udf_rows)} UDF values · {OUT.stat().st_size / 1048576:.1f} MB")
 neg = sum(1 for p in pred_rows if p[4] < 0)
 print(f"negative lags: {neg}")
+by_type = {}
+for utype, _, text in udf_rows:
+    if utype == 903:
+        by_type[text] = by_type.get(text, 0) + 1
+print("work types: " + " · ".join(f"{k} {v}" for k, v in sorted(by_type.items(), key=lambda kv: -kv[1])))

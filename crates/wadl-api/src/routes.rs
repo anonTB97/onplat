@@ -28,85 +28,205 @@ pub struct RouteSpec {
     pub sample_body: Option<&'static str>,
 }
 
-/// The full endpoint inventory, as the data it is.
-///
-/// A table rather than seventeen struct literals: every row is
+/// The endpoint inventory, as the data it is. Every row is
 /// `(method, path, tenant_scoped, sample_body)`, and adding an endpoint is
-/// adding a line — which is also what keeps this function inside the
-/// workspace's function-length lint as the API grows.
+/// adding a line. A module-level const rather than a literal inside
+/// [`inventory`], so the function stays within the workspace's
+/// function-length lint no matter how many endpoints the API grows — the
+/// table is data, and data has no line budget.
+const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
+    ("GET", "/health", false, None),
+    // Scoped (it requires and reflects a caller identity) but addresses no
+    // hull id, so the id-swap leak test has nothing to drive it with.
+    ("GET", "/api/whoami", true, None),
+    ("GET", "/api/vessels", true, None),
+    ("GET", "/api/vessels/:id", true, None),
+    ("GET", "/api/vessels/:id/compartments", true, None),
+    ("GET", "/api/vessels/:id/work-orders", true, None),
+    ("GET", "/api/vessels/:id/activities", true, None),
+    ("GET", "/api/vessels/:id/schedule-alternatives", true, None),
+    ("GET", "/api/vessels/:id/work-conflicts", true, None),
+    ("GET", "/api/vessels/:id/stranded-hours", true, None),
+    ("GET", "/api/vessels/:id/timeframe", true, None),
+    ("GET", "/api/vessels/:id/compartments/:no/state", true, None),
+    ("GET", "/api/vessels/:id/decks", true, None),
+    ("GET", "/api/vessels/:id/deck-states", true, None),
+    ("GET", "/api/vessels/:id/readiness", true, None),
+    (
+        "GET",
+        "/api/vessels/:id/compartments/:no/mitigations",
+        true,
+        None,
+    ),
+    ("GET", "/api/vessels/:id/leverage", true, None),
+    ("GET", "/api/vessels/:id/issues", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/issues/acknowledge",
+        true,
+        Some(r#"{"key":"issue:held:0-000-0-X","note":"leak test"}"#),
+    ),
+    ("GET", "/api/vessels/:id/ledger", true, None),
+    ("GET", "/api/vessels/:id/hazards", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/hazards",
+        true,
+        Some(r#"{"compartment":"3-148-2-E","kind":"hot_work_live","label":"leak test"}"#),
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/hazards/clear",
+        true,
+        Some(r#"{"compartment":"3-148-2-E","kind":"energised_bus","basis":"leak test"}"#),
+    ),
+    ("GET", "/api/vessels/:id/zones", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/zones",
+        true,
+        Some(r#"{"label":"leak test","bounds":[{"zone":"Z1","lo_frame":0,"hi_frame":1}]}"#),
+    ),
+    ("POST", "/api/vessels/:id/zones/revert", true, None),
+    ("GET", "/api/vessels/:id/zones/:zone/adjacent", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/budget-book",
+        true,
+        Some(
+            r#"{"label":"leak test","items":[{"code":"WI-0","title":"t","trade":"t","budget_hours":1,"earned_hours":0}]}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/budget-book/revert", true, None),
+    ("GET", "/api/vessels/:id/manning-book", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/manning-book",
+        true,
+        Some(r#"{"label":"leak test","crews":[{"trade":"Electrical","headcount":1}]}"#),
+    ),
+    ("POST", "/api/vessels/:id/manning-book/revert", true, None),
+    ("GET", "/api/vessels/:id/geometry", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/geometry",
+        true,
+        Some(
+            r#"{"label":"leak test","spaces":[{"compartment_no":"3-148-2-E","fwd_frame":148,"aft_frame":152}],"decks":[]}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/geometry/revert", true, None),
+    ("GET", "/api/vessels/:id/register", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/register",
+        true,
+        Some(
+            r#"{"label":"leak test","decks":[{"code":"3rd","label":"Third Deck","ordinal":3}],"spaces":[{"compartment_no":"3-148-2-E","name":"leak","deck_code":"3rd","zone":"Z5","category":"E"}]}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/register/revert", true, None),
+    ("GET", "/api/vessels/:id/couplings", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/couplings",
+        true,
+        Some(
+            r#"{"label":"leak test","edges":[{"from":"3-148-2-E","to":"3-160-2-Q","code":"deck_penetration"}]}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/couplings/revert", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/hazards/import",
+        true,
+        Some(
+            r#"{"label":"leak test","rows":[{"compartment":"3-148-2-E","kind":"stop_work","label":"leak"}]}"#,
+        ),
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/schedule-of-record",
+        true,
+        Some(r#"{"label":"leak test","xer":""}"#),
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/schedule-of-record/revert",
+        true,
+        None,
+    ),
+    ("GET", "/api/vessels/:id/field-map", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/field-map",
+        true,
+        Some(
+            r#"{"label":"leak test","map":{"compartment":{"source":"udf","name":"x"},"work_item":{"source":"none"},"work_type":{"source":"none"},"trade":{"source":"resource"},"projects":[],"placards_from_names":true}}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/field-map/revert", true, None),
+    ("GET", "/api/vessels/:id/schedule-runs", true, None),
+    ("GET", "/api/vessels/:id/schedule-runs/detail", true, None),
+    ("GET", "/api/vessels/:id/schedule-runs/diff", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/schedule-runs/serve",
+        true,
+        Some(r#"{"run_id":"00000000-0000-0000-0000-000000000000"}"#),
+    ),
+    ("GET", "/api/vessels/:id/yard-clock", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/yard-clock",
+        true,
+        Some(
+            r#"{"label":"leak test","clock":{"zone":"UTC","standard_offset_minutes":0,"daylight":null,"watch_minutes":240,"shifts":[{"name":"Days","start_minute":420,"length_minutes":510}]}}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/yard-clock/revert", true, None),
+    ("GET", "/api/vessels/:id/rule-table", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/rule-table",
+        true,
+        Some(
+            r#"{"label":"leak test","csv":"Rule ID,Name,Kind,Trigger condition,Propagation type,Hop depth,Resulting state,Authority document,Clearing condition,Who may clear,Config anchor,Open question for the safety authority\n"}"#,
+        ),
+    ),
+    ("POST", "/api/vessels/:id/rule-table/revert", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/rule-table/sign",
+        true,
+        Some(r#"{"statement":"leak test","table_hash":"leak test"}"#),
+    ),
+    ("GET", "/api/vessels/:id/schedule-proposals", true, None),
+    (
+        "POST",
+        "/api/vessels/:id/schedule-proposals",
+        true,
+        Some(r#"{"activity":"A00010","start_ms":1,"end_ms":2,"reason":"leak test"}"#),
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/schedule-proposals/withdraw",
+        true,
+        Some(r#"{"seq":1,"reason":"leak test"}"#),
+    ),
+    (
+        "POST",
+        "/api/vessels/:id/compartments/:no/decision",
+        true,
+        Some(r#"{"disposition":"rejected","option":{},"reason":"leak test"}"#),
+    ),
+    ("GET", "/api/vessels/:id/packages", true, None),
+    ("GET", "/api/vessels/:id/packages/:no", true, None),
+];
+
+/// The full endpoint inventory as typed rows — [`ROUTES`] materialized.
 #[must_use]
 pub fn inventory() -> Vec<RouteSpec> {
-    const ROUTES: &[(&str, &str, bool, Option<&str>)] = &[
-        ("GET", "/health", false, None),
-        // Scoped (it requires and reflects a caller identity) but addresses no
-        // hull id, so the id-swap leak test has nothing to drive it with.
-        ("GET", "/api/whoami", true, None),
-        ("GET", "/api/vessels", true, None),
-        ("GET", "/api/vessels/:id", true, None),
-        ("GET", "/api/vessels/:id/compartments", true, None),
-        ("GET", "/api/vessels/:id/work-orders", true, None),
-        ("GET", "/api/vessels/:id/activities", true, None),
-        ("GET", "/api/vessels/:id/schedule-alternatives", true, None),
-        ("GET", "/api/vessels/:id/work-conflicts", true, None),
-        ("GET", "/api/vessels/:id/stranded-hours", true, None),
-        ("GET", "/api/vessels/:id/timeframe", true, None),
-        ("GET", "/api/vessels/:id/compartments/:no/state", true, None),
-        ("GET", "/api/vessels/:id/decks", true, None),
-        ("GET", "/api/vessels/:id/deck-states", true, None),
-        ("GET", "/api/vessels/:id/readiness", true, None),
-        (
-            "GET",
-            "/api/vessels/:id/compartments/:no/mitigations",
-            true,
-            None,
-        ),
-        ("GET", "/api/vessels/:id/leverage", true, None),
-        ("GET", "/api/vessels/:id/issues", true, None),
-        (
-            "POST",
-            "/api/vessels/:id/issues/acknowledge",
-            true,
-            Some(r#"{"key":"issue:held:0-000-0-X","note":"leak test"}"#),
-        ),
-        ("GET", "/api/vessels/:id/ledger", true, None),
-        ("GET", "/api/vessels/:id/zones", true, None),
-        (
-            "POST",
-            "/api/vessels/:id/zones",
-            true,
-            Some(r#"{"label":"leak test","bounds":[{"zone":"Z1","lo_frame":0,"hi_frame":1}]}"#),
-        ),
-        ("POST", "/api/vessels/:id/zones/revert", true, None),
-        (
-            "POST",
-            "/api/vessels/:id/budget-book",
-            true,
-            Some(
-                r#"{"label":"leak test","items":[{"code":"WI-0","title":"t","trade":"t","budget_hours":1,"earned_hours":0}]}"#,
-            ),
-        ),
-        ("POST", "/api/vessels/:id/budget-book/revert", true, None),
-        (
-            "POST",
-            "/api/vessels/:id/schedule-of-record",
-            true,
-            Some(r#"{"label":"leak test","xer":""}"#),
-        ),
-        (
-            "POST",
-            "/api/vessels/:id/schedule-of-record/revert",
-            true,
-            None,
-        ),
-        (
-            "POST",
-            "/api/vessels/:id/compartments/:no/decision",
-            true,
-            Some(r#"{"disposition":"rejected","option":{},"reason":"leak test"}"#),
-        ),
-        ("GET", "/api/vessels/:id/packages", true, None),
-        ("GET", "/api/vessels/:id/packages/:no", true, None),
-    ];
     ROUTES
         .iter()
         .map(|&(method, path, tenant_scoped, sample_body)| RouteSpec {

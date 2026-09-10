@@ -26,6 +26,9 @@ RestartSec=2
 
 # ---- identity & configuration (environment-only, no config file) ----------
 Environment=WADL_PORT=8080
+# Widening WADL_BIND without WADL_PROXY_KEY refuses to boot: the dev header
+# shim binds loopback only (WADL_ALLOW_DEV_SHIM_OFF_LOOPBACK=yes overrides it,
+# for an isolated host — never behind a proxy).
 Environment=WADL_BIND=127.0.0.1
 Environment=WADL_STATIC_DIR=/opt/wadl/dist
 # Arm proxy-asserted identity: generate a key, share it only with the reverse

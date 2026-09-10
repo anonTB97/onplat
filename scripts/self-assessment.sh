@@ -79,6 +79,18 @@ else
   report WADL-SA-06 FAIL "whoami" "expected org $ORG in: $who"
 fi
 
+# --- WADL-SA-11: whoami names a person -------------------------------------
+# Through a proxy the binary must have resolved a person from x-wadl-person;
+# on the dev shim it synthesises one and labels it, which is a finding.
+person=$(printf '%s' "$who" | sed -n 's/.*"person":{"id":"\([^"]*\)","name":"[^"]*","source":"\([^"]*\)".*/\1 \2/p')
+person_id="${person%% *}"
+person_source="${person##* }"
+case "$person_source" in
+  proxy)       report WADL-SA-11 PASS "whoami names a person ($person_id)" ;;
+  dev-shim*)   report WADL-SA-11 WARN "dev shim person ($person_id)" "acceptable on loopback only; the proxy asserts x-wadl-person in production (docs/poam.md POAM-6)" ;;
+  *)           report WADL-SA-11 FAIL "person" "whoami named no person: $who" ;;
+esac
+
 # --- WADL-SA-07: refusals are audited (behavioral proxy) -------------------
 # The audit stream is stdout/journal, which this script cannot always read;
 # what it can prove is that the refusal path answers structured problem+json,

@@ -15,12 +15,16 @@ export function DiscardButton({
   what,
   title,
   onDiscard,
+  refusedBecause,
 }: {
   /** What gets thrown away, named: "the ingested schedule". */
   what: string;
   /** What the screens fall back to, for the tooltip. */
   title: string;
   onDiscard: () => void;
+  /** Set when this person may not revert: the button is greyed and the
+   *  sentence (the server's own refusal, worded ahead of time) is the tooltip. */
+  refusedBecause?: string;
 }) {
   const [armed, setArmed] = useState(false);
 
@@ -31,6 +35,21 @@ export function DiscardButton({
     return () => clearTimeout(t);
   }, [armed]);
 
+  if (refusedBecause) {
+    return (
+      <button
+        disabled
+        title={refusedBecause}
+        style={{
+          font: "inherit", fontSize: 10.5, cursor: "not-allowed",
+          padding: "2px 8px", borderRadius: 5, color: C.faint,
+          background: "transparent", border: `1px solid ${C.line}`, opacity: 0.7,
+        }}
+      >
+        Discard {what}…
+      </button>
+    );
+  }
   if (!armed) {
     return (
       <button

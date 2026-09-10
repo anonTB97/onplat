@@ -38,6 +38,8 @@ pub mod model;
 #[cfg(feature = "postgres")]
 pub mod pg;
 #[cfg(feature = "postgres")]
+pub mod pg_bootstrap;
+#[cfg(feature = "postgres")]
 pub mod pg_repo;
 pub mod repo;
 pub mod scope;
@@ -45,4 +47,10 @@ pub mod scope;
 pub use error::StoreError;
 pub use memory::InMemoryStore;
 pub use repo::Repositories;
-pub use scope::TenantScope;
+pub use scope::{Actor, ActorSource, TenantScope};
+
+/// The shape version stamped into every stored document (`schema_version`
+/// in the jsonb). Bump it when a document's fields change meaning, so a
+/// reader can tell a document written before the change from one written
+/// after — and refuse or migrate rather than guess.
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 1;

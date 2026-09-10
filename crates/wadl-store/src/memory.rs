@@ -16,7 +16,7 @@ use wadl_domain::ids::{ActivityId, CouplingTypeId, OrgId, SegmentId, VesselId, W
 use wadl_domain::time::{Timestamp, Window};
 use wadl_domain::units::{HopDepth, ManHours};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
-use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
+use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleEntry, RuleSet};
 use wadl_plan::{Package, Segment, SpaceWork};
 
 use crate::error::StoreError;
@@ -276,6 +276,11 @@ struct AuditRow {
     occurred_at_ms: i64,
     prev_hash: Option<Vec<u8>>,
     entry_hash: Vec<u8>,
+    /// The person the scope acted as. Always present here: this store has
+    /// only ever written format-2 rows, so a `None` would be a bug, not a
+    /// row from before migration 0017.
+    actor_id: String,
+    actor_name: String,
 }
 
 /// The seeded in-memory store.
@@ -311,6 +316,62 @@ pub struct InMemoryStore {
     /// An ingested budget book per hull. When present, reconciliation holds
     /// the register's hours to ITS budgets instead of the seeded work items'.
     budget_book: std::sync::RwLock<BTreeMap<VesselId, BudgetBook>>,
+    /// An ingested manning book per hull — the supply side of crew planning.
+    manning_book: std::sync::RwLock<BTreeMap<VesselId, ManningBook>>,
+    /// The yard clock per hull. Seeded for the three carriers (Norfolk) so
+    /// the seed world reads yard-local; absent, every clock is UTC and the
+    /// API says so.
+    yard_clock: std::sync::RwLock<BTreeMap<VesselId, YardClockDoc>>,
+    /// The P6 field map per hull. Absent, the default convention reads
+    /// the hull's exports.
+    field_map: std::sync::RwLock<BTreeMap<VesselId, FieldMapDoc>>,
+    /// The safety authority's rule table per hull, compiled. Absent, the
+    /// seed is in force.
+    rule_table: std::sync::RwLock<BTreeMap<VesselId, RuleTableDoc>>,
+    /// Every schedule import per hull, oldest first; the document of the
+    /// newest [`MAX_RUN_DOCS`] kept, older ones summary and report only.
+    /// Lock order, where several are taken: runs, then the schedule of
+    /// record, then the served pointer.
+    schedule_runs: std::sync::RwLock<BTreeMap<VesselId, Vec<crate::model::ScheduleRun>>>,
+    /// Which run's document the schedule of record IS, per hull. Absent
+    /// when the served schedule is not a run's.
+    served_run: std::sync::RwLock<BTreeMap<VesselId, Uuid>>,
+    /// An ingested geometry register per hull — surveyed extents + deck bands.
+    geometry: std::sync::RwLock<BTreeMap<VesselId, GeometryRegister>>,
+    /// Administrative clearances recorded against the seeded hazards, keyed by
+    /// what the API clears with: hull, origin space, hazard kind. The seed rows
+    /// stay immutable — a clearance is a second fact laid over the first, which
+    /// is the same shape the PostgreSQL store gives it (`cleared_at` set,
+    /// nothing deleted). A `Vec` because the whole hull carries a handful.
+    cleared_hazards: std::sync::Mutex<Vec<HazardClearance>>,
+    /// The hull's own compartment register, once ingested — replaces the seed.
+    compartment_register: std::sync::RwLock<BTreeMap<VesselId, CompartmentRegister>>,
+    /// The hull's own coupling register, once ingested — replaces the seed.
+    coupling_register: std::sync::RwLock<BTreeMap<VesselId, CouplingRegister>>,
+    /// Field conditions raised through the API after boot, alongside the
+    /// seeded rows: the same fact shape, owned strings, and the same
+    /// clearance list applies to them.
+    raised_hazards: std::sync::Mutex<Vec<RaisedHazard>>,
+}
+
+/// A hazard raised at run time (see [`InMemoryStore::raised_hazards`]).
+struct RaisedHazard {
+    vessel: VesselId,
+    origin: String,
+    kind: HazardKind,
+    since_ms: i64,
+    label: String,
+}
+
+/// One recorded administrative clearance (see [`InMemoryStore::cleared_hazards`]).
+struct HazardClearance {
+    vessel: VesselId,
+    origin: String,
+    kind: HazardKind,
+    /// When the clearing authority ended the fact. A read at an instant
+    /// before this still serves the hazard — the clearance is a fact with a
+    /// time of its own, not a retroactive deletion.
+    cleared_at_ms: i64,
 }
 
 /// An ingested schedule of record, in the store's own read models.
@@ -319,7 +380,7 @@ pub struct InMemoryStore {
 /// reconciled-by-construction and becomes what the scheduler actually said —
 /// at which point reconciliation is a *report*, computed by the API against
 /// the work orders, rather than a property.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScheduleOfRecord {
     /// Where it came from, e.g. `CVN73-PIA26.xer` — surfaced to the reader so
     /// an ingested register never presents as the generated one.
@@ -328,6 +389,151 @@ pub struct ScheduleOfRecord {
     pub activities: Vec<ActivitySummary>,
     /// The dependency edges.
     pub edges: Vec<ScheduleEdgeSummary>,
+    /// Which clock the export's wall times were read in when this record
+    /// was made (`America/New_York · CVN73-clock.csv`). `None` for a record
+    /// stored before the yard clock existed — read as "unknown", never as UTC.
+    #[serde(default)]
+    pub parsed_in: Option<String>,
+}
+
+/// The P6 field map as a stored document: which export fields carry the
+/// compartment, the work item, the work type and the trade, plus where it
+/// came from. Held as the JSON value it is — the store never depends on the
+/// ingest crate, whose `FieldMap` type is the one that validates it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FieldMapDoc {
+    /// `CVN73-fieldmap.json`, or the door's label.
+    pub label: String,
+    /// The map, in the shape `wadl_ingest::field_map::FieldMap` serializes.
+    pub map: serde_json::Value,
+}
+
+/// The safety authority's rule table as a stored document: the CSV's cells
+/// as they arrived, the entries they compiled to, the hash the signature is
+/// of, and the signature when there is one. The entries are what
+/// `rules_in_force` serves; the cells are what the door exports back, so
+/// the yard reads its own words. Version ids are content-addressed by the
+/// door and travel inside `entries`; the 0004 rule tables keep serving the
+/// seed and are not mirrored (migration 0019's header says so).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuleTableDoc {
+    /// `CVN73-rule-table.csv`, or the door's label.
+    pub label: String,
+    /// The header cells, as parsed (12 handoff + compile columns + version).
+    #[serde(default)]
+    pub header: Vec<String>,
+    /// Every data row's cells, file order, padded to the header.
+    pub rows: Vec<Vec<String>>,
+    /// The compiled entries, file order — the set in force.
+    pub entries: Vec<RuleEntry>,
+    /// The hash of the table's text the door computed; a signature is of
+    /// this, and a commit that changes it clears the signature.
+    pub table_hash: String,
+    /// The safety authority's signature, once given.
+    #[serde(default)]
+    pub signoff: Option<SignOff>,
+}
+
+/// The safety authority's signature on a rule table: who, when, of what.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SignOff {
+    /// The wall-clock instant of the signature.
+    pub signed_at_ms: i64,
+    /// The signer's person id (the `x-wadl-person` the proxy asserts).
+    pub signer_id: String,
+    /// The signer's display name as asserted.
+    pub signer_name: String,
+    /// What they signed, in their words.
+    pub statement: String,
+    /// The `table_hash` at signing — the document's, or the signature is void.
+    pub table_hash: String,
+    /// The version ids signed (every entry in force when `rows` was `null`).
+    pub rows: Vec<String>,
+    /// The ledger seq of the `RULE_TABLE_SIGNED` row.
+    pub ledger_seq: i64,
+}
+
+/// How many runs the in-memory store keeps the DOCUMENT of. Every run keeps
+/// its summary and report forever; the rows of a run older than this are
+/// dropped, because the full export is ~2 MB a run and the demo store is a
+/// process, not a disk. PostgreSQL keeps every document.
+pub const MAX_RUN_DOCS: usize = 12;
+
+/// A run id from the instant the caller stamped the run with: a version-7
+/// UUID, time-ordered for the index, whose random tail keeps two runs in
+/// the same millisecond apart. Minted from the given instant, never from a
+/// clock of the store's own.
+#[must_use]
+pub(crate) fn mint_run_id(imported_at_ms: i64) -> Uuid {
+    let secs = u64::try_from(imported_at_ms.div_euclid(1000)).unwrap_or(0);
+    let nanos = u32::try_from(imported_at_ms.rem_euclid(1000)).unwrap_or(0) * 1_000_000;
+    Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, secs, nanos))
+}
+
+/// The yard clock as a stored document: the clock plus where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YardClockDoc {
+    /// `CVN73-clock.csv`, or `seed · Norfolk` for the seeded world.
+    pub label: String,
+    /// The clock itself.
+    pub clock: wadl_domain::civil::YardClock,
+}
+
+impl YardClockDoc {
+    /// The seed world's clock: Norfolk, US daylight rule, four-hour
+    /// watches, Days/Swing/Mids. What `reference/cvn73/CVN73-clock.csv` says,
+    /// in memory, so the 24-space hull reads yard-local too.
+    #[must_use]
+    pub fn norfolk_seed() -> Self {
+        use wadl_domain::civil::{DaylightRule, ShiftDef, Transition, YardClock};
+        Self {
+            label: "seed · Norfolk".to_owned(),
+            clock: YardClock {
+                zone: "America/New_York".to_owned(),
+                standard_offset_minutes: -300,
+                daylight: Some(DaylightRule {
+                    offset_minutes: -240,
+                    start: Transition {
+                        month: 3,
+                        week: 2,
+                        weekday: 0,
+                        minute_of_day: 120,
+                    },
+                    end: Transition {
+                        month: 11,
+                        week: 1,
+                        weekday: 0,
+                        minute_of_day: 120,
+                    },
+                }),
+                watch_minutes: 240,
+                shifts: vec![
+                    ShiftDef {
+                        name: "Days".to_owned(),
+                        start_minute: 420,
+                        length_minutes: 510,
+                    },
+                    ShiftDef {
+                        name: "Swing".to_owned(),
+                        start_minute: 930,
+                        length_minutes: 510,
+                    },
+                    ShiftDef {
+                        name: "Mids".to_owned(),
+                        start_minute: 0,
+                        length_minutes: 420,
+                    },
+                ],
+            },
+        }
+    }
+
+    /// `America/New_York · CVN73-clock.csv` — how a schedule of record
+    /// names the clock it was parsed in.
+    #[must_use]
+    pub fn parsed_in_label(&self) -> String {
+        format!("{} · {}", self.clock.zone, self.label)
+    }
 }
 
 /// An ingested zone chart: authored frame bounds per zone.
@@ -356,6 +562,238 @@ pub struct BudgetBook {
     pub label: String,
     /// One line per work item.
     pub items: Vec<crate::model::BudgetItemSummary>,
+}
+
+/// An ingested geometry register: surveyed compartment extents and deck
+/// coverage bands (see `docs/geometry-accuracy.md`).
+///
+/// Deliberately NOT seeded: a surveyed position is a yard's or a drawing's
+/// claim, and claims enter through the import door or not at all. Without one
+/// the boards draw placard-parsed pins and say so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeometryRegister {
+    /// Where it came from, e.g. `CVN73-CA-extract.csv`.
+    pub label: String,
+    /// One row per surveyed space.
+    pub spaces: Vec<crate::model::SpaceGeometrySummary>,
+    /// Zero or more coverage bands per deck.
+    pub decks: Vec<crate::model::DeckCoverageSummary>,
+}
+
+/// An ingested compartment register: the hull's own decks and spaces.
+///
+/// Once one is set for a hull it IS the register — the seeded rows stop being
+/// served — because a yard onboarding its ship is replacing a demo, not
+/// annotating it. Reverting restores the seed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompartmentRegister {
+    /// Where it came from, e.g. `CVN73-compartment-list.csv`.
+    pub label: String,
+    /// The decks, with the ordinal "directly above" is read from.
+    pub decks: Vec<crate::model::RegisterDeckSummary>,
+    /// One row per space.
+    pub spaces: Vec<crate::model::RegisterSpaceSummary>,
+}
+
+/// An ingested coupling register: the physical paths a hazard can travel.
+///
+/// Same replacement semantics as the compartment register: when one is set,
+/// the cascade walks these edges and only these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CouplingRegister {
+    /// Where it came from.
+    pub label: String,
+    /// Directed rows; `symmetric` rows are expanded when the graph is built.
+    pub edges: Vec<crate::model::CouplingRowSummary>,
+}
+
+/// The coupling types a hull's rules bind to, by code: the traversal's type
+/// id, what the coupling carries, and how far it reaches. The seed's own
+/// edges use the same ids, so an ingested register and the seed agree.
+const COUPLING_TYPES: &[(&str, u128, &[Propagation], u8)] = &[
+    (
+        "deck_penetration",
+        0x01,
+        &[Propagation::Heat, Propagation::Vapour],
+        1,
+    ),
+    (
+        "shared_bulkhead",
+        0x02,
+        &[Propagation::Heat, Propagation::Vapour],
+        2,
+    ),
+    ("exhaust_trunk", 0x03, &[Propagation::Vapour], 3),
+    ("electrical_bus", 0x04, &[Propagation::Energy], 1),
+];
+
+/// A propagation's name as documents and the database spell it.
+#[must_use]
+pub const fn propagation_name(p: Propagation) -> &'static str {
+    match p {
+        Propagation::Heat => "heat",
+        Propagation::Vapour => "vapour",
+        Propagation::Energy => "energy",
+        Propagation::Load => "load",
+        Propagation::Egress => "egress",
+    }
+}
+
+/// The inverse of [`propagation_name`].
+///
+/// # Errors
+/// [`StoreError::Backend`] for a name the engine does not know.
+pub fn propagation_from_name(raw: &str) -> Result<Propagation, StoreError> {
+    match raw {
+        "heat" => Ok(Propagation::Heat),
+        "vapour" => Ok(Propagation::Vapour),
+        "energy" => Ok(Propagation::Energy),
+        "load" => Ok(Propagation::Load),
+        "egress" => Ok(Propagation::Egress),
+        other => Err(StoreError::Backend(format!(
+            "unknown propagation {other:?}"
+        ))),
+    }
+}
+
+/// The demo store's coupling types, as the trait serves them.
+#[must_use]
+pub fn seeded_coupling_types() -> Vec<crate::model::CouplingTypeSummary> {
+    COUPLING_TYPES
+        .iter()
+        .map(
+            |(code, id_n, propagates, reach)| crate::model::CouplingTypeSummary {
+                id: CouplingTypeId::from_uuid(id(*id_n)),
+                code: (*code).to_owned(),
+                propagates: propagates
+                    .iter()
+                    .map(|p| propagation_name(*p).to_owned())
+                    .collect(),
+                max_reach: *reach,
+            },
+        )
+        .collect()
+}
+
+/// The register's spaces as the API serves them. Shared by both stores so an
+/// ingested register reads the same whichever backend holds it.
+#[must_use]
+pub fn register_compartments(reg: &CompartmentRegister) -> Vec<CompartmentSummary> {
+    let ordinals: BTreeMap<&str, i32> = reg
+        .decks
+        .iter()
+        .map(|d| (d.code.as_str(), d.ordinal))
+        .collect();
+    let mut rows: Vec<CompartmentSummary> = reg
+        .spaces
+        .iter()
+        .map(|s| {
+            let compartment_no = CompartmentNo::new(s.compartment_no.as_str());
+            let usn = compartment_no.parse_usn();
+            let authored = s.frame.is_some();
+            CompartmentSummary {
+                frame: s.frame.or_else(|| usn.as_ref().map(|u| u.frame.get())),
+                fwd_frame: None,
+                aft_frame: None,
+                side: s.side.clone().unwrap_or_else(|| {
+                    usn.as_ref().map_or_else(
+                        || "unknown".to_owned(),
+                        |u| format!("{:?}", u.side).to_lowercase(),
+                    )
+                }),
+                geometry_source: if authored {
+                    "register"
+                } else if usn.is_some() {
+                    "parsed"
+                } else {
+                    "unknown"
+                }
+                .to_owned(),
+                compartment_no,
+                name: s.name.clone(),
+                deck_code: s.deck_code.clone(),
+                deck_ordinal: ordinals.get(s.deck_code.as_str()).copied().unwrap_or(0),
+                zone: s.zone.clone(),
+                category: s.category.clone(),
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        a.deck_ordinal
+            .cmp(&b.deck_ordinal)
+            .then_with(|| a.compartment_no.cmp(&b.compartment_no))
+    });
+    rows
+}
+
+/// The register's decks as the API serves them, with the space count.
+#[must_use]
+pub fn register_decks(reg: &CompartmentRegister) -> Vec<DeckSummary> {
+    let mut decks: Vec<DeckSummary> = reg
+        .decks
+        .iter()
+        .map(|d| DeckSummary {
+            code: d.code.clone(),
+            label: d.label.clone(),
+            ordinal: d.ordinal,
+            compartment_count: reg.spaces.iter().filter(|s| s.deck_code == d.code).count(),
+        })
+        .collect();
+    decks.sort_by_key(|d| d.ordinal);
+    decks
+}
+
+/// The coupling register as the engine's graph: every row resolved against
+/// the hull's coupling types, symmetric rows stored both ways.
+///
+/// # Errors
+/// [`StoreError::Backend`] when a row names a coupling type the hull does not
+/// have — the door refuses that before storing, so this is a consistency
+/// check, not a validation surface.
+pub fn register_graph(
+    reg: &CouplingRegister,
+    types: &[crate::model::CouplingTypeSummary],
+) -> Result<AdjacencyGraph, StoreError> {
+    let mut edges = Vec::with_capacity(reg.edges.len() * 2);
+    for row in &reg.edges {
+        let ty = types.iter().find(|t| t.code == row.code).ok_or_else(|| {
+            StoreError::Backend(format!(
+                "coupling register names type {:?}, which this hull does not have",
+                row.code
+            ))
+        })?;
+        let propagates = ty
+            .propagates
+            .iter()
+            .map(|p| propagation_from_name(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let edge = |from: &str, to: &str| CouplingEdge {
+            from: CompartmentNo::new(from),
+            to: CompartmentNo::new(to),
+            coupling_type: ty.id,
+            code: CouplingCode::new(row.code.as_str()),
+            propagates: propagates.clone(),
+            max_reach: HopDepth::new(ty.max_reach),
+        };
+        edges.push(edge(&row.from, &row.to));
+        if row.symmetric {
+            edges.push(edge(&row.to, &row.from));
+        }
+    }
+    Ok(AdjacencyGraph::new(edges))
+}
+
+/// An ingested manning book: the crews the yard actually has, per trade.
+///
+/// Deliberately NOT seeded, same as the zone chart: without one the boards
+/// show demand only and say so. A headcount is a yard's claim, and it arrives
+/// through the import door or not at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManningBook {
+    /// Where it came from, e.g. `CVN73-manning.csv`.
+    pub label: String,
+    /// One line per trade.
+    pub crews: Vec<crate::model::ManningCrewSummary>,
 }
 
 /// The identifiers of the seeded demo world, handed back so the API and tests
@@ -451,8 +889,58 @@ impl InMemoryStore {
             schedule_of_record: std::sync::RwLock::new(BTreeMap::new()),
             zone_register: std::sync::RwLock::new(BTreeMap::new()),
             budget_book: std::sync::RwLock::new(BTreeMap::new()),
+            manning_book: std::sync::RwLock::new(BTreeMap::new()),
+            yard_clock: std::sync::RwLock::new(
+                [world.cvn73, world.cvn71, world.cvn75]
+                    .into_iter()
+                    .map(|v| (v, YardClockDoc::norfolk_seed()))
+                    .collect(),
+            ),
+            field_map: std::sync::RwLock::new(BTreeMap::new()),
+            rule_table: std::sync::RwLock::new(BTreeMap::new()),
+            schedule_runs: std::sync::RwLock::new(BTreeMap::new()),
+            served_run: std::sync::RwLock::new(BTreeMap::new()),
+            geometry: std::sync::RwLock::new(BTreeMap::new()),
+            cleared_hazards: std::sync::Mutex::new(Vec::new()),
+            compartment_register: std::sync::RwLock::new(BTreeMap::new()),
+            coupling_register: std::sync::RwLock::new(BTreeMap::new()),
+            raised_hazards: std::sync::Mutex::new(Vec::new()),
         };
         (store, world)
+    }
+
+    /// Every hazard recorded on the hull — seeded and raised — before any
+    /// clearance is applied. The one place both sources are joined, so the
+    /// live read and the clearance cannot disagree about what exists.
+    fn all_hazards(&self, vessel: VesselId) -> Result<Vec<Hazard>, StoreError> {
+        let raised = self
+            .raised_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("raised-hazard lock poisoned".into()))?;
+        Ok(self
+            .hazards
+            .iter()
+            .filter(|h| h.vessel == vessel)
+            .map(|h| Hazard {
+                origin: CompartmentNo::new(h.origin),
+                kind: h.kind,
+                since: self.at_minutes(h.since_min),
+                label: h.label.to_owned(),
+                ended: None,
+            })
+            .chain(
+                raised
+                    .iter()
+                    .filter(|h| h.vessel == vessel)
+                    .map(|h| Hazard {
+                        origin: CompartmentNo::new(h.origin.as_str()),
+                        kind: h.kind,
+                        since: Timestamp::from_epoch_millis(h.since_ms),
+                        label: h.label.clone(),
+                        ended: None,
+                    }),
+            )
+            .collect())
     }
 
     /// An instant `minutes` either side of the anchor.
@@ -522,6 +1010,7 @@ impl InMemoryStore {
                     status: status_of(*budget, *earned),
                     is_milestone: false,
                     source_ref: w.source_ref.to_owned(),
+                    work_type: None,
                 });
             }
         }
@@ -579,6 +1068,7 @@ impl InMemoryStore {
                     status: status_of(*budget, *earned),
                     is_milestone: false,
                     source_ref: format!("{} footprint", sp.package_code),
+                    work_type: None,
                 });
             }
         }
@@ -612,6 +1102,7 @@ impl InMemoryStore {
                 status: ActivityStatus::NotStarted,
                 is_milestone: true,
                 source_ref: "availability key events".to_owned(),
+                work_type: None,
             });
         }
     }
@@ -1408,6 +1899,162 @@ impl InMemoryStore {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(vessel, sor);
+        // A document set without a run is not a run's: the pointer clears.
+        self.served_run
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+    }
+
+    /// Records a schedule run and serves it, unscoped — the boot loader's
+    /// path before any tenant exists. Same contract as the scoped
+    /// [`Repositories::commit_schedule_run`]: assigns `run_id` and `seq`,
+    /// moves the served pointer, keeps the document of the newest
+    /// [`MAX_RUN_DOCS`] runs.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] when the run carries no document.
+    pub fn load_schedule_run(
+        &self,
+        vessel: VesselId,
+        run: crate::model::ScheduleRun,
+    ) -> Result<crate::model::ScheduleRunSummary, StoreError> {
+        let Some(doc) = run.doc else {
+            return Err(StoreError::Backend(
+                "a schedule run must carry its document".to_owned(),
+            ));
+        };
+        let mut runs = self
+            .schedule_runs
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let list = runs.entry(vessel).or_default();
+        let seq = i64::try_from(list.len())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let run_id = mint_run_id(run.summary.imported_at_ms);
+        let summary = crate::model::ScheduleRunSummary {
+            run_id,
+            seq,
+            served: true,
+            schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+            ..run.summary
+        };
+        self.schedule_of_record
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc.clone());
+        self.served_run
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, run_id);
+        list.push(crate::model::ScheduleRun {
+            summary: summary.clone(),
+            report: run.report,
+            doc: Some(doc),
+        });
+        let evict = list.len().saturating_sub(MAX_RUN_DOCS);
+        for old in list.iter_mut().take(evict) {
+            old.doc = None;
+        }
+        Ok(summary)
+    }
+
+    /// The tenant a hull belongs to, unscoped — for boot wiring, where the
+    /// XER loader records which org a boot run was imported under before
+    /// any request scope exists. `None` for a hull the seed does not carry.
+    #[must_use]
+    pub fn org_of(&self, vessel: VesselId) -> Option<OrgId> {
+        self.vessels.iter().find(|v| v.id == vessel).map(|v| v.org)
+    }
+
+    /// The hull's field map document, unscoped — for boot wiring, where
+    /// the XER loader needs the map before any tenant exists.
+    #[must_use]
+    pub fn field_map_of(&self, vessel: VesselId) -> Option<FieldMapDoc> {
+        self.field_map
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
+
+    /// The hull's rule table document, unscoped — for boot wiring.
+    #[must_use]
+    pub fn rule_table_of(&self, vessel: VesselId) -> Option<RuleTableDoc> {
+        self.rule_table
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
+
+    /// The hazards bearing on a decision at `at`: not cleared by `at`, or
+    /// cleared within the last `tail` minutes, each carrying `ended` = its
+    /// clearance instant. The same read contract as the PostgreSQL store's
+    /// `cleared_at IS NULL OR cleared_at + tail > $at`: a hazard cleared by
+    /// the read instant (and past the tail) stops being served, and its
+    /// record lives on in the clearance list and the ledger. A read at an
+    /// instant before the clearance still sees it, `ended` set to the later
+    /// instant — the time control must be able to show what was really held
+    /// then, and the engine prices a clearance that has not happened yet as
+    /// no clearance.
+    fn bearing_on(
+        &self,
+        vessel: VesselId,
+        at: Timestamp,
+        tail: wadl_domain::units::Minutes,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        let cleared = self
+            .cleared_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
+        let at_ms = at.epoch_millis();
+        let tail_ms = tail.get().saturating_mul(MS_PER_MIN);
+        Ok(self
+            .all_hazards(vessel)?
+            .into_iter()
+            .filter_map(|mut h| {
+                let ended = cleared
+                    .iter()
+                    .find(|c| {
+                        c.vessel == vessel && c.origin == h.origin.as_str() && c.kind == h.kind
+                    })
+                    .map(|c| c.cleared_at_ms);
+                match ended {
+                    Some(e) if e.saturating_add(tail_ms) <= at_ms => None,
+                    _ => {
+                        h.ended = ended.map(Timestamp::from_epoch_millis);
+                        Some(h)
+                    }
+                }
+            })
+            .collect())
+    }
+
+    /// Whether `run_id` is the served run on the hull.
+    fn is_served_run(&self, vessel: VesselId, run_id: Uuid) -> bool {
+        self.served_run
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            == Some(&run_id)
+    }
+
+    /// One run whole, with its `served` flag current.
+    fn run_of(&self, vessel: VesselId, run_id: Uuid) -> Option<crate::model::ScheduleRun> {
+        let runs = self
+            .schedule_runs
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut run = runs
+            .get(&vessel)?
+            .iter()
+            .find(|r| r.summary.run_id == run_id)
+            .cloned()?;
+        drop(runs);
+        run.summary.served = self.is_served_run(vessel, run_id);
+        Some(run)
     }
 
     fn ingested(&self, vessel: VesselId) -> Option<ScheduleOfRecord> {
@@ -1416,6 +2063,24 @@ impl InMemoryStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&vessel)
             .cloned()
+    }
+
+    /// The hull's yard clock document, unscoped — for boot wiring, where the
+    /// XER loader needs the clock before any tenant exists.
+    #[must_use]
+    pub fn yard_clock_doc_of(&self, vessel: VesselId) -> Option<YardClockDoc> {
+        self.yard_clock
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned()
+    }
+
+    /// The clock in effect for a hull: its document's, or UTC.
+    #[must_use]
+    pub fn yard_clock_of(&self, vessel: VesselId) -> wadl_domain::civil::YardClock {
+        self.yard_clock_doc_of(vessel)
+            .map_or_else(wadl_domain::civil::YardClock::utc, |d| d.clock)
     }
 
     fn ingested_zones(&self, vessel: VesselId) -> Option<ZoneRegister> {
@@ -1500,6 +2165,16 @@ fn schedule_edges_from(activities: &[ActivitySummary]) -> Vec<ScheduleEdgeSummar
 
 #[async_trait::async_trait]
 impl Repositories for InMemoryStore {
+    async fn health(&self) -> crate::model::StoreHealth {
+        crate::model::StoreHealth {
+            backend: "memory".to_owned(),
+            reachable: true,
+            schema_version: None,
+            document_schema_version: crate::DOCUMENT_SCHEMA_VERSION,
+            detail: None,
+        }
+    }
+
     async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary> {
         self.vessels
             .iter()
@@ -1523,6 +2198,15 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<Vec<CompartmentSummary>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
+        // The yard's own register, once ingested, IS the register.
+        if let Some(reg) = self
+            .compartment_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+        {
+            return Ok(register_compartments(reg));
+        }
         Ok(self
             .compartments
             .iter()
@@ -1537,6 +2221,8 @@ impl Repositories for InMemoryStore {
                 let usn = compartment_no.parse_usn();
                 CompartmentSummary {
                     frame: usn.as_ref().map(|u| u.frame.get()),
+                    fwd_frame: None,
+                    aft_frame: None,
                     side: usn.as_ref().map_or_else(
                         || "unknown".to_owned(),
                         |u| format!("{:?}", u.side).to_lowercase(),
@@ -1640,6 +2326,11 @@ impl Repositories for InMemoryStore {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&vessel);
+        // The runs stay: history is history. Only the pointer clears.
+        self.served_run
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
         Ok(())
     }
 
@@ -1650,6 +2341,225 @@ impl Repositories for InMemoryStore {
     ) -> Result<Option<String>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
         Ok(self.ingested(vessel).map(|sor| sor.label))
+    }
+
+    async fn schedule_parsed_in(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<String>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.ingested(vessel).and_then(|sor| sor.parsed_in))
+    }
+
+    async fn yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<YardClockDoc>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.yard_clock_doc_of(vessel))
+    }
+
+    async fn set_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: YardClockDoc,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.yard_clock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc);
+        Ok(())
+    }
+
+    async fn clear_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.yard_clock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<FieldMapDoc>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.field_map_of(vessel))
+    }
+
+    async fn set_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: FieldMapDoc,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.field_map
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc);
+        Ok(())
+    }
+
+    async fn clear_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.field_map
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<RuleTableDoc>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.rule_table_of(vessel))
+    }
+
+    async fn set_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: RuleTableDoc,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.rule_table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc);
+        Ok(())
+    }
+
+    async fn clear_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.rule_table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn sign_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        signoff: SignOff,
+    ) -> Result<RuleTableDoc, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let mut tables = self
+            .rule_table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let doc = tables.get_mut(&vessel).ok_or(StoreError::NotFound)?;
+        doc.signoff = Some(signoff);
+        Ok(doc.clone())
+    }
+
+    async fn commit_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run: crate::model::ScheduleRun,
+    ) -> Result<crate::model::ScheduleRunSummary, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.load_schedule_run(vessel, run)
+    }
+
+    async fn list_schedule_runs(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<crate::model::ScheduleRunSummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let summaries: Vec<crate::model::ScheduleRunSummary> = self
+            .schedule_runs
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .map(|runs| runs.iter().rev().map(|r| r.summary.clone()).collect())
+            .unwrap_or_default();
+        Ok(summaries
+            .into_iter()
+            .map(|mut s| {
+                s.served = self.is_served_run(vessel, s.run_id);
+                s
+            })
+            .collect())
+    }
+
+    async fn schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: Uuid,
+    ) -> Result<Option<crate::model::ScheduleRun>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self.run_of(vessel, run_id))
+    }
+
+    async fn serve_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: Uuid,
+    ) -> Result<crate::model::ScheduleRunSummary, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let run = self.run_of(vessel, run_id).ok_or(StoreError::NotFound)?;
+        let Some(doc) = run.doc else {
+            return Err(StoreError::Backend(format!(
+                "run {run_id} is older than the last {MAX_RUN_DOCS} runs — its document is no longer held and cannot be served again"
+            )));
+        };
+        self.schedule_of_record
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, doc);
+        self.served_run
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, run_id);
+        Ok(crate::model::ScheduleRunSummary {
+            served: true,
+            ..run.summary
+        })
+    }
+
+    async fn served_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::model::ScheduleRunSummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let served = self
+            .served_run
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .copied();
+        Ok(served
+            .and_then(|id| self.run_of(vessel, id))
+            .map(|r| r.summary))
     }
 
     async fn zone_register(
@@ -1718,6 +2628,179 @@ impl Repositories for InMemoryStore {
     ) -> Result<(), StoreError> {
         self.scoped_vessel(scope, vessel)?;
         self.budget_book
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<GeometryRegister>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .geometry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned())
+    }
+
+    async fn set_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: GeometryRegister,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.geometry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, register);
+        Ok(())
+    }
+
+    async fn clear_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.geometry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<CompartmentRegister>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .compartment_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned())
+    }
+
+    async fn set_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: CompartmentRegister,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.compartment_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, register);
+        Ok(())
+    }
+
+    async fn clear_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.compartment_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<CouplingRegister>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .coupling_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned())
+    }
+
+    async fn set_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: CouplingRegister,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.coupling_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, register);
+        Ok(())
+    }
+
+    async fn clear_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.coupling_register
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&vessel);
+        Ok(())
+    }
+
+    async fn coupling_types(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<crate::model::CouplingTypeSummary>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(seeded_coupling_types())
+    }
+
+    async fn manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ManningBook>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        Ok(self
+            .manning_book
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+            .cloned())
+    }
+
+    async fn set_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        book: ManningBook,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.manning_book
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(vessel, book);
+        Ok(())
+    }
+
+    async fn clear_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.manning_book
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&vessel);
@@ -1813,8 +2896,17 @@ impl Repositories for InMemoryStore {
             .iter()
             .rfind(|r| r.vessel == vessel)
             .map(|r| r.entry_hash.clone());
-        let entry_hash =
-            crate::ledger::compute_hash(prev.as_deref(), action, detail, occurred_at_ms);
+        // Format 2: the person is in the hash. `scope.actor` is never absent
+        // — a scope nobody named acts as `system:unattributed`.
+        let actor = &scope.actor;
+        let entry_hash = crate::ledger::compute_hash_v2(
+            prev.as_deref(),
+            action,
+            detail,
+            occurred_at_ms,
+            &actor.id,
+            &actor.name,
+        );
         let seq = i64::try_from(log.len()).unwrap_or(i64::MAX) + 1;
         log.push(AuditRow {
             vessel,
@@ -1824,6 +2916,8 @@ impl Repositories for InMemoryStore {
             occurred_at_ms,
             prev_hash: prev.clone(),
             entry_hash: entry_hash.clone(),
+            actor_id: actor.id.clone(),
+            actor_name: actor.name.clone(),
         });
         Ok(AuditRecord {
             seq,
@@ -1833,6 +2927,9 @@ impl Repositories for InMemoryStore {
             occurred_at_ms,
             entry_hash: hex::encode(entry_hash),
             prev_hash: prev.map(hex::encode),
+            actor_id: Some(actor.id.clone()),
+            actor_name: Some(actor.name.clone()),
+            chain_version: crate::ledger::CHAIN_VERSION,
         })
     }
 
@@ -1862,6 +2959,9 @@ impl Repositories for InMemoryStore {
                 occurred_at_ms: r.occurred_at_ms,
                 entry_hash: hex::encode(&r.entry_hash),
                 prev_hash: r.prev_hash.as_ref().map(hex::encode),
+                actor_id: Some(r.actor_id.clone()),
+                actor_name: Some(r.actor_name.clone()),
+                chain_version: crate::ledger::CHAIN_VERSION,
             })
             .rev()
             .collect())
@@ -1888,6 +2988,14 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<Vec<DeckSummary>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
+        if let Some(reg) = self
+            .compartment_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+        {
+            return Ok(register_decks(reg));
+        }
         // The deck register is the CLASS's, not a roll-up of whichever
         // compartments happen to be keyed. Deriving it from the register made a
         // deck disappear the moment nothing was keyed on it, which is wrong twice
@@ -1915,6 +3023,14 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<AdjacencyGraph, StoreError> {
         self.scoped_vessel(scope, vessel)?;
+        if let Some(reg) = self
+            .coupling_register
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&vessel)
+        {
+            return register_graph(reg, &seeded_coupling_types());
+        }
         Ok(AdjacencyGraph::new(
             self.couplings
                 .iter()
@@ -1935,19 +3051,89 @@ impl Repositories for InMemoryStore {
         &self,
         scope: &TenantScope,
         vessel: VesselId,
+        at: Timestamp,
     ) -> Result<Vec<Hazard>, StoreError> {
         self.scoped_vessel(scope, vessel)?;
-        Ok(self
-            .hazards
-            .iter()
-            .filter(|h| h.vessel == vessel)
-            .map(|h| Hazard {
-                origin: CompartmentNo::new(h.origin),
-                kind: h.kind,
-                since: self.at_minutes(h.since_min),
-                label: h.label.to_owned(),
+        self.bearing_on(vessel, at, wadl_domain::units::Minutes::new(0))
+    }
+
+    async fn hazards_bearing_on(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        at: Timestamp,
+        tail: wadl_domain::units::Minutes,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        self.bearing_on(vessel, at, tail)
+    }
+
+    async fn raise_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: HazardKind,
+        since_ms: i64,
+        label: &str,
+    ) -> Result<Hazard, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        let mut raised = self
+            .raised_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("raised-hazard lock poisoned".into()))?;
+        raised.push(RaisedHazard {
+            vessel,
+            origin: compartment.to_owned(),
+            kind,
+            since_ms,
+            label: label.to_owned(),
+        });
+        Ok(Hazard {
+            origin: CompartmentNo::new(compartment),
+            kind,
+            since: Timestamp::from_epoch_millis(since_ms),
+            label: label.to_owned(),
+            ended: None,
+        })
+    }
+
+    async fn clear_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: HazardKind,
+        _basis: &str,
+        cleared_at_ms: i64,
+    ) -> Result<Vec<Hazard>, StoreError> {
+        self.scoped_vessel(scope, vessel)?;
+        // The basis is recorded by the caller's ledger entry (the PostgreSQL
+        // store additionally stamps it onto the row as `cleared_basis`); the
+        // instant is kept here because every later read is relative to it.
+        let mut cleared = self
+            .cleared_hazards
+            .lock()
+            .map_err(|_| StoreError::Backend("cleared-hazard lock poisoned".into()))?;
+        let closing: Vec<Hazard> = self
+            .all_hazards(vessel)?
+            .into_iter()
+            .filter(|h| h.origin.as_str() == compartment && h.kind == kind)
+            .filter(|h| {
+                !cleared.iter().any(|c| {
+                    c.vessel == vessel && c.origin == h.origin.as_str() && c.kind == h.kind
+                })
             })
-            .collect())
+            .collect();
+        if !closing.is_empty() {
+            cleared.push(HazardClearance {
+                vessel,
+                origin: compartment.to_owned(),
+                kind,
+                cleared_at_ms,
+            });
+        }
+        Ok(closing)
     }
 
     async fn rules_in_force(
@@ -1956,11 +3142,12 @@ impl Repositories for InMemoryStore {
         vessel: VesselId,
     ) -> Result<RuleSet, StoreError> {
         self.scoped_vessel(scope, vessel)?;
-        // The development seed. In production this is a query over `rule_binding`
-        // joined to `rule_version`, filtered to the versions whose effective
-        // range covers the evaluation instant and bound to this hull's class,
-        // work type and compartment category.
-        Ok(RuleSet::seed_usn_hot_work())
+        // The committed rule table when the hull has one; the development
+        // seed until then. Served whole — the call site narrows by work type,
+        // category and instant with `RuleSet::bound_to`.
+        Ok(self
+            .rule_table_of(vessel)
+            .map_or_else(RuleSet::seed_usn_hot_work, |doc| RuleSet::new(doc.entries)))
     }
 }
 
@@ -2044,7 +3231,7 @@ mod tests {
             Err(StoreError::NotFound)
         ));
         assert!(matches!(
-            store.live_hazards(&scope, w.ddg).await,
+            store.live_hazards(&scope, w.ddg, store.anchor).await,
             Err(StoreError::NotFound)
         ));
         assert!(matches!(
@@ -2061,7 +3248,10 @@ mod tests {
     async fn the_seeded_hull_has_live_hazards_and_a_graph() {
         let (store, w) = InMemoryStore::demo();
         let scope = w.yard_scope();
-        let hazards = store.live_hazards(&scope, w.cvn73).await.unwrap();
+        let hazards = store
+            .live_hazards(&scope, w.cvn73, store.anchor)
+            .await
+            .unwrap();
         // A curing coat in the passage, and a live bus in the switchgear room.
         assert_eq!(hazards.len(), 2);
         let origins: Vec<&str> = hazards.iter().map(|h| h.origin.as_str()).collect();
@@ -2085,6 +3275,167 @@ mod tests {
                 .edge_count(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn hazards_bearing_on_serves_the_fire_watch_tail_with_the_end_instant() {
+        let (store, w) = InMemoryStore::demo();
+        let scope = w.yard_scope();
+        let tail = wadl_domain::units::Minutes::new(30);
+        let minute = |m: i64| store.at_minutes(m);
+        let cleared_at = minute(60);
+        // A live fact carries no `ended`.
+        let before = store
+            .hazards_bearing_on(&scope, w.cvn73, minute(0), tail)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 2);
+        assert!(before.iter().all(|h| h.ended.is_none()));
+
+        store
+            .clear_hazard(
+                &scope,
+                w.cvn73,
+                "3-148-2-E",
+                HazardKind::EnergisedBus,
+                "tags hung, zero energy verified",
+                cleared_at.epoch_millis(),
+            )
+            .await
+            .unwrap();
+
+        // Read before the clearance: still served, `ended` set to the later
+        // instant — the engine reads that as not yet happened.
+        let scrubbed_back = store
+            .hazards_bearing_on(&scope, w.cvn73, minute(50), tail)
+            .await
+            .unwrap();
+        let bus = scrubbed_back
+            .iter()
+            .find(|h| h.origin.as_str() == "3-148-2-E")
+            .expect("served before its clearance");
+        assert_eq!(bus.ended, Some(cleared_at));
+
+        // Inside the tail: served with `ended`. Live (tail 0): gone.
+        let in_tail = store
+            .hazards_bearing_on(&scope, w.cvn73, minute(70), tail)
+            .await
+            .unwrap();
+        assert!(in_tail.iter().any(|h| h.origin.as_str() == "3-148-2-E"));
+        let live = store
+            .live_hazards(&scope, w.cvn73, minute(70))
+            .await
+            .unwrap();
+        assert!(!live.iter().any(|h| h.origin.as_str() == "3-148-2-E"));
+        assert_eq!(
+            live,
+            store
+                .hazards_bearing_on(
+                    &scope,
+                    w.cvn73,
+                    minute(70),
+                    wadl_domain::units::Minutes::new(0)
+                )
+                .await
+                .unwrap(),
+            "a zero tail is the live read"
+        );
+
+        // At the tail's end the fact stops bearing: half-open, at +90 exactly.
+        let at_end = store
+            .hazards_bearing_on(&scope, w.cvn73, minute(90), tail)
+            .await
+            .unwrap();
+        assert!(!at_end.iter().any(|h| h.origin.as_str() == "3-148-2-E"));
+        assert!(store
+            .hazards_bearing_on(&scope, w.cvn73, minute(89), tail)
+            .await
+            .unwrap()
+            .iter()
+            .any(|h| h.origin.as_str() == "3-148-2-E"));
+    }
+
+    #[tokio::test]
+    async fn rules_in_force_switch_to_the_stored_table_and_back_to_the_seed() {
+        let (store, w) = InMemoryStore::demo();
+        let scope = w.yard_scope();
+        let seed = RuleSet::seed_usn_hot_work();
+        assert!(store.rule_table(&scope, w.cvn73).await.unwrap().is_none());
+        assert_eq!(store.rules_in_force(&scope, w.cvn73).await.unwrap(), seed);
+
+        // A table with one row in force replaces the seed whole.
+        let only_r22: Vec<RuleEntry> = seed
+            .entries()
+            .iter()
+            .filter(|e| e.rule_code == "R22")
+            .cloned()
+            .collect();
+        let doc = RuleTableDoc {
+            label: "sitting.csv".to_owned(),
+            header: vec!["Rule ID".to_owned()],
+            rows: vec![vec!["R22".to_owned()]],
+            entries: only_r22.clone(),
+            table_hash: "abc".to_owned(),
+            signoff: None,
+        };
+        store
+            .set_rule_table(&scope, w.cvn73, doc.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.rules_in_force(&scope, w.cvn73).await.unwrap(),
+            RuleSet::new(only_r22)
+        );
+        assert_eq!(
+            store.rule_table(&scope, w.cvn73).await.unwrap(),
+            Some(doc.clone())
+        );
+        // Another hull is untouched.
+        assert_eq!(store.rules_in_force(&scope, w.cvn71).await.unwrap(), seed);
+        // The unassigned hull refuses every rule-table call.
+        assert!(matches!(
+            store.rule_table(&scope, w.ddg).await,
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_rule_table(&scope, w.ddg, doc.clone()).await,
+            Err(StoreError::NotFound)
+        ));
+
+        // Signing records the person on the document; without a document it
+        // is NotFound.
+        let signoff = SignOff {
+            signed_at_ms: 1,
+            signer_id: "Y-2001".to_owned(),
+            signer_name: "R. Alvarez".to_owned(),
+            statement: "signed at the sitting".to_owned(),
+            table_hash: "abc".to_owned(),
+            rows: vec!["00000000-0000-0000-0000-000000002201".to_owned()],
+            ledger_seq: 12,
+        };
+        let signed = store
+            .sign_rule_table(&scope, w.cvn73, signoff.clone())
+            .await
+            .unwrap();
+        assert_eq!(signed.signoff, Some(signoff.clone()));
+        assert_eq!(
+            store
+                .rule_table(&scope, w.cvn73)
+                .await
+                .unwrap()
+                .unwrap()
+                .signoff,
+            Some(signoff.clone())
+        );
+        assert!(matches!(
+            store.sign_rule_table(&scope, w.cvn71, signoff).await,
+            Err(StoreError::NotFound)
+        ));
+
+        // Revert → the seed.
+        store.clear_rule_table(&scope, w.cvn73).await.unwrap();
+        assert!(store.rule_table(&scope, w.cvn73).await.unwrap().is_none());
+        assert_eq!(store.rules_in_force(&scope, w.cvn73).await.unwrap(), seed);
     }
 
     #[tokio::test]

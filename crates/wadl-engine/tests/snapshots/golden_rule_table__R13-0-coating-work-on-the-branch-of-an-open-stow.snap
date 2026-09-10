@@ -1,0 +1,22 @@
+---
+source: crates/wadl-engine/tests/golden_rule_table.rs
+description: coating work on the branch of an open stow
+info:
+  rule: R13
+  ordinal: "0"
+  scenario: coating work on the branch of an open stow
+  hazard_kind: flammable_stow
+  origin: 3-160-2-Q
+  subject: 3-164-2-Q
+  work_type: coating
+  at_min: 0
+  ended_min: ~
+  expect_state: ALLOW
+  expect_clearer: ""
+  expect_clear_min: ~
+---
+{
+  "state": "ALLOW",
+  "trace": [],
+  "earliest_clear": null
+}

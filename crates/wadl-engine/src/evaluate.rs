@@ -27,7 +27,7 @@ use wadl_domain::units::HopDepth;
 
 use crate::coupling::AdjacencyGraph;
 use crate::decision::DecisionState;
-use crate::rules::{Applies, RuleEntry, RuleSet};
+use crate::rules::{Applies, HoldFrom, RuleEntry, RuleSet};
 use crate::traversal::{cascade_from, TraversalBound};
 
 /// A hazard that is live somewhere in the space set under evaluation.
@@ -42,21 +42,36 @@ pub struct Hazard {
     pub since: Timestamp,
     /// Human label for the trace, e.g. `CT-3160-4 · final coat, curing`.
     pub label: String,
+    /// When the fact ended — the instant of the `HAZARD_CLEARED` row its
+    /// clearing authority wrote, with a basis. `None` while the fact stands.
+    /// Absent from an older payload = still live.
+    #[serde(default)]
+    pub ended: Option<Timestamp>,
 }
 
 impl Hazard {
     /// Whether this hazard has been raised by `at`.
     ///
-    /// There is no `until` here, and that is deliberate: when a hazard stops
-    /// mattering is the *rule's* judgement, not the hazard's. The same open
-    /// coating ticket blocks the deck above for eight hours (R03) and suspends
-    /// the shared trunk for eight (R09); a different rule set could price them
-    /// differently from the same ticket. So the end of a hold is priced per
-    /// trace step from the rule's own `hold`, and the hazard carries only when
-    /// it began.
+    /// When a hazard stops *mattering* is still the rule's judgement, not the
+    /// hazard's: the same open coating ticket blocks the deck above for eight
+    /// hours (R03) and suspends the shared trunk for eight (R09); a different
+    /// rule set could price them differently from the same ticket. So the end
+    /// of a hold is priced per trace step from the rule's own `hold` and its
+    /// anchor, and the hazard carries only when it began and — once a person
+    /// has ended it — when.
     #[must_use]
     pub const fn raised_by(&self, at: Timestamp) -> bool {
         at.epoch_millis() >= self.since.epoch_millis()
+    }
+
+    /// Whether the fact had been ended by `at`. A clearance stamped later than
+    /// `at` has not happened yet from that instant's point of view.
+    #[must_use]
+    pub const fn ended_by(&self, at: Timestamp) -> bool {
+        match self.ended {
+            Some(ended) => ended.epoch_millis() <= at.epoch_millis(),
+            None => false,
+        }
     }
 }
 
@@ -167,26 +182,66 @@ impl Decision {
     }
 }
 
-/// Builds the trace step for a rule that fired, at `depth`, along `via`.
+/// Where a step's clock stands: the earliest clear, and the clause the reason
+/// sentence carries about it (none for a raise-anchored hold, whose sentence
+/// has not changed since the first golden trace).
+///
+/// A raise-anchored hold runs from `since`. An end-anchored hold has **no
+/// clock until the fact ends**: while the permit is open the step reads
+/// *clears on verification* and says the watch starts at the close; once
+/// `ended` is known and has happened by `at`, the watch runs from it.
+fn hold_clock(
+    entry: &RuleEntry,
+    hazard: &Hazard,
+    at: Timestamp,
+) -> (Option<Timestamp>, Option<String>) {
+    match (entry.hold_from, entry.hold) {
+        (HoldFrom::End, Some(hold)) => match hazard.ended {
+            Some(ended) if ended <= at => (
+                Some(ended.plus_minutes(hold)),
+                Some(format!(
+                    "permit closed, fire watch of {} min running",
+                    hold.get()
+                )),
+            ),
+            _ => (
+                None,
+                Some(format!(
+                    "fire watch of {} min starts when the permit closes",
+                    hold.get()
+                )),
+            ),
+        },
+        (_, hold) => (hold.map(|hold| hazard.since.plus_minutes(hold)), None),
+    }
+}
+
+/// Builds the trace step for a rule that fired, at `depth`, along `via`, as of
+/// `at`.
 fn step(
     entry: &RuleEntry,
     hazard: &Hazard,
     depth: HopDepth,
     path: Vec<CompartmentNo>,
     via: Vec<String>,
+    at: Timestamp,
 ) -> TraceStep {
-    let earliest_clear = entry.hold.map(|hold| hazard.since.plus_minutes(hold));
-    let reason = if depth == HopDepth::ZERO {
-        format!("{} in this space.", hazard.label)
+    let (earliest_clear, clock_clause) = hold_clock(entry, hazard, at);
+    let reached = if depth == HopDepth::ZERO {
+        format!("{} in this space", hazard.label)
     } else {
         format!(
-            "{} in {} — reached via {} ({} hop{}).",
+            "{} in {} — reached via {} ({} hop{})",
             hazard.label,
             hazard.origin,
             via.join(" → "),
             depth.get(),
             if depth.get() == 1 { "" } else { "s" }
         )
+    };
+    let reason = match clock_clause {
+        Some(clause) => format!("{reached}; {clause}."),
+        None => format!("{reached}."),
     };
     TraceStep {
         rule_code: entry.rule_code.clone(),
@@ -250,6 +305,15 @@ pub fn evaluate(req: &EvaluationRequest<'_>) -> Decision {
             continue;
         }
         for entry in req.rules.for_hazard(hazard.kind) {
+            // A raise-anchored row has nothing to say about a fact a person has
+            // already ended: the clearance ended it (the answer the store's
+            // live filter used to give on its own). An end-anchored row is the
+            // opposite case — the clearance is what STARTS its clock — so it
+            // reads on; `hold_clock` prices it and `push_live` drops it when
+            // the watch has run.
+            if entry.hold_from == HoldFrom::Raise && hazard.ended_by(req.at) {
+                continue;
+            }
             match &entry.applies {
                 Applies::SameSpace => {
                     if &hazard.origin == req.subject {
@@ -261,6 +325,7 @@ pub fn evaluate(req: &EvaluationRequest<'_>) -> Decision {
                                 HopDepth::ZERO,
                                 vec![hazard.origin.clone()],
                                 Vec::new(),
+                                req.at,
                             ),
                             req.at,
                         );
@@ -281,7 +346,7 @@ pub fn evaluate(req: &EvaluationRequest<'_>) -> Decision {
                             .collect();
                         push_live(
                             &mut trace,
-                            step(entry, hazard, hit.depth, path, via),
+                            step(entry, hazard, hit.depth, path, via, req.at),
                             req.at,
                         );
                     }
@@ -337,6 +402,7 @@ mod tests {
             kind: HazardKind::CoatingOpen,
             since: Timestamp::from_epoch_millis(0),
             label: "CT-3160-4 · final coat, curing".to_owned(),
+            ended: None,
         }];
         (graph, hazards)
     }
@@ -424,6 +490,7 @@ mod tests {
             kind: HazardKind::StopWork,
             since: Timestamp::from_epoch_millis(0),
             label: "STOP WORK · Fire Marshal".to_owned(),
+            ended: None,
         }];
         let here = CompartmentNo::new("3-160-2-Q");
         let next_door = CompartmentNo::new("2-160-2-Q");
@@ -493,6 +560,7 @@ mod tests {
             kind: HazardKind::EnergisedBus,
             since: Timestamp::from_epoch_millis(0),
             label: "Bus 3-SG-2 energised".to_owned(),
+            ended: None,
         }];
         let rules = RuleSet::seed_usn_hot_work();
         let subject = CompartmentNo::new("3-148-2-E");
@@ -540,6 +608,7 @@ mod tests {
             kind: HazardKind::StopWork,
             since: Timestamp::from_epoch_millis(0),
             label: "STOP WORK · QA".to_owned(),
+            ended: None,
         });
         let rules = RuleSet::seed_usn_hot_work();
         let subject = CompartmentNo::new("3-156-2-Q");
@@ -555,6 +624,122 @@ mod tests {
             d.trace.len(),
             2,
             "both the WARN and the SUSPEND are recorded"
+        );
+    }
+
+    /// Hot work on 2-160-2-Q (permit raised at T), the deck below it the
+    /// subject; R04 is the seed's end-anchored row.
+    fn hot_work_world(ended_min: Option<i64>) -> (AdjacencyGraph, Vec<Hazard>) {
+        let graph =
+            AdjacencyGraph::new(vec![edge("2-160-2-Q", "3-160-2-Q", "deck_penetration", 1)]);
+        let hazards = vec![Hazard {
+            origin: CompartmentNo::new("2-160-2-Q"),
+            kind: HazardKind::HotWorkLive,
+            since: Timestamp::from_epoch_millis(0),
+            label: "HW permit 2673 · weld".to_owned(),
+            ended: ended_min.map(|m| Timestamp::from_epoch_millis(m * 60_000)),
+        }];
+        (graph, hazards)
+    }
+
+    fn decide_below(ended_min: Option<i64>, at_min: i64) -> Decision {
+        let (graph, hazards) = hot_work_world(ended_min);
+        let rules = RuleSet::seed_usn_hot_work();
+        let subject = CompartmentNo::new("3-160-2-Q");
+        evaluate(&EvaluationRequest {
+            subject: &subject,
+            graph: &graph,
+            rules: &rules,
+            hazards: &hazards,
+            at: Timestamp::from_epoch_millis(at_min * 60_000),
+        })
+    }
+
+    #[test]
+    fn an_end_anchored_hold_never_elapses_while_the_permit_is_open() {
+        // Forty-five minutes in — past the thirty the raise-anchored reading
+        // priced — the torch may still be lit, so the deck below is suspended
+        // with no clock and the sentence says when the clock will start.
+        let d = decide_below(None, 45);
+        assert_eq!(d.state, DecisionState::Suspend);
+        assert_eq!(d.earliest_clear, None, "clears on verification");
+        let s = d.trace.first().unwrap();
+        assert_eq!(s.rule_code, "R04");
+        assert_eq!(s.clearing_authority, "fire_marshal");
+        assert_eq!(
+            s.reason,
+            "HW permit 2673 · weld in 2-160-2-Q — reached via deck_penetration (1 hop); \
+             fire watch of 30 min starts when the permit closes."
+        );
+        // Ten years on, still open, still suspended.
+        assert_eq!(
+            decide_below(None, 10 * 365 * 24 * 60).state,
+            DecisionState::Suspend
+        );
+    }
+
+    #[test]
+    fn an_end_anchored_hold_runs_from_the_close_and_drops_at_close_plus_hold() {
+        // Permit closed at +60: at +70 the watch is running and prices +90.
+        let running = decide_below(Some(60), 70);
+        assert_eq!(running.state, DecisionState::Suspend);
+        assert_eq!(
+            running.earliest_clear,
+            Some(Timestamp::from_epoch_millis(90 * 60_000))
+        );
+        assert_eq!(
+            running.trace.first().unwrap().reason,
+            "HW permit 2673 · weld in 2-160-2-Q — reached via deck_penetration (1 hop); \
+             permit closed, fire watch of 30 min running."
+        );
+        // Half-open: the space clears AT +90.
+        assert_eq!(decide_below(Some(60), 89).state, DecisionState::Suspend);
+        let cleared = decide_below(Some(60), 90);
+        assert_eq!(cleared.state, DecisionState::Allow);
+        assert!(cleared.trace.is_empty());
+    }
+
+    #[test]
+    fn a_clearance_later_than_the_instant_has_not_happened_yet() {
+        // Closed at +60, read at +50: from that instant's point of view the
+        // permit is still open — no clock, the sentence says so. Time-honest.
+        let d = decide_below(Some(60), 50);
+        assert_eq!(d.state, DecisionState::Suspend);
+        assert_eq!(d.earliest_clear, None);
+        assert!(d
+            .trace
+            .first()
+            .unwrap()
+            .reason
+            .ends_with("starts when the permit closes."));
+    }
+
+    #[test]
+    fn a_raise_anchored_row_ignores_a_hazard_ended_by_the_instant() {
+        // A coat cleared by its marine chemist at +60 (re-tested early). The
+        // raise-anchored R03 stops holding the deck above at +60, not at the
+        // eight-hour cure — the clearance ended the fact.
+        let (graph, mut hazards) = coating_world();
+        hazards[0].ended = Some(Timestamp::from_epoch_millis(60 * 60_000));
+        let rules = RuleSet::seed_usn_hot_work();
+        let subject = CompartmentNo::new("2-160-2-Q");
+        let decide_at = |min: i64| {
+            evaluate(&EvaluationRequest {
+                subject: &subject,
+                graph: &graph,
+                rules: &rules,
+                hazards: &hazards,
+                at: Timestamp::from_epoch_millis(min * 60_000),
+            })
+        };
+        assert_eq!(decide_at(59).state, DecisionState::Block);
+        assert_eq!(decide_at(60).state, DecisionState::Allow);
+        assert!(decide_at(60).trace.is_empty());
+        // Before the clearance the trace is exactly what it was without it.
+        assert_eq!(
+            decide_at(0),
+            decide("2-160-2-Q"),
+            "an unended read is byte-identical to the pre-`ended` trace"
         );
     }
 }

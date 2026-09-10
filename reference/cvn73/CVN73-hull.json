@@ -1,0 +1,29 @@
+{
+  "organization": {
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "kind": "shipbuilder",
+    "name": "Demo Yard",
+    "country": "USA"
+  },
+  "class": {
+    "class_id": "00000000-0000-0000-0000-0000000c0068",
+    "code": "CVN-68",
+    "name": "Nimitz class",
+    "hull_type": "CVN",
+    "frame_min": 1,
+    "frame_max": 260
+  },
+  "vessel": {
+    "vessel_id": "00000000-0000-0000-0000-000000000073",
+    "hull_no": "CVN-73",
+    "name": "USS George Washington"
+  },
+  "availability": {
+    "availability_id": "00000000-0000-0000-0000-00000000a073",
+    "code": "PIA-26",
+    "kind": "PIA",
+    "location": "Graving Dry Dock 4",
+    "start_on": "2026-01-05",
+    "end_on": "2026-09-30"
+  }
+}

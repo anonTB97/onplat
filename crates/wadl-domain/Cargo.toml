@@ -11,5 +11,10 @@ publish.workspace = true
 uuid.workspace = true
 serde.workspace = true
 
+[dev-dependencies]
+# Reads the shared clock vector file in civil.rs's tests; test-only, so the
+# crate's runtime tree (and its wasm build) stays serde + uuid.
+serde_json.workspace = true
+
 [lints]
 workspace = true

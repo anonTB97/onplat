@@ -9,10 +9,20 @@
 // screenshot in the wrong hands or a decision taken against the wrong hull.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DeckStateRow, Issue, VesselSummary, WhoAmI } from "./api";
+import type { DeckStateRow, Identity, Issue, ScheduleRunSummary, VesselSummary, WhoAmI } from "./api";
+import { deedsOf, ROLE_WORDS, type RoleCode, type WhoState } from "./identity";
+import { scheduleCrumb } from "./ingest";
 import { claim, fixSpace, KIND } from "./IssuesBoard";
 import type { Horizon } from "./TimeControl";
-import { C, mh } from "./theme";
+import {
+  ACTIVITY_STATUS,
+  C,
+  mh,
+  OVERLAY_STYLE,
+  READINESS_STYLE,
+  STATE_ORDER,
+  STATE_STYLE,
+} from "./theme";
 
 const DIM = C.dim;
 const LINE = C.line;
@@ -25,19 +35,25 @@ const LINE = C.line;
  * banner that scrolls off the top is a banner that is absent from the screenshot
  * somebody actually takes.
  *
- * Set MARKINGS to the deploying organisation's own handling caveats — these are
- * the prototype's, and they are a statement about this build: the deck plates are
- * a public US Navy document and every number in the demo is notional.
+ * The markings are the deployment's (`WADL_MARKINGS`), served on
+ * `/api/whoami` — never a string constant in the shell, which would wear
+ * the prototype's caveats on a yard's data. Until they arrive, or if the
+ * server does not answer, the band says so in amber: a screenshot with no
+ * markings received is a screenshot not to take.
  */
-const MARKINGS = [
-  "BigBear.ai Proprietary",
-  "Competition Sensitive",
-  "All Represented Information is Open Sourced",
-];
-
 export const MARKING_H = 18;
 
-export function ClassificationBanner({ edge }: { edge: "top" | "bottom" }) {
+export function ClassificationBanner({
+  edge,
+  markings,
+  stamp,
+}: {
+  edge: "top" | "bottom";
+  markings: string[] | null;
+  /** The release stamp (`<commit> · schema <NNNN> · <backend>`), bottom band only. */
+  stamp?: string | null;
+}) {
+  const missing = markings === null || markings.length === 0;
   return (
     <div
       style={{
@@ -47,9 +63,9 @@ export function ClassificationBanner({ edge }: { edge: "top" | "bottom" }) {
         [edge]: 0,
         height: MARKING_H,
         zIndex: 50,
-        background: "#191a1f",
-        borderTop: edge === "bottom" ? `1px solid ${LINE}` : undefined,
-        borderBottom: edge === "top" ? `1px solid ${LINE}` : undefined,
+        background: missing ? "rgba(245,158,11,0.16)" : "#191a1f",
+        borderTop: edge === "bottom" ? `1px solid ${missing ? "rgba(245,158,11,0.5)" : LINE}` : undefined,
+        borderBottom: edge === "top" ? `1px solid ${missing ? "rgba(245,158,11,0.5)" : LINE}` : undefined,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -57,17 +73,36 @@ export function ClassificationBanner({ edge }: { edge: "top" | "bottom" }) {
         fontSize: 9.5,
         letterSpacing: 0.8,
         textTransform: "uppercase",
-        color: "#8b93a3",
+        color: missing ? C.warn : "#8b93a3",
         fontWeight: 600,
         pointerEvents: "none",
       }}
     >
-      {MARKINGS.map((m, i) => (
-        <span key={m} style={{ display: "flex", gap: 8 }}>
-          {i > 0 && <span style={{ color: C.faint }}>|</span>}
-          {m}
+      {missing ? (
+        <span>HANDLING MARKINGS NOT RECEIVED — DO NOT SCREENSHOT</span>
+      ) : (
+        markings.map((m, i) => (
+          <span key={m} style={{ display: "flex", gap: 8 }}>
+            {i > 0 && <span style={{ color: C.faint }}>|</span>}
+            {m}
+          </span>
+        ))
+      )}
+      {edge === "bottom" && stamp && (
+        <span
+          title="the served binary's release stamp, from /health"
+          style={{
+            position: "absolute",
+            right: 10,
+            textTransform: "none",
+            letterSpacing: 0.3,
+            fontWeight: 500,
+            color: C.faint,
+          }}
+        >
+          {stamp}
         </span>
-      ))}
+      )}
     </div>
   );
 }
@@ -86,6 +121,8 @@ export type Altitude = "ship" | "zone" | "compartment";
 
 export interface Persona {
   name: string;
+  /** The role code the proxy asserts and the dev shim sends — `roles.rs`. */
+  code: RoleCode;
   focus: string;
   /** The height the Deck Explorer opens at — hull, zone or compartment. */
   altitude: Altitude;
@@ -100,33 +137,53 @@ export interface Persona {
    * both.
    */
   horizon: Horizon;
+  /** The module id this role's day opens on. */
+  landing: string;
+  /** That module, said the way the role would say it — "the shift board". */
+  opens: string;
 }
 
+/**
+ * The yard's roles, each with the screen its morning starts on.
+ *
+ * These replaced eight programme-shaped personas (IPT, Program Office,
+ * Material Manager…) that all opened on the same deck plate. A role is a
+ * front door: a foreman lands on the shift board for their trade, a zone
+ * manager on their zone, a planner on the register. The altitude and horizon
+ * still travel with it, so the Deck Explorer opens at the right height when
+ * that role gets there.
+ */
 export const PERSONAS: Persona[] = [
-  { name: "Planner", focus: "Conflicts & sequence", altitude: "compartment", horizon: "week" },
-  { name: "Zone Manager", focus: "Your zone's muster", altitude: "zone", horizon: "week" },
-  { name: "Production Super", focus: "Shift plan", altitude: "zone", horizon: "shift" },
-  { name: "Project Super", focus: "Availability health", altitude: "ship", horizon: "month" },
-  { name: "IPT", focus: "Mitigation decisions", altitude: "compartment", horizon: "month" },
-  {
-    name: "Program Office",
-    focus: "Risk / on-time confidence",
-    altitude: "ship",
-    horizon: "availability",
-  },
-  {
-    name: "Material Manager",
-    focus: "Material readiness",
-    altitude: "compartment",
-    horizon: "week",
-  },
-  {
-    name: "Executive",
-    focus: "Throughput / dock utilization",
-    altitude: "ship",
-    horizon: "availability",
-  },
+  { name: "Foreman", code: "foreman", focus: "My crew's shift", altitude: "compartment", horizon: "day", landing: "dailyOps", opens: "the shift board" },
+  { name: "Zone Manager", code: "zone_manager", focus: "My zone's week", altitude: "zone", horizon: "week", landing: "deckExplorer", opens: "the zone board" },
+  { name: "Production Super", code: "production_super", focus: "Every trade, this shift", altitude: "zone", horizon: "day", landing: "dailyOps", opens: "the shift board" },
+  { name: "Planner", code: "planner", focus: "The register and its conflicts", altitude: "compartment", horizon: "week", landing: "sequenceBoard", opens: "the activity register" },
+  { name: "Ship Super", code: "ship_super", focus: "The hull, worst first", altitude: "ship", horizon: "month", landing: "deckExplorer", opens: "the ship board" },
+  { name: "Safety", code: "safety", focus: "Field conditions and who clears them", altitude: "compartment", horizon: "day", landing: "leverage", opens: "conflicts and actions" },
+  { name: "Project Manager", code: "project_manager", focus: "Availability health", altitude: "ship", horizon: "availability", landing: "deckExplorer", opens: "the ship board" },
 ];
+
+const ROLE_KEY = "wadl.role.v1";
+
+/** The role remembered on this browser, or the first one. */
+export function loadRole(): Persona {
+  try {
+    const name = window.localStorage.getItem(ROLE_KEY);
+    const found = PERSONAS.find((p) => p.name === name);
+    if (found) return found;
+  } catch {
+    // Storage refused — the default role is the honest fallback.
+  }
+  return PERSONAS[0] as Persona;
+}
+
+export function saveRole(p: Persona): void {
+  try {
+    window.localStorage.setItem(ROLE_KEY, p.name);
+  } catch {
+    // Storage refused — the choice lasts the session.
+  }
+}
 
 const initialsOf = (name: string) =>
   name
@@ -148,6 +205,8 @@ const ic = (d: string) => (
 
 export const ICONS: Record<string, React.ReactNode> = {
   dailyOps: ic("M12 7v5l3 2|M12 3a9 9 0 100 18 9 9 0 000-18z"),
+  // A week on a calendar page, with the key event marked.
+  week: ic("M4 6h16v14H4z|M4 10h16|M8 3v4|M16 3v4|M15 14l1.5 1.5L19 13"),
   // The prototype's own Deck Explorer glyph: stacked decks.
   deckExplorer: ic("M12 3l9 5-9 5-9-5 9-5z|M3 12l9 5 9-5|M3 16l9 5 9-5"),
   sequenceBoard: ic("M4 5h10|M4 12h16|M4 19h7|M18 3v4|M8 10v4|M14 17v4"),
@@ -160,6 +219,8 @@ export const ICONS: Record<string, React.ReactNode> = {
   guide: ic("M12 5c-2-1.4-4.5-2-7-2v16c2.5 0 5 .6 7 2 2-1.4 4.5-2 7-2V3c-2.5 0-5 .6-7 2z|M12 5v16"),
   // A chained record: the page, and the links down its spine.
   ledger: ic("M6 3h12v18H6z|M10 8h5|M10 12h5|M10 16h3|M8 6v0.01|M8 10v0.01|M8 14v0.01|M8 18v0.01"),
+  // A printed sheet with a folded corner: the cut a person takes away.
+  reports: ic("M7 3h7l5 5v13H7z|M14 3v5h5|M9.5 12h5|M9.5 15.5h5|M9.5 19h3"),
   // A database cylinder: the documents the screens are built from.
   sources: ic("M4 6.5c0-1.4 3.6-2.5 8-2.5s8 1.1 8 2.5S16.4 9 12 9 4 7.9 4 6.5z|M4 6.5v11c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-11|M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5"),
 };
@@ -236,12 +297,22 @@ export function TopBar({
   onOpenIssues,
   outOfScope,
   who,
+  whoState,
+  identity,
+  verdictsOk,
+  legendOpen,
+  onLegendOpened,
+  scheduleRun,
 }: {
   onCollapse: () => void;
   hulls: HullChoice[];
   selected: string;
   onSelectVessel: (id: string) => void;
   hullLabel: string;
+  /** The run the served schedule of record came from, as `/timeframe`
+   *  serves it: null for the generated register, "unavailable" when the
+   *  timeframe read failed. The crumb under the hull reads it. */
+  scheduleRun: ScheduleRunSummary | null | "unavailable";
   persona: Persona;
   onPersona: (p: Persona) => void;
   rows: DeckStateRow[];
@@ -253,8 +324,23 @@ export function TopBar({
   outOfScope: boolean;
   /** Server-resolved identity; null while loading or if the read failed. */
   who: WhoAmI | null;
+  /** Whether `who` is an answer, still coming, or a failure. */
+  whoState: WhoState;
+  /** What the shell asserts — the dev shim's demo person, or nothing. */
+  identity: Identity | null;
+  /** Whether the verdict read behind `rows` and `issues` succeeded; null while loading. */
+  verdictsOk: boolean | null;
+  /** Opens the legend from outside the bar (the first-run cards use it). */
+  legendOpen?: boolean;
+  onLegendOpened?: () => void;
 }) {
-  const [menu, setMenu] = useState<"context" | "persona" | "alerts" | null>(null);
+  const [menu, setMenu] = useState<"context" | "persona" | "alerts" | "legend" | null>(null);
+  useEffect(() => {
+    if (legendOpen) {
+      setMenu("legend");
+      onLegendOpened?.();
+    }
+  }, [legendOpen, onLegendOpened]);
   const [query, setQuery] = useState("");
   /** The keyboard-highlighted search hit; Enter takes it, arrows move it. */
   const [hitIdx, setHitIdx] = useState(0);
@@ -311,8 +397,8 @@ export function TopBar({
         zone: r.compartment.zone,
         detail:
           r.readiness === "held"
-            ? `${r.state} · ${mh(r.remaining_hours)} held`
-            : r.work_order_codes.join(", ") || r.state,
+            ? `${STATE_STYLE[r.state].label} · ${mh(r.remaining_hours)} held`
+            : r.work_order_codes.join(", ") || STATE_STYLE[r.state].label,
       }));
   }, [query, rows]);
 
@@ -411,6 +497,56 @@ export function TopBar({
         )}
       </div>
 
+      {/* legend — every vocabulary the boards use, one panel, reachable from
+          every screen. Eight sets of words used to be learned one screen at a
+          time; this is where they are all defined at once. */}
+      <div style={{ position: "relative" }}>
+        <button
+          onClick={() => setMenu(menu === "legend" ? null : "legend")}
+          title="What the colours and words mean, on every board"
+          aria-expanded={menu === "legend"}
+          style={{ ...clusterBtn, padding: "4px 9px", fontSize: 11.5, color: C.dim }}
+        >
+          <span style={{ display: "inline-flex", gap: 2 }}>
+            {STATE_ORDER.map((s) => (
+              <span key={s} style={{ width: 6, height: 10, borderRadius: 1, background: STATE_STYLE[s].fg }} />
+            ))}
+          </span>
+          Legend
+        </button>
+        {menu === "legend" && (
+          <div style={{ ...menuPanel, width: 420, right: "auto", left: 0 }}>
+            <LegendGroup title="Authorization state — the engine's verdict on a space">
+              {STATE_ORDER.map((s) => (
+                <LegendRow key={s} swatch={STATE_STYLE[s].fg} label={STATE_STYLE[s].label} code={s} gloss={STATE_STYLE[s].gloss} />
+              ))}
+            </LegendGroup>
+            <LegendGroup title="Readiness — whether anyone is actually held up">
+              {(["held", "go", "idle", "latent"] as const).map((k) => (
+                <LegendRow key={k} swatch={READINESS_STYLE[k].fg} label={READINESS_STYLE[k].label} gloss={READINESS_STYLE[k].gloss} />
+              ))}
+            </LegendGroup>
+            <LegendGroup title="On the plate — what the day needs">
+              {(["go", "wait", "stop", "none"] as const).map((k) => (
+                <LegendRow key={k} swatch={OVERLAY_STYLE[k].fg} label={OVERLAY_STYLE[k].label} gloss={OVERLAY_STYLE[k].gloss} />
+              ))}
+            </LegendGroup>
+            <LegendGroup title="Schedule status — from the schedule of record">
+              <LegendRow swatch={ACTIVITY_STATUS.not_started.fg} label="NOT STARTED" gloss="planned, no progress recorded" />
+              <LegendRow swatch={ACTIVITY_STATUS.in_progress.fg} label="IN PROGRESS" gloss="started per the last import" />
+              <LegendRow swatch={ACTIVITY_STATUS.complete.fg} label="COMPLETE" gloss="finished per the last import" />
+              <LegendRow swatch={C.warn} label="NOT EXECUTABLE" gloss="the space refuses this work somewhere in its planned window" />
+            </LegendGroup>
+            <LegendGroup title="Where a location came from">
+              <LegendRow swatch={C.bright} label="3-148-2-E" gloss="authored — the schedule's own compartment field" />
+              <LegendRow swatch={C.warn} label="≈ 3-185-0-L" gloss="derived — a placard read out of the task's name; graded, never silent" />
+              <LegendRow swatch={C.warn} label="not located" gloss="the schedule did not say; counted, never drawn" />
+              <LegendRow swatch={C.danger} label="unknown space" gloss="located to a placard this hull's register does not carry" />
+            </LegendGroup>
+          </div>
+        )}
+      </div>
+
       {/* context selector — which hull, and what else is in the portfolio */}
       <div style={{ position: "relative", marginLeft: "auto" }}>
         <button
@@ -427,6 +563,30 @@ export function TopBar({
               {hullLabel}
               {outOfScope && <span style={{ width: 6, height: 6, borderRadius: 3, background: C.danger }} />}
             </span>
+            {/* Whose schedule every screen is reading, and since when. Amber
+                until a person is on the run (a boot run has none) or when
+                the timeframe read failed — never blank. */}
+            {(() => {
+              const crumb = scheduleCrumb(scheduleRun);
+              return (
+                <span
+                  style={{
+                    display: "block", fontSize: 10.5, fontWeight: 400, maxWidth: 560,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    color: crumb.tone === "warn" ? C.warn : crumb.tone === "ok" ? C.ok : DIM,
+                  }}
+                  title={
+                    scheduleRun === "unavailable"
+                      ? "The timeframe read failed, so the shell cannot say which import the screens are reading."
+                      : scheduleRun === null
+                        ? "No export has been imported for this hull: every screen reads the generated demo register."
+                        : `Run #${scheduleRun.seq} · ${scheduleRun.counts.served.toLocaleString()} rows served · ${scheduleRun.counts.quarantined} quarantined · ${scheduleRun.encoding} (decoded by the ${scheduleRun.decoded_by}) · via ${scheduleRun.imported_by.via}${scheduleRun.imported_by.person ? "" : " — no person on the run until the identity hop asserts one"}`
+                  }
+                >
+                  {crumb.text}
+                </span>
+              );
+            })()}
           </span>
           <Chevron />
         </button>
@@ -434,8 +594,12 @@ export function TopBar({
           <div style={menuPanel}>
             <div style={menuHead}>Portfolio — availabilities</div>
             {hulls.length === 0 && (
-              <p style={{ fontSize: 11.5, color: DIM, padding: "9px 12px", margin: 0 }}>
-                No hulls configured for this surface.
+              <p style={{ fontSize: 11.5, color: whoState === "ok" ? DIM : C.warn, padding: "9px 12px", margin: 0 }}>
+                {whoState === "ok"
+                  ? "No hull is assigned to you — the server served none."
+                  : whoState === "failed"
+                    ? "Hull list unavailable — /api/whoami did not answer."
+                    : "Reading your hulls from /api/whoami…"}
               </p>
             )}
             {hulls.map((h) => {
@@ -477,29 +641,39 @@ export function TopBar({
         )}
       </div>
 
-      {/* persona — sets the altitude the Deck Explorer opens at */}
+      {/* who you are — the person the server resolved, and the role. In DEMO
+          MODE the role is a switch that changes what you may do; behind the
+          proxy it is what the directory asserted, shown read-only. */}
       <div style={{ position: "relative" }}>
         <button
-          title="Your job sets where screens open — altitude and time horizon — nothing else changes" onClick={() => setMenu(menu === "persona" ? null : "persona")} style={clusterBtn} aria-expanded={menu === "persona"}>
+          title={
+            identity?.mode === "dev"
+              ? "DEMO MODE — the dev shim is not a login. Switching role changes who the ledger names and which doors you may open."
+              : "Who the yard's proxy says you are, and the roles it asserted. Your role sets where screens open."
+          }
+          onClick={() => setMenu(menu === "persona" ? null : "persona")}
+          style={clusterBtn}
+          aria-expanded={menu === "persona"}
+        >
           <span style={{ width: 26, height: 26, borderRadius: 13, background: C.raised, color: C.accent, fontSize: 10.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            {initialsOf(persona.name)}
+            {initialsOf(who?.person.name ?? persona.name)}
           </span>
           <span style={{ textAlign: "left" }}>
             <span style={{ display: "block", fontSize: 8.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM }}>
-              Persona
+              {who ? "Signed in" : "Role"}
             </span>
             <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
-              {persona.name}
-              {/* The trust boundary, worn on the sleeve: development identity
-                  is amber and says so, so a screenshot can never pass a shim
+              {who ? `${who.person.name} · ${rolesLine(who, persona)}` : persona.name}
+              {/* The trust boundary, worn on the sleeve: the dev shim is amber
+                  and says DEMO MODE, so a screenshot can never pass a shim
                   session off as an authenticated one. Proxy mode shows nothing
                   here — authenticated is the unremarkable state. */}
               {who?.identity_mode === "dev-headers" && (
                 <span
-                  title="Development identity shim — headers trusted as given. In production this session would come through the CAC-authenticated proxy."
+                  title="DEMO MODE — dev identity shim: the server trusts the headers the shell sends. In production this session would come through the CAC-authenticated proxy and the shell would send nothing."
                   style={{ fontSize: 8, fontWeight: 700, letterSpacing: 0.6, padding: "1.5px 5px", borderRadius: 3, color: C.warn, background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.5)" }}
                 >
-                  DEV ID
+                  DEMO MODE · dev identity
                 </span>
               )}
             </span>
@@ -507,58 +681,71 @@ export function TopBar({
           <Chevron />
         </button>
         {menu === "persona" && (
-          <div style={menuPanel}>
-            {/* Who the SERVER says you are — the resolved scope every query
-                actually runs under, not an echo of what the shell sent. */}
+          <div style={{ ...menuPanel, minWidth: 360 }}>
+            {/* Who the SERVER says you are — the resolved person every ledger
+                row will name and the doors it grants, not an echo of what the
+                shell sent. */}
             <div style={{ padding: "9px 12px", borderBottom: `1px solid ${LINE}` }}>
               <div style={{ fontSize: 9.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM, marginBottom: 4 }}>
                 Signed in — as the server resolves it
               </div>
               {who ? (
                 <>
-                  <div style={{ fontSize: 11, color: C.bright }}>
-                    org <span style={{ fontFamily: "monospace", fontSize: 10.5 }}>…{who.org.slice(-12)}</span>
+                  <div style={{ fontSize: 11.5, color: C.bright }}>
+                    <b>{who.person.name}</b>{" "}
+                    <span style={{ fontFamily: "monospace", fontSize: 10.5, color: DIM }}>({who.person.id})</span>
                     {" · "}
-                    {who.assigned_vessels.length} hull{who.assigned_vessels.length === 1 ? "" : "s"} assigned
+                    <span style={{ color: who.identity_mode === "dev-headers" ? C.warn : C.ok }}>{sourceLine(who)}</span>
                   </div>
-                  <div style={{ fontSize: 10.5, marginTop: 3, color: who.identity_mode === "dev-headers" ? C.warn : C.ok }}>
-                    {who.identity_mode === "dev-headers"
-                      ? "dev header shim — identity trusted as given (development only)"
-                      : `identity ${who.identity_mode.replace(/-/g, " ")} by the authenticated proxy`}
+                  <div style={{ fontSize: 11, color: C.bright, marginTop: 3 }}>
+                    roles: {who.roles.length > 0 ? who.roles.map(roleWord).join(", ") : <span style={{ color: C.warn }}>none asserted — every door open (demo)</span>}
                   </div>
+                  <div style={{ fontSize: 11, color: C.bright, marginTop: 3 }}>
+                    may: {deedsOf(who).length > 0 ? deedsOf(who).join(" · ") : <span style={{ color: DIM }}>read only</span>}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: DIM, marginTop: 3 }}>
+                    org <span style={{ fontFamily: "monospace" }}>…{who.org.slice(-12)}</span>
+                    {" · "}
+                    {who.hulls.length} hull{who.hulls.length === 1 ? "" : "s"} served
+                  </div>
+                  {who.warnings.map((w) => (
+                    <div key={w} style={{ fontSize: 10.5, color: C.warn, marginTop: 3 }}>⚠ {w}</div>
+                  ))}
                 </>
               ) : (
-                <div style={{ fontSize: 11, color: DIM }}>identity unavailable — /api/whoami did not answer</div>
+                <div style={{ fontSize: 11, color: whoState === "failed" ? C.danger : DIM }}>
+                  {whoState === "failed"
+                    ? "identity unavailable — /api/whoami did not answer"
+                    : "resolving — /api/whoami…"}
+                </div>
               )}
             </div>
-            <div style={menuHead}>Switch persona — sets the landing altitude</div>
-            {PERSONAS.map((p) => (
-              <button
-                key={p.name}
-                onClick={() => {
-                  onPersona(p);
-                  setMenu(null);
-                }}
-                style={{
-                  display: "flex", gap: 9, alignItems: "center", width: "100%", textAlign: "left",
-                  padding: "7px 12px",
-                  background: p.name === persona.name ? C.raised : "transparent",
-                  border: "none", borderBottom: `1px solid ${LINE}`,
-                  borderLeft: `3px solid ${p.name === persona.name ? C.accent : "transparent"}`,
-                  cursor: "pointer", font: "inherit", color: C.text,
-                }}
-              >
-                <span style={{ width: 24, height: 24, borderRadius: 12, background: C.well, color: p.name === persona.name ? C.accent : DIM, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
-                  {initialsOf(p.name)}
-                </span>
-                <span>
-                  <span style={{ display: "block", fontSize: 12, fontWeight: 600 }}>{p.name}</span>
-                  <span style={{ display: "block", fontSize: 10.5, color: DIM }}>
-                    {p.focus} · opens at {p.altitude}
-                  </span>
-                </span>
-              </button>
-            ))}
+            {identity?.mode === "proxy" ? (
+              <>
+                <div style={menuHead}>Your roles — as the yard's directory asserts them</div>
+                {PERSONAS.filter((p) => who?.roles.includes(p.code)).map((p) => (
+                  <RoleRow key={p.name} p={p} active={p.name === persona.name} onPick={() => { onPersona(p); setMenu(null); }} />
+                ))}
+                {who && who.roles.filter((r) => !PERSONAS.some((p) => p.code === r)).map((r) => (
+                  <div key={r} style={{ padding: "7px 12px", fontSize: 11.5, color: DIM, borderBottom: `1px solid ${LINE}` }}>
+                    {roleWord(r)} — no front door of its own
+                  </div>
+                ))}
+                <div style={{ padding: "7px 12px", fontSize: 10.5, color: DIM }}>
+                  roles come from the yard&apos;s directory — ask the proxy owner to change them
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={menuHead}>Switch role — who you act as, and where your day opens</div>
+                {PERSONAS.map((p) => (
+                  <RoleRow key={p.name} p={p} active={p.name === persona.name} onPick={() => { onPersona(p); setMenu(null); }} />
+                ))}
+                <div style={{ padding: "7px 12px", fontSize: 10.5, color: C.warn }}>
+                  demo mode — the shim is not a login; switching role changes what you may do and who the ledger names
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -584,7 +771,16 @@ export function TopBar({
                 The hull in focus is not assigned to you — the API refuses its data.
               </div>
             )}
-            {issues.length === 0 && !outOfScope && (
+            {verdictsOk === false && !outOfScope && (
+              <p style={{ fontSize: 11.5, color: C.warn, padding: "9px 12px", margin: 0 }}>
+                The engine did not answer for this instant. An empty list here is
+                missing information, not clearance.
+              </p>
+            )}
+            {verdictsOk === null && !outOfScope && issues.length === 0 && (
+              <p style={{ fontSize: 11.5, color: DIM, padding: "9px 12px", margin: 0 }}>Reading the board…</p>
+            )}
+            {verdictsOk === true && issues.length === 0 && !outOfScope && (
               <p style={{ fontSize: 11.5, color: DIM, padding: "9px 12px", margin: 0 }}>
                 No issues at this instant. That is a positive statement from the
                 engine and the register, not an absence of information.
@@ -635,6 +831,55 @@ export function TopBar({
   );
 }
 
+/** A role's yard word, or the code itself for one this build does not know. */
+const roleWord = (code: string): string => (ROLE_WORDS as Record<string, string>)[code] ?? code;
+
+/** The roles on the button: the server's, or in demo mode the chosen one. */
+function rolesLine(who: WhoAmI, persona: Persona): string {
+  if (who.roles.length > 0) return who.roles.map(roleWord).join(", ");
+  return who.identity_mode === "dev-headers" ? `${persona.name} (no roles — every door)` : "no role";
+}
+
+/** Where the person came from, in one clause. */
+function sourceLine(who: WhoAmI): string {
+  switch (who.person.source) {
+    case "proxy":
+      return "asserted by the yard's proxy";
+    case "dev-shim":
+      return "DEMO MODE — a demo person the shell asserted; not a login";
+    case "dev-shim-anonymous":
+      return "DEMO MODE — no person asserted; the shim's anonymous default";
+    default:
+      return `source ${who.person.source}`;
+  }
+}
+
+function RoleRow({ p, active, onPick }: { p: Persona; active: boolean; onPick: () => void }) {
+  return (
+    <button
+      onClick={onPick}
+      style={{
+        display: "flex", gap: 9, alignItems: "center", width: "100%", textAlign: "left",
+        padding: "7px 12px",
+        background: active ? C.raised : "transparent",
+        border: "none", borderBottom: `1px solid ${LINE}`,
+        borderLeft: `3px solid ${active ? C.accent : "transparent"}`,
+        cursor: "pointer", font: "inherit", color: C.text,
+      }}
+    >
+      <span style={{ width: 24, height: 24, borderRadius: 12, background: C.well, color: active ? C.accent : DIM, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+        {initialsOf(p.name)}
+      </span>
+      <span>
+        <span style={{ display: "block", fontSize: 12, fontWeight: 600 }}>{p.name}</span>
+        <span style={{ display: "block", fontSize: 10.5, color: DIM }}>
+          {p.focus} · opens {p.opens}
+        </span>
+      </span>
+    </button>
+  );
+}
+
 function Chevron() {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.dim} strokeWidth={2}>
@@ -671,29 +916,96 @@ const clusterBtn: React.CSSProperties = {
   font: "inherit",
 };
 
-/* --------------------------------------------------------- guardrail strip */
+/* -------------------------------------------------------------- legend rows */
 
-export function GuardrailStrip() {
+function LegendGroup({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", gap: 12, alignItems: "center", padding: "6px 16px", background: C.panel, borderBottom: `1px solid ${LINE}`, fontSize: 11.5, flexWrap: "wrap" }}>
-      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+    <div style={{ borderBottom: `1px solid ${LINE}`, padding: "7px 12px 8px" }}>
+      <div style={{ fontSize: 9.5, letterSpacing: 0.8, textTransform: "uppercase", color: DIM, marginBottom: 5 }}>{title}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>{children}</div>
+    </div>
+  );
+}
+
+function LegendRow({ swatch, label, code, gloss }: { swatch: string; label: string; code?: string; gloss: string }) {
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 11.5 }}>
+      <span style={{ width: 9, height: 9, borderRadius: 2, background: swatch, flex: "none", alignSelf: "center" }} />
+      <span style={{ fontWeight: 700, color: swatch, fontSize: 10.5, letterSpacing: 0.4, flex: "0 0 150px", lineHeight: 1.3 }}>
+        {label}
+        {code && <span style={{ fontFamily: "monospace", fontWeight: 400, color: DIM, marginLeft: 5, letterSpacing: 0 }}>{code}</span>}
+      </span>
+      <span style={{ color: C.bright }}>{gloss}</span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- status strip */
+
+/**
+ * One line of numbers, the same on every screen.
+ *
+ * Four boards used to lead with four different counts of trouble — spaces,
+ * activities, issues, crews — each right at its own grain and none saying
+ * which. This strip is the hull's headline everywhere: what is held now, what
+ * cannot run as planned, what is open for a decision. Every figure names its
+ * grain in its label, and every figure comes from the same two reads the alert
+ * bell uses, so the strip and the bell cannot disagree. It also carries the
+ * guardrail — decision support, not authorization — and the data marking,
+ * which used to be a band of their own.
+ */
+export function StatusStrip({
+  rows,
+  issues,
+  verdictsOk,
+}: {
+  rows: DeckStateRow[];
+  issues: Issue[];
+  verdictsOk: boolean | null;
+}) {
+  const held = rows.filter((r) => r.readiness === "held");
+  const heldHours = held.reduce((n, r) => n + r.remaining_hours, 0);
+  const notExecutable = issues.filter((i) => i.kind === "not_executable_as_planned").length;
+  const atRisk = issues.reduce((n, i) => n + i.hours_at_risk, 0);
+  const fig = (value: string, label: string, title: string, tone?: string) => (
+    <span title={title} style={{ display: "flex", gap: 5, alignItems: "baseline", whiteSpace: "nowrap" }}>
+      <b style={{ fontVariantNumeric: "tabular-nums", color: tone ?? C.bright, fontSize: 12.5 }}>{value}</b>
+      <span style={{ color: DIM, fontSize: 10.5 }}>{label}</span>
+    </span>
+  );
+  return (
+    <div style={{ display: "flex", gap: 14, alignItems: "center", padding: "5px 16px", background: C.panel, borderBottom: `1px solid ${LINE}`, fontSize: 11.5, flexWrap: "wrap" }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 6 }} title="Flags risk; the planner decides. Nothing here modifies the schedule of record or grants an authorization.">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth={1.8}>
           <path d="M12 3l8 4v5c0 5-4 8-8 9-4-1-8-4-8-9V7z" strokeLinejoin="round" />
           <path d="M9 12l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <span>
-          <b>Decision support</b> — flags risk; the planner decides. Does not modify the schedule.
-        </span>
+        <b>Decision support</b>
       </span>
       <span style={{ color: "#424656" }}>·</span>
-      <span style={{ letterSpacing: 0.5 }}>ILLUSTRATIVE / NOTIONAL DATA</span>
-      <span style={{ color: "#424656" }}>·</span>
-      <span style={{ display: "flex", alignItems: "center", gap: 5, color: C.accent, fontWeight: 600 }}>
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9}>
-          <rect x="5" y="11" width="14" height="9" rx="1.5" />
-          <path d="M8 11V8a4 4 0 018 0v3" />
-        </svg>
-        IL5 / sovereign
+      {verdictsOk === false ? (
+        <span style={{ color: C.warn, fontWeight: 600 }}>
+          Verdicts unavailable — the engine did not answer for this instant. Do not read any board as clearance.
+        </span>
+      ) : (
+        <>
+          {fig(String(held.length), "spaces held now", "Compartments with work booked that the engine refuses at this instant — the readiness rollup's HELD count.", held.length > 0 ? C.danger : undefined)}
+          {fig(mh(Math.round(heldHours)), "standing by", "Remaining man-hours booked into those held spaces.", heldHours > 0 ? C.danger : undefined)}
+          {fig(String(notExecutable), "activities not executable as planned", "Register rows whose space refuses them somewhere inside their planned window — a property of the plan, indifferent to the clock.", notExecutable > 0 ? C.warn : undefined)}
+          {fig(String(issues.length), "open issues", "Everything on the Conflicts & Risk board at this instant — holds, broken plans, strandings, overlaps — the alert bell's number.")}
+          {fig(mh(Math.round(atRisk)), "at risk", "Man-hours at risk across every open issue; the same hours can appear under more than one issue kind.")}
+        </>
+      )}
+      <span style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+        <span style={{ letterSpacing: 0.5, color: DIM }}>ILLUSTRATIVE / NOTIONAL DATA</span>
+        <span style={{ color: "#424656" }}>·</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 5, color: C.accent, fontWeight: 600 }}>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9}>
+            <rect x="5" y="11" width="14" height="9" rx="1.5" />
+            <path d="M8 11V8a4 4 0 018 0v3" />
+          </svg>
+          IL5 / sovereign
+        </span>
       </span>
     </div>
   );

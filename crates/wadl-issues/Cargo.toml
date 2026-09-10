@@ -23,6 +23,10 @@ serde.workspace = true
 
 [dev-dependencies]
 uuid.workspace = true
+# The conflict tests pin the wire shape of the two new issue kinds
+# (`hot_vs_flammable`, `crowding`) as JSON; test-only, so the crate's
+# runtime tree (and its wasm build) stays serde + the pure crates.
+serde_json.workspace = true
 
 [lints]
 workspace = true

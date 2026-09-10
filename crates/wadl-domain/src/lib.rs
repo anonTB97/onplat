@@ -33,10 +33,12 @@
 )]
 
 pub mod capability;
+pub mod civil;
 pub mod compartment;
 pub mod ids;
 pub mod permit;
 pub mod time;
+pub mod trades;
 pub mod units;
 
 pub use capability::Capability;

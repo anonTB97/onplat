@@ -1,0 +1,42 @@
+---
+source: crates/wadl-engine/tests/golden_rule_table.rs
+description: electrical work one bus hop out
+info:
+  rule: R07
+  ordinal: "1"
+  scenario: electrical work one bus hop out
+  hazard_kind: energised_bus
+  origin: 3-148-2-E
+  subject: 3-148-0-L
+  work_type: electrical
+  at_min: 0
+  ended_min: ~
+  expect_state: BLOCK
+  expect_clearer: isolation_authority
+  expect_clear_min: ~
+---
+{
+  "state": "BLOCK",
+  "trace": [
+    {
+      "rule_code": "R07",
+      "rule_version": "00000000-0000-0000-0000-000000000701",
+      "state": "BLOCK",
+      "source": "3-148-2-E",
+      "hazard": "Bus 3-SG-2 energised",
+      "depth": 1,
+      "path": [
+        "3-148-2-E",
+        "3-148-0-L"
+      ],
+      "via": [
+        "electrical_bus"
+      ],
+      "authority": "NSTM Ch. 300; NAVSEA S9086-KC-STM-010",
+      "clearing_authority": "isolation_authority",
+      "earliest_clear": null,
+      "reason": "Bus 3-SG-2 energised in 3-148-2-E — reached via electrical_bus (1 hop)."
+    }
+  ],
+  "earliest_clear": null
+}

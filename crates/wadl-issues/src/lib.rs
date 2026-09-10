@@ -36,8 +36,12 @@ use wadl_domain::time::{Timestamp, Window};
 use wadl_engine::{evaluate, AdjacencyGraph, DecisionState, EvaluationRequest, Hazard, RuleSet};
 
 mod board;
+pub mod conflicts;
 
-pub use board::{derive, Issue, RegisterRow, ScheduleEdge, Stranding};
+pub use board::{
+    derive, derive_board, derive_with, Issue, IssueBoard, RegisterRow, ScheduleEdge, Stranding,
+};
+pub use conflicts::{ConflictEnd, Conflicts, SpaceRow, WorkRow};
 
 /// The engine's inputs for one hull, borrowed together.
 ///

@@ -33,6 +33,8 @@ interface Period {
   end: number;
 }
 
+// Week/month bucketing stays on UTC Monday/1st by design (S10 out of scope: a
+// 4–5 h boundary shift at week grain); the labels still render in the yard's clock.
 /** Monday 00:00 UTC at or before `ms`. */
 function mondayOf(ms: number): number {
   const d = new Date(ms);

@@ -70,6 +70,12 @@ tower = "0.5"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 anyhow = "1"
+# Response compression for the hand-rolled middleware (wadl-api::hardening).
+# Admission: rust-lang/flate2, pure-Rust miniz_oxide backend (no C, no unsafe
+# build scripts), one job. Admitted for one number: the full activity register
+# at key-op grain serializes to ~23 MB, and a yard network deserves the ~10:1
+# a JSON body compresses at. tower-http stays out — the layer is ours.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 sha2 = "0.10"

@@ -13,4 +13,10 @@ pub enum StoreError {
     /// A backend failure (connection, query, migration). The detail is for logs.
     #[error("backend error: {0}")]
     Backend(String),
+    /// A write refused because it would contradict a row already there — a
+    /// hull-row statement naming a hull number that exists under a different
+    /// id. Nothing was written. The detail names the clash in yard words
+    /// (codes and hull numbers), never a URL or another tenant's row.
+    #[error("conflict: {0}")]
+    Conflict(String),
 }

@@ -60,9 +60,10 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
         kicker="Field Guide"
         title="How to run this tool"
         stats={[
-          { value: "3", label: "import doors", title: "Schedule (P6 XER), zone chart (CSV), budget book (CSV) — each with a dry run, a confirm, and a revert." },
+          { value: "5", label: "import doors", title: "Schedule (P6 XER), zone chart, budget book, manning book, geometry register (CSV) — each with a dry run, a confirm, and a revert." },
+          { value: "7", label: "reports", title: "Shift sheet, zone day sheet, compartment card, conflict log, field-condition register, Tomorrow's board, key-event readiness — dated cuts that print and export." },
           { value: "4", label: "location grades", title: "Authored · derived (≈) · WBS zone hint · unlocated. Guessing is allowed because it is graded and reported; guessing silently is forbidden." },
-          { value: "1", label: "ledger", title: "Every decision a planner records lands in one tamper-evident, hash-chained ledger." },
+          { value: "1", label: "ledger", title: "Every decision a person records lands in one tamper-evident, hash-chained ledger that names who recorded it." },
         ]}
         note="Decision support — this tool flags risk; the planner decides. It never modifies the schedule of record: P6 stays the plan's home, this is where the plan meets the ship's authorization state."
       />
@@ -96,15 +97,52 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
           <p style={{ margin: "0 0 8px" }}>
             <span style={dt}>Nothing lands blind.</span> Every upload stages a server-side{" "}
             <b>dry run</b> — activity and edge counts, the location-mapping report, the hours
-            reconciliation — behind one Confirm/Cancel bar. Imports are{" "}
+            reconciliation — behind one Confirm/Cancel bar. The CSV doors are{" "}
             <b>all-or-nothing</b>: one rejected line refuses the file with every reason listed at
             once. And every door has a <b>revert</b>: taking a document back out is one click, and
             the screens return to what the tool can honestly serve without it.
           </p>
+          <p style={{ margin: "0 0 8px" }}>
+            <span style={dt}>The schedule door survives the yard&apos;s own export.</span> The file is
+            decoded in the browser (UTF-8, or Windows-1252 as P6 writes it from Windows) and the
+            card says which. The yard&apos;s conventions are a <b>field map</b> — which UDF or
+            activity code carries the compartment, the work item, the work type and the trade;
+            which projects to serve — chosen on the card from the fields the file itself carries,
+            and every change re-runs the dry run so the located count moves before anything is
+            stored. Rows the parser cannot honestly accept are <b>quarantined</b> with their line
+            and reason rather than refusing the file; level-of-effort, WBS-summary and
+            other-project rows are listed as excluded, not lost; only labor assignments are
+            man-hours. Every commit is a <b>run</b>: the Runs fold lists them newest first with the
+            served one marked, any run diffs against the served one, and <i>serve this run</i>{" "}
+            brings a prior import back, ledgered. The line under the hull in the top bar reads
+            whose export every screen is on and since when.
+          </p>
+          <p style={{ margin: "0 0 8px" }}>
+            <span style={dt}>The rules are a document too.</span> The <b>Rule table</b> card on{" "}
+            <Go to="sources" label="Data Sources" onOpenModule={onOpenModule} /> is the safety
+            authority&apos;s door: <b>Export CSV</b> hands them the table in force in their own
+            handoff columns; an upload dry-runs every row against the hull as it stands — the
+            state, the reach, the work types it binds to, the hold, what it <i>fires on today</i>,
+            which spaces would change state — and Confirm puts it in force on every trace with
+            content-addressed version ids, so a row that did not change keeps its id and its
+            golden trace. Rows bind by <b>work type</b>: an inspection above a curing coat is
+            judged by the rows bound to inspection, the weld beside it by the rows bound to hot
+            work, and unknown work by every row. The{" "}
+            <Go to="sequenceBoard" label="Sequence Board" onOpenModule={onOpenModule} /> carries
+            the work type per row, says <i>judged by N rows bound to</i> it, and wears a{" "}
+            <b>RULES</b> chip naming the table and whether it is <b>signed</b>. Only Safety may{" "}
+            <b>Sign this table</b>: the statement and the table&apos;s hash go into the ledger under
+            their name as <span style={mono}>RULE_TABLE_SIGNED</span>, and any later commit unsigns
+            it — the signature is of a hash, never of a label.
+          </p>
           <p style={{ margin: 0, ...dim }}>
-            A realistic trial file ships in the repo:{" "}
-            <span style={mono}>reference/p6-sample/CVN73-PIA26-full.xer</span> — 1,561 activities
-            across all six zones, statused to a data date, with every grading path represented.
+            A realistic hull ships in the repo as documents: <span style={mono}>reference/cvn73/</span>{" "}
+            — a 476-space compartment register on twelve decks, a zone chart of 3-D blocks, a
+            coupling register, a geometry register and a morning&apos;s field-condition log — and{" "}
+            <span style={mono}>reference/p6-sample/CVN73-PIA26-full.xer</span>, about 5,700
+            activities across all six zones, statused to a data date, with every grading path
+            represented. The demo boots on them (<span style={mono}>WADL_DEMO_DOCS</span>); the
+            scheme is written up in <span style={mono}>docs/zone-scheme.md</span>.
           </p>
         </Section>
 
@@ -186,7 +224,29 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
             <Go to="dailyOps" label="Daily Ops" onOpenModule={onOpenModule} /> — the day&apos;s
             slice per shift, printable as the pass-down board.{" "}
             <span style={dt}>Continuously:</span> the time control up top is one instant for the
-            whole app — scrub it and every screen answers for the same moment.
+            whole app — scrub it and every screen answers for the same moment. Every clock on
+            screen is the yard&apos;s own wall clock, and the strip names the zone once; until a
+            yard clock is loaded in Data Sources every time carries a <code>Z</code> and the strip
+            is amber, because the tool says &quot;no yard clock&quot; rather than guess one.
+          </p>
+          <p style={{ margin: "0 0 8px" }}>
+            <span style={dt}>The morning meeting:</span> on{" "}
+            <Go to="dailyOps" label="Daily Ops" onOpenModule={onOpenModule} /> the{" "}
+            <b>Tomorrow</b> chip is the next of the yard&apos;s shifts after the instant on the
+            clock, its work evaluated by the engine <i>at the shift&apos;s start</i> under the field
+            conditions on record now. The holds in front of it split three ways — <b>clearable
+            tonight</b> (one action opens it: who, what, where, and what the platform is
+            assuming), <b>clears on its own</b> (a clock runs out before, during or after the
+            shift), <b>needs a plan</b> (no clock and no single action) — then the sendable work
+            per trade. It is a projection and the strip says so; overnight tag-outs are not on it.{" "}
+            <Go to="week" label="Week Ahead" onOpenModule={onOpenModule} /> is keyed to the next
+            key event the schedule&apos;s own logic ties work to: every activity that must finish
+            first, worst first — <b>misses the event</b> when the engine&apos;s window ends after
+            it or no date can be promised, <b>slides · still makes it</b>, <b>cannot be
+            assessed</b>, <b>planned past the event</b>, <b>on plan</b> with its margin — the
+            hold on the row, the proposal already headed to P6 read against the event date
+            (<i>makes it</i> / <i>misses it</i>), a seven-day strip, and the inspector to propose
+            from the row. Both print as sheets with the cut and every figure&apos;s layer.
           </p>
           <p style={{ margin: 0 }}>
             <span style={dt}>The one discipline to keep:</span> the instant <i>marks</i> rows in or
@@ -224,6 +284,28 @@ export default function FieldGuide({ onOpenModule }: { onOpenModule: (id: string
               ))}
             </tbody>
           </table>
+        </Section>
+
+        <Section n="07" title="Who you are">
+          <p style={{ margin: "0 0 8px" }}>
+            <span style={dt}>The proxy names you, the ledger records you, your role decides
+            which doors you may commit.</span> The tool never logs anyone in: the yard&apos;s
+            CAC-authenticated proxy asserts who you are on its private hop, and the role button
+            in the top bar shows who the <i>server</i> resolved — the name every ledger row will
+            carry in its <b>By</b> column, and the roles the directory asserted. Each role holds a
+            few capabilities (raise a field condition, record a clearance, commit or revert a
+            document, propose a schedule change, answer for an option or an issue); a door your
+            role does not hold is grey, and its tooltip is the same sentence the server would
+            refuse you with — who may not, and who may. A dry run is never refused: anyone may
+            preview what a document would change.
+          </p>
+          <p style={{ margin: 0, ...dim }}>
+            An amber <b style={{ color: C.warn }}>DEMO MODE</b> badge means the dev identity shim
+            is on: the shell is asserting a demo person for the role you picked, and switching
+            role switches what you may do and who the ledger names. It is a rehearsal of the
+            contract, not a login; the band at the top and bottom wears the markings the
+            deployment served, and reads amber when none were received.
+          </p>
         </Section>
       </div>
     </div>

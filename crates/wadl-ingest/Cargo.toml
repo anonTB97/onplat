@@ -16,5 +16,10 @@ csv.workspace = true
 # stays wadl-domain's Clock.
 chrono.workspace = true
 
+[dev-dependencies]
+# The clock tests read the Norfolk clock out of the shared vector file
+# (reference/clock/yard-clock-vectors.json); test-only.
+serde_json.workspace = true
+
 [lints]
 workspace = true

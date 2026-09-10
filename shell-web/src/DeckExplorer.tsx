@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { clampZoom, planZoomAt, sheetZoomAt, wheelFactor } from "./camera";
 import {
+  clearHazard,
+  HAZARD_KINDS,
+  raiseHazard,
   compartmentState,
   deckStates,
   getZoneChart,
   importZoneChart,
   listActivities,
   listDecks,
+  getGeometry,
+  getManningBook,
+  listHazards,
   readiness,
   revertZoneChart,
   type Activity,
@@ -15,16 +21,23 @@ import {
   type DeckStateRow,
   type Decision,
   type Identity,
+  type GeometryInfo,
+  type LiveHazard,
+  type ManningBook,
   type Rollup,
   type ZoneBound,
   type ZoneChart,
   workConflicts,
   type WorkConflicts,
+  zoneAdjacent,
+  type AdjacentSpace,
+  type ZoneAdjacency,
 } from "./api";
 import { ShipBoard, ZoneBoard, ZoneHolders, ZoneMatrix, type Drill } from "./ReadinessBoards";
 import { SelectorRail } from "./DeckRail";
 import { ShipView } from "./ShipView";
 import { VerticalTrace } from "./VerticalTrace";
+import { useIdentity } from "./identity";
 import Mitigations from "./Mitigations";
 import { MARKING_H } from "./Chrome";
 import type { Altitude as ChromeAltitude } from "./Chrome";
@@ -43,8 +56,10 @@ import { parseZoneCsv } from "./ingest";
 import { HORIZONS, type Horizon } from "./TimeControl";
 import { windowLoadBySpace, windowLoadTotal, type SpaceLoad } from "./windowLoad";
 import { DiscardButton } from "./DiscardButton";
-import { zoneBands, type ZoneGeometry } from "./zones";
-import { fmtDate, fmtDay } from "./clock";
+import { bandCoversDeck, zoneBands, type ZoneGeometry } from "./zones";
+import { fmtDate, fmtDay, fmtMonth } from "./clock";
+import { blockEnd, blockLabel, blockStart, dayStart, nextDayStart } from "./watch";
+import { demandByTrade, demandByZone, zoneInteractions } from "./manning";
 
 const DIM = C.dim;
 
@@ -74,6 +89,32 @@ type Mode = "drawing" | "schematic";
  * owns the value and this module is a controlled component over it.
  */
 type Altitude = ChromeAltitude;
+
+/** The zone in focus, as the canvases read it: who is inside, who is next
+ *  door and why, and whether the next-door answer has arrived. */
+export interface ZoneFocus {
+  zone: string;
+  inside: Set<string>;
+  adjacent: Map<string, AdjacentSpace>;
+  served: boolean;
+}
+
+/** The server's reasons, in yard words. */
+export function nextDoorWords(via: string[]): string {
+  return via
+    .map((v) =>
+      v === "frame_boundary"
+        ? "across the frame boundary"
+        : v === "deck_above"
+          ? "on the deck above"
+          : v === "deck_below"
+            ? "on the deck below"
+            : v.startsWith("coupled:")
+              ? `coupled by ${v.slice(8).replace(/_/g, " ")}`
+              : v,
+    )
+    .join(" · ");
+}
 
 /** Viewport height for a plate, in CSS px. */
 const SHEET_BOX_H = 520;
@@ -126,10 +167,18 @@ export default function DeckExplorer({
   asOf,
   horizon,
   now,
+  onMutated,
+  zoneFocus,
+  onZoneFocus,
 }: {
   identity: Identity;
   vesselId: string;
   hullLabel: string;
+  /** The zone in focus, shared with the Sequence Board through the shell:
+   *  the rail picks it, the canvases blot out everything outside it and
+   *  keep next-door work visible. */
+  zoneFocus: string | null;
+  onZoneFocus: (zone: string | null) => void;
   /** Controlled by the shell, because the persona decides where you land. */
   altitude: Altitude;
   onAltitude: (a: Altitude) => void;
@@ -153,6 +202,9 @@ export default function DeckExplorer({
   horizon: Horizon;
   /** The server's now, for the live (asOf = null) case. */
   now: number | null;
+  /** Something on this screen changed the hull's served facts (an
+   *  administrative clearance) — the shell should refetch what it shares. */
+  onMutated?: () => void;
 }) {
   const [decks, setDecks] = useState<Deck[]>([]);
   const [rows, setRows] = useState<DeckStateRow[]>([]);
@@ -161,6 +213,22 @@ export default function DeckExplorer({
   const [selectedDeck, setSelectedDeck] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [decision, setDecision] = useState<Decision | null>(null);
+  // The raw live facts, joined to the trace so a refusing step can carry the
+  // clear action for the hazard behind it. Bumping `epoch` refetches every
+  // read on this screen — how a clearance's cascade becomes visible without
+  // waiting for the next scrub.
+  const [hazards, setHazards] = useState<LiveHazard[]>([]);
+  const [epoch, setEpoch] = useState(0);
+  // The manning strip: crew demand for the current step against the imported
+  // supply. A panel toggle rather than a colour lens — it ADDS numbers to
+  // whatever the map is already showing.
+  const [showManning, setShowManning] = useState(false);
+  const [manningBook, setManningBook] = useState<ManningBook | null>(null);
+  // The geometry register (docs/geometry-accuracy.md): its deck coverage
+  // bands shade "no deck here" on the plate, and its presence is named in
+  // marker titles. The surveyed extents themselves arrive on the rows —
+  // the API overlays them, so no view re-derives the grade.
+  const [geometry, setGeometry] = useState<GeometryInfo | null>(null);
   // Two error slots, because the two fetches fail for different reasons and need
   // different words. The register is scope-gated: failing it means this hull is
   // not yours. The states are instant-gated too: failing those can just mean the
@@ -169,7 +237,9 @@ export default function DeckExplorer({
   const [error, setError] = useState<string | null>(null);
   const [instantError, setInstantError] = useState<string | null>(null);
 
-  const [zoneFilter, setZoneFilter] = useState<string | null>(null);
+  // The zone in focus is the shell's; this screen reads and sets it.
+  const zoneFilter = zoneFocus;
+  const setZoneFilter = onZoneFocus;
   const [lens, setLens] = useState<Lens>("space");
   // Two independent axes, as in the prototype. What you are looking at (one deck
   // or a vertical trace) is a different question from how it is drawn (the real
@@ -195,6 +265,10 @@ export default function DeckExplorer({
     summary: string;
   } | null>(null);
   const [zoneNonce, setZoneNonce] = useState(0);
+  // The zone chart's door lives on this screen too: commit and discard are
+  // greyed for a person the matrix does not let commit a document.
+  const gate = useIdentity();
+  const mayCommitChart = gate.can("commit_document");
   const [tradeFilter, setTradeFilter] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -221,6 +295,7 @@ export default function DeckExplorer({
           no: r.compartment.compartment_no,
           zone: r.compartment.zone,
           frame: r.compartment.frame,
+          deckOrdinal: r.compartment.deck_ordinal,
         })),
         0,
         Math.max(
@@ -230,8 +305,9 @@ export default function DeckExplorer({
         zoneChart?.source
           ? { label: zoneChart.source, bounds: zoneChart.bounds }
           : null,
+        new Map(decks.map((d) => [d.code, d.ordinal])),
       ),
-    [rows, zoneChart],
+    [rows, zoneChart, decks],
   );
 
   // The chart itself. Failure degrades to inferred bands rather than an
@@ -279,13 +355,20 @@ export default function DeckExplorer({
   // fabricated trace behind it, which is the one thing this screen must never do.
   // The selection survives, because scrubbing is how you watch one space change.
   useEffect(() => {
+    // One stale flag over every fetch in this effect: a slow response from the
+    // previous hull must not paint its rows, register, hazards, manning, or
+    // deck bands onto the next hull's plates (repo convention: fetches carry
+    // stale guards).
+    let stale = false;
     Promise.all([deckStates(identity, vesselId, asOf), readiness(identity, vesselId, asOf)])
       .then(([r, roll]) => {
+        if (stale) return;
         setRows(r);
         setRollup(roll);
         setInstantError(null);
       })
       .catch((e: unknown) => {
+        if (stale) return;
         setRows([]);
         setRollup(null);
         setInstantError(String(e));
@@ -293,9 +376,40 @@ export default function DeckExplorer({
     // The register, for the whole-ship view: activities are the markers there,
     // and they carry the instant like every other read on this screen.
     listActivities(identity, vesselId, asOf)
-      .then((r) => setActivities(r.activities))
-      .catch(() => setActivities([]));
-  }, [identity, vesselId, asOf]);
+      .then((r) => {
+        if (!stale) setActivities(r.activities);
+      })
+      .catch(() => {
+        if (!stale) setActivities([]);
+      });
+    // The live facts at the instant: a hazard is on the hull from when it was
+    // raised until it was cleared, and a board scrubbed back past a clearance
+    // shows the hazard that was really there.
+    listHazards(identity, vesselId, asOf)
+      .then((h) => {
+        if (!stale) setHazards(h);
+      })
+      .catch(() => {
+        if (!stale) setHazards([]);
+      });
+    getManningBook(identity, vesselId)
+      .then((m) => {
+        if (!stale) setManningBook(m);
+      })
+      .catch(() => {
+        if (!stale) setManningBook(null);
+      });
+    getGeometry(identity, vesselId)
+      .then((g) => {
+        if (!stale) setGeometry(g);
+      })
+      .catch(() => {
+        if (!stale) setGeometry(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, asOf, epoch]);
 
   // The reading window: from the instant, one horizon forward. This is what
   // makes Shift / Week / Month change what this screen SAYS, not merely how
@@ -306,6 +420,37 @@ export default function DeckExplorer({
   // deck plan can draw the pairs and a worker at a kiosk sees them without
   // opening anything.
   const [conflicts, setConflicts] = useState<WorkConflicts | null>(null);
+  // Next door to the zone in focus — served, with the reason each space
+  // counts, so the canvases can blot out the hull and still show what is
+  // about to reach in. Refetched with the instant and after a clearance.
+  const [adjacency, setAdjacency] = useState<ZoneAdjacency | null>(null);
+  useEffect(() => {
+    setAdjacency(null);
+    if (!zoneFocus) return undefined;
+    let stale = false;
+    zoneAdjacent(identity, vesselId, zoneFocus, asOf)
+      .then((a) => {
+        if (!stale) setAdjacency(a);
+      })
+      .catch(() => {
+        if (!stale) setAdjacency(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, zoneFocus, asOf, epoch]);
+  /** The focus, as the canvases read it: who is inside, who is next door and why. */
+  const focus = useMemo(() => {
+    if (!zoneFocus) return null;
+    const adjacent = new Map<string, AdjacentSpace>();
+    for (const a of adjacency?.adjacent ?? []) adjacent.set(a.compartment, a);
+    return {
+      zone: zoneFocus,
+      inside: new Set(rows.filter((r) => r.compartment.zone === zoneFocus).map((r) => r.compartment.compartment_no)),
+      adjacent,
+      served: adjacency !== null,
+    };
+  }, [zoneFocus, adjacency, rows]);
   useEffect(() => {
     let stale = false;
     workConflicts(identity, vesselId, asOf)
@@ -318,14 +463,21 @@ export default function DeckExplorer({
     return () => {
       stale = true;
     };
-  }, [identity, vesselId, asOf]);
+  }, [identity, vesselId, asOf, epoch]);
 
-  const winStart = asOf ?? now ?? 0;
+  // At the Day horizon the reading window is the yard's CALENDAR day under
+  // the clicker, not [instant, +24h): picking the 08–12 block must not slide
+  // the "this day" numbers into tomorrow morning. Same day-identity the ops
+  // board uses — the local date, which is 23 or 25 hours long twice a year.
+  const winStart =
+    horizon === "day" ? dayStart(asOf ?? now ?? 0) : (asOf ?? now ?? 0);
   const horizonSpan = HORIZONS[horizon].span;
   const winEnd =
-    horizonSpan !== null
-      ? winStart + horizonSpan
-      : Math.max(winStart + 1, ...activities.map((a) => a.planned?.end ?? 0));
+    horizon === "day"
+      ? nextDayStart(winStart)
+      : horizonSpan !== null
+        ? winStart + horizonSpan
+        : Math.max(winStart + 1, ...activities.map((a) => a.planned?.end ?? 0));
   const spaceLoad = useMemo(
     () => (winStart > 0 ? windowLoadBySpace(activities, winStart, winEnd) : new Map()),
     [activities, winStart, winEnd],
@@ -350,7 +502,7 @@ export default function DeckExplorer({
     compartmentState(identity, vesselId, selected, asOf)
       .then((r) => setDecision(r.decision))
       .catch(() => setDecision(null));
-  }, [identity, vesselId, selected, asOf]);
+  }, [identity, vesselId, selected, asOf, epoch]);
 
   // A compartment handed in by the chrome — the global search or an alert. Doing
   // this here rather than in the shell keeps one place that knows a compartment's
@@ -373,6 +525,14 @@ export default function DeckExplorer({
     // The callback identity is the shell's concern, not a reason to re-report.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
+
+  // A clearance changed the hull's facts: refetch everything on this screen,
+  // and tell the shell so its shared reads (top-bar rows, the alert bell)
+  // move in the same breath. VR-06: the flip must be one refresh, not a scrub.
+  const handleCleared = () => {
+    setEpoch((n) => n + 1);
+    onMutated?.();
+  };
 
   // Esc backs out one layer at a time: the drawer first, then full screen.
   // Expected of anything that takes over the viewport, and the only way out if
@@ -461,20 +621,38 @@ export default function DeckExplorer({
     return [...set].sort();
   }, [rows]);
 
+  // The zone in focus does NOT filter here: the plates and the whole-ship
+  // view keep every space and ghost the ones outside the zone, so the hull
+  // stays legible around it and next-door work stays visible. The views
+  // that cannot ghost (the section, the schematic, the zone matrix) get
+  // `focusRows` — inside plus next door — instead.
   const visible = useMemo(
     () =>
       rows.filter((r) => {
         if (restrictedOnly && r.state === "ALLOW") return false;
         if (tradeFilter && !r.trades.includes(tradeFilter)) return false;
-        if (zoneFilter && r.compartment.zone !== zoneFilter) return false;
         return true;
       }),
-    [rows, restrictedOnly, tradeFilter, zoneFilter],
+    [rows, restrictedOnly, tradeFilter],
+  );
+  const inFocus = (r: DeckStateRow) =>
+    focus === null ||
+    focus.inside.has(r.compartment.compartment_no) ||
+    focus.adjacent.has(r.compartment.compartment_no);
+  const focusRows = useMemo(
+    () => (focus ? visible.filter(inFocus) : visible),
+    // `inFocus` closes over `focus` alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visible, focus],
   );
 
   const onDeck = useMemo(
     () => visible.filter((r) => r.compartment.deck_code === selectedDeck),
     [visible, selectedDeck],
+  );
+  const onDeckFocused = useMemo(
+    () => focusRows.filter((r) => r.compartment.deck_code === selectedDeck),
+    [focusRows, selectedDeck],
   );
 
   // The plate's height budget: a panel in the page normally; in full screen the
@@ -584,13 +762,14 @@ export default function DeckExplorer({
     <div>
       {/* Title from the prototype. The question is the point of the screen, so it
           is the subtitle rather than a description of the data model. */}
-      <div style={{ fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase", color: C.accent }}>
-        Deck Explorer · {hullLabel}
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <h1 style={{ fontSize: 22, margin: 0 }}>Deck Explorer</h1>
+        <span style={{ fontFamily: "monospace", fontSize: 11, color: DIM, letterSpacing: 0.3 }}>{hullLabel}</span>
       </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>
+      <div style={{ fontSize: 13, color: C.bright, margin: "3px 0 0" }}>
         Where can people work — and what&rsquo;s stopping them?
-      </h1>
-      <p style={{ color: DIM, fontSize: 12.5, margin: "0 0 12px", maxWidth: 780 }}>
+      </div>
+      <p style={{ color: DIM, fontSize: 12.5, margin: "4px 0 12px", maxWidth: 780 }}>
         Authorization is computed by the rule engine and read through the API — the shell
         never derives it. {heldCount} of {rows.length} compartments have work booked that
         {/* "currently" was true until the time control existed. On a scrubbed
@@ -672,14 +851,69 @@ export default function DeckExplorer({
           >
             Readiness overlay
           </button>
+          <button
+            style={{
+              ...seg(showManning),
+              borderColor: showManning ? C.accent : LINE,
+              color: showManning ? TEXT : DIM,
+            }}
+            onClick={() => setShowManning(!showManning)}
+            title="Crews for the current step — demand from the schedule, supply from the manning book, zones interacting"
+          >
+            Manning
+          </button>
         </div>
 
-        {zoneFilter && (
-          <button style={{ ...seg(true), marginTop: 3 }} onClick={() => setZoneFilter(null)} title="Clear the zone filter">
-            Zone {zoneFilter} ✕
-          </button>
+        {zoneFilter && focus && (
+          <span
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 8, marginTop: 3, padding: "3px 8px 3px 10px",
+              borderRadius: 6, border: `1px solid ${zoneColour(zoneFilter)}`, background: `${zoneColour(zoneFilter)}18`, fontSize: 11.5,
+            }}
+            title={adjacency?.basis ?? "Reading what is next door…"}
+          >
+            <b style={{ color: zoneColour(zoneFilter) }}>Zone {zoneFilter} in focus</b>
+            <span style={{ color: DIM }}>
+              {focus.inside.size} spaces
+              {focus.served
+                ? ` · ${focus.adjacent.size} next door` +
+                  (adjacency && adjacency.adjacent.some((a) => !a.permits_work)
+                    ? ` · ${adjacency.adjacent.filter((a) => !a.permits_work).length} refusing`
+                    : "")
+                : " · reading next door…"}
+              {" · everything else dims"}
+            </span>
+            <button
+              onClick={() => setZoneFilter(null)}
+              title="Leave zone focus — the whole hull draws again, on every screen"
+              style={{ font: "inherit", fontSize: 11, cursor: "pointer", padding: "1px 7px", borderRadius: 4, color: TEXT, background: "transparent", border: `1px solid ${LINE}` }}
+            >
+              ✕
+            </button>
+          </span>
         )}
       </div>
+
+      {zoneFilter && focus && adjacency && altitude === "compartment" && (
+        <NextDoorStrip
+          zone={zoneFilter}
+          adjacency={adjacency}
+          load={spaceLoad}
+          horizonLabel={HORIZONS[horizon].label.toLowerCase()}
+          onOpenSpace={openSpace}
+        />
+      )}
+
+      {showManning && (
+        <ManningPanel
+          activities={activities}
+          rows={rows}
+          conflicts={conflicts}
+          book={manningBook}
+          horizon={horizon}
+          at={asOf ?? now ?? 0}
+        />
+      )}
 
       {/* Wraps. Rail + canvas + trace is about 900px of hard minimum, so on a
           1100px laptop the trace was being pushed past the right edge and the
@@ -689,7 +923,9 @@ export default function DeckExplorer({
           <SelectorRail
             altitude={altitude}
             decks={decks}
-            rows={rows}
+            // In focus, the rail's deck counts answer for the zone: which
+            // decks the zone's work is on, and how much of it is held.
+            rows={zoneFilter ? rows.filter((r) => r.compartment.zone === zoneFilter) : rows}
             rollup={rollup}
             selectedDeck={selectedDeck}
             zoneFilter={zoneFilter}
@@ -730,7 +966,7 @@ export default function DeckExplorer({
                 rollup={rollup}
                 onDrill={drill}
                 zone={zoneFilter}
-                rows={visible}
+                rows={zoneFilter ? visible.filter((r) => r.compartment.zone === zoneFilter) : visible}
                 decks={decks}
                 selected={selected}
                 toneOf={toneOf}
@@ -816,7 +1052,7 @@ export default function DeckExplorer({
                   <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     <label
                       style={{ ...seg(false), display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer" }}
-                      title="Ingest the yard's zone chart (CSV: zone,lo_frame,hi_frame). All-or-nothing; previews its audit before storing."
+                      title="Ingest the yard's zone chart (CSV: zone,lo_frame,hi_frame[,top_deck,bottom_deck] — one block per row; a zone may own several). All-or-nothing; previews its audit before storing."
                     >
                       ⭱ Zone chart
                       <input
@@ -856,6 +1092,7 @@ export default function DeckExplorer({
                       <DiscardButton
                         what="the zone chart"
                         title="Throw the ingested chart away — zone bands return to this tool's own inference, and say so."
+                        refusedBecause={mayCommitChart ? undefined : gate.refusal("commit_document")}
                         onDiscard={() => {
                           setZoneMsg("⏳ discarding the zone chart…");
                           void revertZoneChart(identity, vesselId)
@@ -910,7 +1147,9 @@ export default function DeckExplorer({
                   <span style={{ color: DIM }}>{zonePending.summary}</span>
                   <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                     <button
-                      style={seg(true)}
+                      style={seg(true, !mayCommitChart)}
+                      disabled={!mayCommitChart}
+                      title={mayCommitChart ? "Store the chart — its bands become authored." : gate.refusal("commit_document")}
                       onClick={() => {
                         const staged = zonePending;
                         setZonePending(null);
@@ -940,6 +1179,7 @@ export default function DeckExplorer({
                   zonesOn={zonesOn}
                   zones={zoneGeometry}
                   zoneAlerts={zoneAlerts}
+                  focus={focus}
                   onPick={(deckCode, compartment) => {
                     if (compartment === selected) {
                       setSelected(null);
@@ -953,7 +1193,7 @@ export default function DeckExplorer({
               ) : view === "vertical" ? (
                 <VerticalTrace
                   decks={decks}
-                  rows={visible}
+                  rows={focusRows}
                   centreOrdinal={deckOrdinal}
                   selected={selected}
                   onSelect={toggleSelect}
@@ -963,7 +1203,19 @@ export default function DeckExplorer({
                 />
               ) : effMode === "drawing" && sheet ? (
                 <SheetView
+                  deckBands={
+                    geometry?.register
+                      ? {
+                          label: geometry.register.label,
+                          bands: geometry.register.decks.filter(
+                            (d) => d.deck_code === selectedDeck,
+                          ),
+                        }
+                      : null
+                  }
                   sheet={sheet}
+                  deckOrdinal={deckOrdinal}
+                  focus={focus}
                   rows={onDeck}
                   selected={selected}
                   onSelect={toggleSelect}
@@ -994,7 +1246,7 @@ export default function DeckExplorer({
                 />
               ) : (
                 <PlanView
-                  rows={onDeck}
+                  rows={onDeckFocused}
                   selected={selected}
                   onSelect={toggleSelect}
                   toneOf={toneOf}
@@ -1014,13 +1266,28 @@ export default function DeckExplorer({
                 />
               )}
 
-              {parsedGeometry && (
+              {geometry?.register ? (
+                <p style={{ fontSize: 10.5, color: DIM, marginTop: 8 }}>
+                  Geometry register <b style={{ color: C.bright }}>{geometry.register.label}</b>{" "}
+                  is in force: surveyed spaces draw their frame extent as a band on the
+                  plate&apos;s ruler, and shaded regions are where this deck does not
+                  exist. Spaces the register does not survey remain placard parses — the
+                  hover card says which is which.
+                  {(geometry.findings?.placard_disagreements.length ?? 0) > 0 && (
+                    <b style={{ color: C.warn }}>
+                      {" "}⚠ {geometry.findings?.placard_disagreements.length} surveyed
+                      space(s) disagree with their placard — see Data Sources.
+                    </b>
+                  )}
+                </p>
+              ) : parsedGeometry ? (
                 <p style={{ fontSize: 10.5, color: DIM, marginTop: 8 }}>
                   Positions derived from the placard numbers — this class uses the USN
                   deck-frame-side scheme. A hull whose register carries authored frame
-                  and side data uses that instead, and says <b>register</b>.
+                  and side data uses that instead, and says <b>register</b>. A surveyed
+                  geometry register (Data Sources) upgrades pins to true frame extents.
                 </p>
-              )}
+              ) : null}
 
               {/* legend — whichever colouring is actually in force */}
               <div style={{ display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap", fontSize: 11, color: DIM }}>
@@ -1054,7 +1321,7 @@ export default function DeckExplorer({
                       >
                         out of authored bounds:{" "}
                         {zoneChart?.audit.out_of_bounds
-                          .map((o) => `${o.compartment} (Fr ${o.frame} vs ${o.zone} ${o.lo_frame}–${o.hi_frame})`)
+                          .map((o) => `${o.compartment} (${o.deck_code} Fr ${o.frame} vs ${o.zone} ${o.bounds})`)
                           .join(" · ")}
                       </span>
                     )}
@@ -1074,9 +1341,9 @@ export default function DeckExplorer({
                     ))
                   : lens === "space"
                     ? (["ALLOW", "WARN", "SUSPEND", "BLOCK"] as const).map((s) => (
-                        <span key={s} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span key={s} style={{ display: "flex", alignItems: "center", gap: 5 }} title={`${s} — ${STATE_STYLE[s].gloss}`}>
                           <span style={{ width: 9, height: 9, borderRadius: 2, background: STATE_STYLE[s].fg }} />
-                          {s}
+                          {STATE_STYLE[s].label} — {STATE_STYLE[s].gloss}
                         </span>
                       ))
                     : allTrades.map((t) => (
@@ -1113,6 +1380,9 @@ export default function DeckExplorer({
               reveal={revealNonce}
               spaceLoad={spaceLoad}
               horizonLabel={HORIZONS[horizon].label.toLowerCase()}
+              hazards={hazards}
+              onCleared={handleCleared}
+              epoch={epoch}
             />
           </aside>
         )}
@@ -1161,6 +1431,9 @@ export default function DeckExplorer({
               reveal={revealNonce}
               spaceLoad={spaceLoad}
               horizonLabel={HORIZONS[horizon].label.toLowerCase()}
+              hazards={hazards}
+              onCleared={handleCleared}
+              epoch={epoch}
             />
           </div>
         )}
@@ -1169,6 +1442,419 @@ export default function DeckExplorer({
   );
 }
 
+
+/** The manning strip's step: what one click of the clicker covers. */
+function manningStep(horizon: Horizon, at: number): { start: number; end: number; noun: string; label: string } {
+  const step = HORIZONS[horizon].step;
+  if (horizon === "day") {
+    const start = blockStart(at);
+    return { start, end: blockEnd(at), noun: "watch", label: `${fmtDay(start)} · ${blockLabel(start)}` };
+  }
+  if (horizon === "week") return { start: at, end: at + step, noun: "day", label: fmtDay(at) };
+  if (horizon === "month") return { start: at, end: at + step, noun: "week", label: `wk of ${fmtDay(at)}` };
+  return { start: at, end: at + step, noun: "month", label: fmtMonth(at) };
+}
+
+/**
+ * Crews, superimposed on the reading. One step of the clicker — a watch,
+ * a day, a week — priced in PEOPLE: demand from the register by the shared
+ * pro-rating rule, supply from the imported manning book (or "demand only",
+ * said out loud), zones rolled up with their trade mix, and the zones that
+ * are colliding through the hull's physics named as pairs. Everything here is
+ * arithmetic over data the screen already fetched; the panel cannot disagree
+ * with the map above it.
+ */
+function ManningPanel({
+  activities, rows, conflicts, book, horizon, at,
+}: {
+  activities: Activity[];
+  rows: DeckStateRow[];
+  conflicts: WorkConflicts | null;
+  book: ManningBook | null;
+  horizon: Horizon;
+  at: number;
+}) {
+  const step = manningStep(horizon, at);
+  const spaceZone = useMemo(
+    () => new Map(rows.map((r) => [r.compartment.compartment_no, r.compartment.zone])),
+    [rows],
+  );
+  const trades = useMemo(
+    () => demandByTrade(activities, step.start, step.end),
+    [activities, step.start, step.end],
+  );
+  const { zones, unzonedHours } = useMemo(
+    () => demandByZone(activities, spaceZone, step.start, step.end, CREW_TOLERANCE),
+    [activities, spaceZone, step.start, step.end],
+  );
+  const interactions = useMemo(
+    () => zoneInteractions(conflicts, spaceZone),
+    [conflicts, spaceZone],
+  );
+  const have = new Map((book?.crews ?? []).map((c) => [c.trade, c.headcount]));
+  const totalPeople = trades.reduce((n, t) => n + t.people, 0);
+  const ppl = (n: number) => `≈${Math.ceil(n)}`;
+
+  const chipBase: React.CSSProperties = {
+    border: `1px solid ${LINE}`, borderRadius: 5, padding: "3px 8px",
+    fontSize: 11, whiteSpace: "nowrap",
+  };
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 14px",
+        marginBottom: 12, background: "#121316",
+        display: "flex", flexDirection: "column", gap: 8,
+      }}
+    >
+      <div style={{ display: "flex", gap: 12, alignItems: "baseline", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: DIM }}>
+          Manning — this {step.noun}
+        </span>
+        <span style={{ fontFamily: "monospace", color: C.bright, fontSize: 12 }}>{step.label}</span>
+        <b style={{ color: C.bright }}>{ppl(totalPeople)} people on the hull</b>
+        <span style={{ color: DIM, fontSize: 11 }}>
+          {book
+            ? `supply: ${book.label}`
+            : "demand only — no manning book loaded (Data Sources → Manning book)"}
+        </span>
+        {unzonedHours > 0 && (
+          <span style={{ color: C.warn, fontSize: 11 }} title="Scheduled hours whose space maps to no zone — counted, never hidden.">
+            {mh(Math.round(unzonedHours))} unzoned
+          </span>
+        )}
+      </div>
+
+      {/* Trades: need vs have. The shortfall is the headline, not the list. */}
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: C.subtle, minWidth: 48 }}>
+          Trades
+        </span>
+        {trades.length === 0 && <span style={{ color: DIM, fontSize: 11 }}>nothing scheduled this {step.noun}</span>}
+        {trades.map((t) => {
+          const supply = have.get(t.trade);
+          const short = supply !== undefined && Math.ceil(t.people) > supply;
+          return (
+            <span
+              key={t.trade}
+              title={`${t.trade}: ${Math.round(t.hours)} MH this ${step.noun} → ${ppl(t.people)} people${supply !== undefined ? ` · book says ${supply} available per half-shift` : " · no manning line"}`}
+              style={{
+                ...chipBase,
+                color: short ? "#fca5a5" : TEXT,
+                borderColor: short ? "rgba(239,68,68,0.6)" : LINE,
+                background: short ? "rgba(239,68,68,0.08)" : "transparent",
+              }}
+            >
+              {t.trade} <b>{ppl(t.people)}</b>
+              {supply !== undefined && (
+                <span style={{ color: short ? "#fca5a5" : C.ok }}> / {supply}{short ? " SHORT" : ""}</span>
+              )}
+            </span>
+          );
+        })}
+      </div>
+
+      {/* Zones: where those people stand. Crowded = some single space in the
+          zone implies more people than the working tolerance. */}
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: C.subtle, minWidth: 48 }}>
+          Zones
+        </span>
+        {zones.length === 0 && <span style={{ color: DIM, fontSize: 11 }}>no zoned work this {step.noun}</span>}
+        {zones.map((z) => {
+          const mix = [...z.byTrade.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([t, h]) => `${t} ${ppl(h / ((step.end - step.start) / 3_600_000))}`)
+            .join(" · ");
+          return (
+            <span
+              key={z.zone}
+              title={`${z.zone}: ${Math.round(z.hours)} MH this ${step.noun} → ${ppl(z.people)} people\n${mix}${z.crowded ? `\n⚠ a space in this zone implies more than ${CREW_TOLERANCE} people at once` : ""}`}
+              style={{
+                ...chipBase,
+                color: TEXT,
+                borderColor: z.crowded ? "rgba(245,158,11,0.65)" : LINE,
+                background: z.crowded ? "rgba(245,158,11,0.08)" : "transparent",
+              }}
+            >
+              {z.zone} <b>{ppl(z.people)}</b>{z.crowded ? " ⚠" : ""}
+              <span style={{ color: DIM }}> · {mix}</span>
+            </span>
+          );
+        })}
+      </div>
+
+      {/* Zones against zones: the day's served hot-vs-flammable pairs, rolled
+          up to the zone grain — "which sections are fighting each other". */}
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: C.subtle, minWidth: 48 }}>
+          Zone ⚡ zone
+        </span>
+        {interactions.length === 0 && (
+          <span style={{ color: DIM, fontSize: 11 }}>
+            no zones colliding today{conflicts === null ? " (conflicts unavailable)" : ""}
+          </span>
+        )}
+        {interactions.map((x) => (
+          <span
+            key={`${x.a}-${x.b}`}
+            title={x.reasons.join("\n")}
+            style={{ ...chipBase, color: C.warn, borderColor: "rgba(245,158,11,0.5)" }}
+          >
+            {x.a === x.b ? `${x.a} internal` : `${x.a} ⚡ ${x.b}`} · {x.pairs} pair{x.pairs === 1 ? "" : "s"}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The administrative clearance, where the refusal is (VR-05).
+ *
+ * The crew verifies the field condition ended — tag-out log sighted, gas-free
+ * certificate in hand — and the manager records that here with its basis. The
+ * server closes the fact, writes `HAZARD_CLEARED` to the ledger, and every
+ * verdict it was driving re-derives on the refetch this triggers. Live-fed
+ * conditions (hot work in progress) end themselves; this door is for the ones
+ * that end on a person's verification.
+ */
+/**
+ * Raising a field condition in the selected space — the other half of the
+ * clear loop. The day's tag-out or permit is posted here, against this
+ * space, with the kind and the label the deck would use; the server validates
+ * it against the register and what is already live, writes the ledger entry,
+ * and the whole screen refetches so every space the new fact holds re-derives.
+ */
+function RaiseControl({
+  identity, vesselId, compartment, onRaised,
+}: {
+  identity: Identity;
+  vesselId: string;
+  compartment: string;
+  onRaised: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const { can, refusal } = useIdentity();
+  const mayRaise = can("raise_hazard");
+  const [kind, setKind] = useState<string>(HAZARD_KINDS[0]?.kind ?? "hot_work_live");
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const chosen = HAZARD_KINDS.find((k) => k.kind === kind);
+
+  const submit = () => {
+    if (busy || label.trim().length === 0) return;
+    setBusy(true);
+    setError(null);
+    raiseHazard(identity, vesselId, { compartment, kind, label: label.trim() })
+      .then(() => {
+        setOpen(false);
+        setLabel("");
+        setBusy(false);
+        onRaised();
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+      });
+  };
+
+  const field: React.CSSProperties = {
+    font: "inherit", fontSize: 12, padding: "5px 8px", background: "#0d0e11", color: C.bright,
+    border: `1px solid ${LINE}`, borderRadius: 5, boxSizing: "border-box",
+  };
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
+      {!open && (
+        <button
+          onClick={() => setOpen(true)}
+          disabled={!mayRaise}
+          style={{
+            font: "inherit", fontSize: 11.5, cursor: mayRaise ? "pointer" : "not-allowed",
+            background: "transparent", color: mayRaise ? C.accent : C.faint, border: `1px solid ${LINE}`,
+            borderRadius: 5, padding: "3px 9px",
+          }}
+          title={mayRaise ? "Post a field condition — a tag-out, a coating ticket, a hot-work permit, a stop-work — against this space" : refusal("raise_hazard")}
+        >
+          Raise a field condition here…
+        </button>
+      )}
+      {open && (
+        <div>
+          <div style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>
+            Raise a field condition in <span style={{ fontFamily: "monospace", textTransform: "none" }}>{compartment}</span>
+          </div>
+          <div style={{ fontSize: 11, color: DIM, lineHeight: 1.45, marginTop: 3 }}>
+            A fact on the deck, as of now. It writes a ledger entry and every space this
+            condition reaches re-derives immediately. Clear it from the same panel when it ends.
+          </div>
+          <select value={kind} onChange={(e) => setKind(e.target.value)} style={{ ...field, marginTop: 6, width: "100%" }}>
+            {HAZARD_KINDS.map((k) => (
+              <option key={k.kind} value={k.kind}>{k.label} — {k.gloss}</option>
+            ))}
+          </select>
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            placeholder={chosen?.kind === "hot_work_live" ? "Label — e.g. HW-0912 · welding permit, deck plate" : "Label — the ticket, the bus, the permit, as the deck says it"}
+            autoFocus
+            style={{ ...field, marginTop: 6, width: "100%" }}
+          />
+          <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={submit}
+              disabled={busy || label.trim().length === 0}
+              style={{
+                font: "inherit", fontSize: 11.5, fontWeight: 700,
+                cursor: busy || label.trim().length === 0 ? "default" : "pointer",
+                background: label.trim().length === 0 ? "transparent" : "rgba(220,38,38,0.14)",
+                color: label.trim().length === 0 ? DIM : C.dangerSoft,
+                border: `1px solid ${label.trim().length === 0 ? LINE : "rgba(220,38,38,0.55)"}`,
+                borderRadius: 5, padding: "3px 10px",
+              }}
+            >
+              {busy ? "Recording…" : "Raise — write the ledger entry"}
+            </button>
+            <button
+              onClick={() => {
+                setOpen(false);
+                setError(null);
+              }}
+              style={{ font: "inherit", fontSize: 11.5, cursor: "pointer", background: "transparent", color: DIM, border: "none" }}
+            >
+              Cancel
+            </button>
+            {error && <span style={{ fontSize: 11, color: C.danger }}>{error}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClearControl({
+  identity, vesselId, hazard, onCleared,
+}: {
+  identity: Identity;
+  vesselId: string;
+  hazard: LiveHazard;
+  onCleared: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [basis, setBasis] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { can, refusal } = useIdentity();
+  const mayClear = can("clear_hazard");
+
+  const submit = () => {
+    if (busy || basis.trim().length === 0) return;
+    setBusy(true);
+    setError(null);
+    clearHazard(identity, vesselId, {
+      compartment: hazard.origin,
+      kind: hazard.kind,
+      basis: basis.trim(),
+    })
+      .then(() => {
+        // No local repaint: the fact is closed server-side and the refetch
+        // re-derives every verdict it was driving. Painting green here and
+        // being contradicted by the server is exactly DEF-1.
+        onCleared();
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+      });
+  };
+
+  return (
+    <div style={{ marginTop: 8, border: `1px solid ${LINE}`, borderRadius: 6, padding: "8px 10px" }}>
+      <div style={{ fontSize: 12, color: C.bright }}>{hazard.label}</div>
+      <div style={{ fontSize: 11, color: DIM, marginTop: 2 }}>
+        <span style={{ fontFamily: "monospace" }}>{hazard.origin}</span> · raised {fmtDate(hazard.since)}
+      </div>
+      {!open && (
+        <button
+          onClick={() => setOpen(true)}
+          disabled={!mayClear}
+          title={mayClear ? "Record that the field condition was verified ended, with the basis — the clearing authority's act" : refusal("clear_hazard")}
+          style={{
+            marginTop: 6, font: "inherit", fontSize: 11.5, cursor: mayClear ? "pointer" : "not-allowed",
+            background: "transparent", color: mayClear ? C.accent : C.faint, border: `1px solid ${LINE}`,
+            borderRadius: 5, padding: "3px 9px",
+          }}
+        >
+          Record administrative clearance…
+        </button>
+      )}
+      {!open && !mayClear && (
+        <div style={{ marginTop: 4, fontSize: 10.5, color: DIM }}>{refusal("clear_hazard")}</div>
+      )}
+      {open && (
+        <div style={{ marginTop: 7 }}>
+          <div style={{ fontSize: 11, color: DIM, lineHeight: 1.45 }}>
+            Only once the field condition is verified ended — tag-out log sighted,
+            gas-free certificate in hand. This writes a ledger entry with your
+            basis, and every space this fact is holding re-derives immediately.
+          </div>
+          <input
+            value={basis}
+            onChange={(e) => setBasis(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            placeholder="Basis — what was verified, and by whom"
+            autoFocus
+            style={{
+              marginTop: 6, width: "100%", boxSizing: "border-box", font: "inherit",
+              fontSize: 12, padding: "5px 8px", background: "#0d0e11", color: C.bright,
+              border: `1px solid ${LINE}`, borderRadius: 5,
+            }}
+          />
+          <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={submit}
+              disabled={busy || basis.trim().length === 0}
+              style={{
+                font: "inherit", fontSize: 11.5, fontWeight: 700,
+                cursor: busy || basis.trim().length === 0 ? "default" : "pointer",
+                background: basis.trim().length === 0 ? "transparent" : "#173322",
+                color: basis.trim().length === 0 ? DIM : "#4ade80",
+                border: `1px solid ${basis.trim().length === 0 ? LINE : "#2c5c3c"}`,
+                borderRadius: 5, padding: "3px 10px",
+              }}
+            >
+              {busy ? "Recording…" : "Clear — write the ledger entry"}
+            </button>
+            <button
+              onClick={() => {
+                setOpen(false);
+                setError(null);
+              }}
+              style={{
+                font: "inherit", fontSize: 11.5, cursor: "pointer", background: "transparent",
+                color: DIM, border: `1px solid ${LINE}`, borderRadius: 5, padding: "3px 9px",
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {error && (
+            <div style={{ marginTop: 6, fontSize: 11.5, color: C.danger }}>{error}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * The decision trace and its options — why the space is in its state, and what
@@ -1180,7 +1866,7 @@ export default function DeckExplorer({
  */
 function TracePanel({
   row, decision, asOf, identity, vesselId, rows, onOpenSpace, reveal,
-  spaceLoad, horizonLabel,
+  spaceLoad, horizonLabel, hazards, onCleared, epoch,
 }: {
   row: DeckStateRow | null;
   decision: Decision | null;
@@ -1193,6 +1879,13 @@ function TracePanel({
   /** Scheduled load per space inside the reading window. */
   spaceLoad: Map<string, SpaceLoad>;
   horizonLabel: string;
+  /** The hull's live recorded facts, for the clear affordance. */
+  hazards: LiveHazard[];
+  /** A clearance was recorded — refetch, the verdicts have moved. */
+  onCleared: () => void;
+  /** Bumped per mutation; keys the options panel so its proposals re-derive
+   *  too — an options card still offering to clear a cleared bus is stale. */
+  epoch: number;
 }) {
   return (
     <>
@@ -1210,8 +1903,12 @@ function TracePanel({
               <>
                 <div style={{ marginTop: 6, display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
                   <span style={{ fontFamily: "monospace" }}>{row.compartment.compartment_no}</span>
-                  <span style={{ color: STATE_STYLE[row.state].fg, fontWeight: 700, fontSize: 12 }}>
-                    {row.state}
+                  <span
+                    style={{ color: STATE_STYLE[row.state].fg, fontWeight: 700, fontSize: 12 }}
+                    title={`${row.state} — ${STATE_STYLE[row.state].gloss}`}
+                  >
+                    {STATE_STYLE[row.state].label}
+                    <span style={{ fontFamily: "monospace", fontWeight: 400, fontSize: 9.5, color: DIM, marginLeft: 5 }}>{row.state}</span>
                   </span>
                   <span
                     style={{ fontSize: 10, fontWeight: 700, color: OVERLAY_STYLE[overlayBucket(row)].fg }}
@@ -1296,12 +1993,49 @@ function TracePanel({
                     </div>
                   );
                 })}
+                {/* The facts behind the trace, with the clear action. The trace
+                    above answers WHY the space is shut; each entry here is the
+                    ONE recorded fact driving those steps, and clearing it is how
+                    the whole set flips — "when we clear that red X, does that
+                    clear all the other red?" It must. */}
+                {(() => {
+                  const steps = decision?.trace ?? [];
+                  const facts = hazards.filter((h) =>
+                    steps.some((st) => st.source === h.origin && st.hazard === h.label),
+                  );
+                  if (facts.length === 0) return null;
+                  return (
+                    <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
+                      <div style={{ fontSize: 9.5, letterSpacing: 0.6, textTransform: "uppercase", color: DIM }}>
+                        Field conditions holding this space
+                      </div>
+                      {facts.map((f) => (
+                        <ClearControl
+                          key={`${f.origin}:${f.kind}`}
+                          identity={identity}
+                          vesselId={vesselId}
+                          hazard={f}
+                          onCleared={onCleared}
+                        />
+                      ))}
+                    </div>
+                  );
+                })()}
+
+                <RaiseControl
+                  identity={identity}
+                  vesselId={vesselId}
+                  compartment={row.compartment.compartment_no}
+                  onRaised={onCleared}
+                />
+
                 {/* Directly under the trace, because the two answer consecutive
                     questions: the trace says why the space is shut, and this says
                     what would open it. Splitting them across screens would make a
                     planner hold the first in their head while looking for the
                     second. */}
                 <Mitigations
+                  key={`${row.compartment.compartment_no}:${epoch}`}
                   identity={identity}
                   vesselId={vesselId}
                   compartment={row.compartment.compartment_no}
@@ -1405,10 +2139,16 @@ function ReadinessAltitude({
  * labels, and drawing them all would hide the drawing they are annotating.
  */
 function SheetView({
+  deckBands,
   sheet, rows, selected, onSelect, deckJumps, onDeckJump, toneOf, zoom, setZoom, pan, setPan,
   dragging, hoverFrame, setHoverFrame, cascadeEdges, overlay, maxH, zonesOn, zones, zoneAlerts, zoneRows,
-  load, windowDays, horizonLabel, conflicts,
+  load, windowDays, horizonLabel, conflicts, deckOrdinal, focus: zoneFocus,
 }: {
+  /** This plate's deck ordinal — a zone block draws here only if it covers the deck. */
+  deckOrdinal: number;
+  /** The zone in focus: spaces inside it draw in full, spaces next door draw
+   *  ringed with their reason, everything else ghosts. */
+  focus: ZoneFocus | null;
   sheet: DeckSheet;
   rows: DeckStateRow[];
   selected: string | null;
@@ -1445,6 +2185,10 @@ function SheetView({
   horizonLabel: string;
   /** The day's served hot-vs-flammable pairs, drawn on the plate. */
   conflicts: WorkConflicts | null;
+  /** The geometry register's coverage bands for THIS deck, when one is
+   *  loaded: where the deck physically exists. Everything outside shades
+   *  as "no deck here" — an empty area must not read as "nothing scheduled". */
+  deckBands: { label: string; bands: { lo_frame: number; hi_frame: number }[] } | null;
 }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<string | null>(null);
@@ -1691,6 +2435,44 @@ function SheetView({
             onLoad={() => setLoaded(sheet.file)}
           />
 
+          {/* Deck delineation: where the geometry register says this deck
+              does NOT exist, the plate shades — so an empty region reads as
+              "no deck here", never as "nothing scheduled here". Bands are the
+              drawing's claim; absence of bands claims nothing and shades
+              nothing. */}
+          {cal && deckBands && deckBands.bands.length > 0 && (() => {
+            const maxFrame = Math.ceil(cal.frame0X / cal.pxPerFrame);
+            const covered = deckBands.bands
+              .map((b) => [Math.max(0, b.lo_frame), Math.min(maxFrame, b.hi_frame)] as [number, number])
+              .sort((a, b) => a[0] - b[0]);
+            const gaps: [number, number][] = [];
+            let cursor = 0;
+            for (const [lo, hi] of covered) {
+              if (lo > cursor) gaps.push([cursor, lo]);
+              cursor = Math.max(cursor, hi);
+            }
+            if (cursor < maxFrame) gaps.push([cursor, maxFrame]);
+            return (
+              <g pointerEvents="none">
+                {gaps.map(([lo, hi]) => {
+                  const xHi = sheetX(cal, hi);
+                  const xLo = sheetX(cal, lo);
+                  const [gx, gw] = xHi < xLo ? [xHi, xLo - xHi] : [xLo, xHi - xLo];
+                  return (
+                    <g key={`${lo}-${hi}`}>
+                      <rect x={gx} y={0} width={gw} height={H} fill="#0a0b0d" opacity={0.55} />
+                      {gw > 260 * u && (
+                        <text x={gx + gw / 2} y={H * 0.5} fill="#6a7080" fontSize={15 * u} fontWeight={700} textAnchor="middle" letterSpacing={1.2}>
+                          NO DECK HERE · fr {lo}–{hi} · {deckBands.label}
+                        </text>
+                      )}
+                    </g>
+                  );
+                })}
+              </g>
+            );
+          })()}
+
           {/* Zones & compartments shading — the register's geometry made
               visible so it can be CHECKED, not trusted. A zone is a band of
               frames (the extent of its spaces on this deck, drawn edge to
@@ -1701,16 +2483,18 @@ function SheetView({
             <g pointerEvents="none">
               {/* The hull's tiled bands from zones.ts — the same boundaries the
                   whole-ship view draws, clipped by this plate's own camera. */}
-              {zones.bands.map((band) => {
+              {zones.bands.filter((band) => bandCoversDeck(band, deckOrdinal)).map((band) => {
                 const colour = zoneColour(band.zone);
                 const xHi = sheetX(cal, band.hi);
                 const xLo = sheetX(cal, band.lo);
                 const [bandX, bandW] = xHi < xLo ? [xHi, xLo - xHi] : [xLo, xHi - xLo];
                 // Authored bounds draw solid — a chart's word; inferred stay
-                // dashed — a guess, and the edge says so.
+                // dashed — a guess, and the edge says so. A block that does
+                // not cover this deck is not drawn on it: the flight deck's
+                // zone never shades the plant beneath it.
                 const dash = band.authored ? undefined : `${8 * u} ${6 * u}`;
                 return (
-                  <g key={band.zone}>
+                  <g key={band.key}>
                     <rect x={bandX} y={0} width={bandW} height={H} fill={colour} opacity={0.08} />
                     <line x1={bandX} y1={0} x2={bandX} y2={H} stroke={colour} strokeWidth={(band.authored ? 1.8 : 1.4) * u} strokeDasharray={dash} opacity={0.55} />
                     <line x1={bandX + bandW} y1={0} x2={bandX + bandW} y2={H} stroke={colour} strokeWidth={(band.authored ? 1.8 : 1.4) * u} strokeDasharray={dash} opacity={0.55} />
@@ -1793,6 +2577,18 @@ function SheetView({
             const tone = toneOf(r);
             const isSel = no === selected;
             const isHot = no === hovered;
+            // Zone focus: outside the zone and not next door, a space is a
+            // ghost — placed, so the hull keeps its shape, and nothing more.
+            // Next door draws ringed, with its reason on the title.
+            const nextDoor = zoneFocus?.adjacent.get(no);
+            const ghost = zoneFocus !== null && !zoneFocus.inside.has(no) && nextDoor === undefined && !isSel;
+            if (ghost) {
+              return (
+                <g key={no} pointerEvents="none" opacity={0.18}>
+                  <circle cx={at.x} cy={at.y} r={2.6 * u} fill={C.subtle} />
+                </g>
+              );
+            }
             const l = load.get(no);
             // The day-driven rule, same as the schematic: the schedule decides
             // what the plate shows. Quiet open spaces recede to a dot.
@@ -1800,12 +2596,45 @@ function SheetView({
             const heldQuiet = !active && (r.readiness === "held" || r.state !== "ALLOW");
             const crew = active ? Math.max(1, Math.ceil((l?.hours ?? 0) / (8 * Math.max(1, windowDays)))) : 0;
             const crowded = crew > CREW_TOLERANCE;
+            const fwd = r.compartment.fwd_frame;
+            const aft = r.compartment.aft_frame;
+            const surveyed = fwd !== null && aft !== null;
+            const provenance = surveyed
+              ? `position: surveyed extent fr ${fwd}–${aft}`
+              : r.compartment.geometry_source === "parsed"
+                ? "position: parsed from the placard number — forward boundary only, transverse is a legible placement"
+                : `position source: ${r.compartment.geometry_source}`;
+            const extentBand = surveyed && cal && (
+              <g pointerEvents="none">
+                <rect
+                  x={Math.min(sheetX(cal, fwd), sheetX(cal, aft))}
+                  y={at.y - H * 0.024}
+                  width={Math.abs(sheetX(cal, fwd) - sheetX(cal, aft))}
+                  height={H * 0.048}
+                  rx={3 * u}
+                  fill={toneOf(r).fg}
+                  opacity={0.14}
+                />
+                <rect
+                  x={Math.min(sheetX(cal, fwd), sheetX(cal, aft))}
+                  y={at.y - H * 0.024}
+                  width={Math.abs(sheetX(cal, fwd) - sheetX(cal, aft))}
+                  height={H * 0.048}
+                  rx={3 * u}
+                  fill="none"
+                  stroke={toneOf(r).fg}
+                  strokeWidth={1.6 * u}
+                  opacity={0.8}
+                />
+              </g>
+            );
             if (!active && !heldQuiet && !isSel && !isHot) {
               return (
                 <g key={no} onClick={() => onSelect(no)} onPointerEnter={() => setHovered(no)} style={{ cursor: "pointer" }}>
                   <title>
-                    {`${no} — ${r.compartment.name}\nno work this ${horizonLabel} · nothing refuses work here at this instant\nA candidate site for ad-hoc work — verify gas-free status with the certifying authority before hot work.`}
+                    {`${no} — ${r.compartment.name}\nno work this ${horizonLabel} · nothing refuses work here at this instant\n${provenance}\nA candidate site for ad-hoc work — verify gas-free status with the certifying authority before hot work.`}
                   </title>
+                  {extentBand}
                   <circle cx={at.x} cy={at.y} r={3.4 * u} fill={OVERLAY_STYLE.go.fg} fillOpacity={0.4} stroke={OVERLAY_STYLE.go.fg} strokeWidth={1 * u} strokeOpacity={0.6} />
                 </g>
               );
@@ -1835,6 +2664,17 @@ function SheetView({
                     strokeWidth={1.6 * u} opacity={0.75}
                   />
                 )}
+                {/* Next door to the zone in focus: ringed, and the ring says why. */}
+                {nextDoor && (
+                  <g pointerEvents="none">
+                    <title>{`next door to Zone ${zoneFocus?.zone}: ${nextDoorWords(nextDoor.via)}`}</title>
+                    <circle
+                      cx={at.x} cy={at.y} r={13 * u}
+                      fill="none" stroke={C.warn} strokeWidth={1.4 * u} strokeDasharray={`${4 * u} ${3 * u}`} opacity={0.85}
+                    />
+                  </g>
+                )}
+                {extentBand}
                 {/* A tick down to the keel line: on a busy plate the pin alone
                     does not make its frame station obvious. */}
                 <line x1={at.x} y1={at.y} x2={at.x} y2={cal.centrelineY} stroke={tone.fg} strokeWidth={1.5 * u} opacity={0.6} />
@@ -1942,6 +2782,13 @@ function SheetView({
                 {OVERLAY_STYLE[overlayBucket(hoverRow)].label}
               </span>
             </div>
+            <div style={{ fontSize: 10.5, color: "#8a90a0", marginTop: 2 }}>
+              {hoverRow.compartment.fwd_frame !== null && hoverRow.compartment.aft_frame !== null
+                ? `surveyed extent fr ${hoverRow.compartment.fwd_frame}–${hoverRow.compartment.aft_frame}`
+                : hoverRow.compartment.geometry_source === "parsed"
+                  ? "position parsed from placard — fwd boundary only"
+                  : `position source: ${hoverRow.compartment.geometry_source}`}
+            </div>
             <div style={{ fontSize: 11.5, color: C.bright }}>{hoverRow.compartment.name}</div>
             <div style={{ fontSize: 10.5, color: DIM }}>
               {hoverRow.compartment.zone} · Fr {hoverRow.compartment.frame} · {hoverRow.compartment.side}
@@ -1977,6 +2824,93 @@ const presetBtn: React.CSSProperties = {
   font: "inherit", fontSize: 10.5, lineHeight: 1,
 };
 
+/**
+ * What is next door to the zone in focus, as a strip above the canvas: the
+ * spaces outside the zone that can reach into it — across the frame
+ * boundary, from the deck above or below, or through a coupling — worst
+ * first, each with its reason, its state, the live condition in it and the
+ * work booked there this window. A zone manager's awareness of the
+ * neighbours, without the neighbours' clutter.
+ */
+function NextDoorStrip({
+  zone,
+  adjacency,
+  load,
+  horizonLabel,
+  onOpenSpace,
+}: {
+  zone: string;
+  adjacency: ZoneAdjacency;
+  load: Map<string, SpaceLoad>;
+  horizonLabel: string;
+  onOpenSpace: (compartment: string) => void;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const rows = adjacency.adjacent;
+  // Only the neighbours with something going on lead; the quiet ones are
+  // counted and one click away.
+  const busy = rows.filter((a) => !a.permits_work || a.hazards.length > 0 || (load.get(a.compartment)?.count ?? 0) > 0);
+  const shown = showAll ? rows : busy.slice(0, 12);
+  const refusing = rows.filter((a) => !a.permits_work).length;
+  const withHazards = rows.filter((a) => a.hazards.length > 0).length;
+  return (
+    <div style={{ border: `1px solid ${C.warn}55`, borderRadius: 8, background: "rgba(245,158,11,0.04)", padding: "8px 12px", marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+        <b style={{ fontSize: 12, color: C.warn }}>Next door to Zone {zone}</b>
+        <span style={{ fontSize: 11, color: DIM }} title={adjacency.basis}>
+          {rows.length} spaces outside the zone can reach into it
+          {refusing > 0 && <> · <b style={{ color: C.danger }}>{refusing} refusing work</b></>}
+          {withHazards > 0 && <> · {withHazards} with a live field condition</>}
+          {busy.length === 0 && " · all quiet this " + horizonLabel}
+        </span>
+        {rows.length > shown.length && (
+          <button
+            onClick={() => setShowAll(true)}
+            style={{ marginLeft: "auto", font: "inherit", fontSize: 10.5, cursor: "pointer", padding: "1px 8px", borderRadius: 4, color: C.accent, background: "transparent", border: `1px solid ${C.accent}55` }}
+          >
+            show all {rows.length}
+          </button>
+        )}
+        {showAll && (
+          <button
+            onClick={() => setShowAll(false)}
+            style={{ marginLeft: "auto", font: "inherit", fontSize: 10.5, cursor: "pointer", padding: "1px 8px", borderRadius: 4, color: DIM, background: "transparent", border: `1px solid ${LINE}` }}
+          >
+            fewer
+          </button>
+        )}
+      </div>
+      {shown.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
+          {shown.map((a) => {
+            const l = load.get(a.compartment);
+            const tone = STATE_STYLE[a.state];
+            return (
+              <button
+                key={a.compartment}
+                onClick={() => onOpenSpace(a.compartment)}
+                title={`${a.compartment} — ${a.name} · ${a.zone} · ${a.deck_code}\n${nextDoorWords(a.via)}\n${tone.label}${a.hazards.length > 0 ? `\n${a.hazards.map((h) => h.label).join("\n")}` : ""}${l ? `\nthis ${horizonLabel}: ${l.count} activities · ${mh(Math.round(l.hours))}` : ""}`}
+                style={{
+                  font: "inherit", fontSize: 10.5, cursor: "pointer", padding: "3px 8px", borderRadius: 5, textAlign: "left",
+                  color: C.text, background: "#0b0c0e", border: `1px solid ${a.permits_work ? LINE : tone.fg}`,
+                  display: "inline-flex", gap: 6, alignItems: "center",
+                }}
+              >
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: tone.fg, flex: "0 0 auto" }} />
+                <span style={{ fontFamily: "monospace" }}>{a.compartment}</span>
+                <span style={{ color: DIM }}>{a.zone}</span>
+                {a.hazards.length > 0 && <span style={{ color: C.warn }}>⚑ {a.hazards[0]?.kind.replace(/_/g, " ")}</span>}
+                {l && l.count > 0 && <span style={{ color: DIM }}>{l.count} act</span>}
+                <span style={{ color: "#5a6070" }}>{nextDoorWords(a.via.slice(0, 1))}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** The deck plan: compartments placed by frame and side, pannable and zoomable. */
 function PlanView({
   rows, selected, onSelect, toneOf, zoom, setZoom, pan, setPan, dragging,
@@ -2000,7 +2934,7 @@ function PlanView({
   load: Map<string, SpaceLoad>;
   /** The reading window's length in days — the crew estimate's denominator. */
   windowDays: number;
-  /** "shift" | "week" | "month" | "availability", for the tooltips. */
+  /** "day" | "week" | "month" | "availability", for the tooltips. */
   horizonLabel: string;
   /** The day's served hot-vs-flammable pairs, drawn as links between pins. */
   conflicts: WorkConflicts | null;

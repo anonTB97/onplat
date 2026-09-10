@@ -24,6 +24,8 @@ import { ACTIVITY_STATUS, C, mh } from "./theme";
 
 import { fmtDay, fmtMonth } from "./clock";
 
+// Month gridlines stay on the UTC 1st by design (S10 out of scope: a 4–5 h
+// shift at month grain); the labels render in the yard's clock.
 function monthStarts(t0: number, t1: number): number[] {
   const out: number[] = [];
   const d = new Date(t0);

@@ -21,13 +21,17 @@ import {
   previewSchedule,
   revertSchedule,
   listActivities,
+  listProposals,
   scheduleAlternatives,
+  type ProposalList,
   type Activity,
+  type ActivityRegister,
   type AlternativeRow,
   type AsOf,
   type DeckStateRow,
   type Identity,
   type ImportPreview,
+  type XerEncoding,
   type ReconciliationMismatch,
   type ScheduleEdge,
   type Window,
@@ -39,16 +43,20 @@ import { Loading } from "./Loading";
 import { LoadDigest } from "./LoadDigest";
 import { ModuleHeader } from "./ModuleHeader";
 import { ZoneLanes } from "./ZoneLanes";
+import { ProposalsPanel } from "./Proposals";
 import { tdStyle, thStyle, chipStyle, commitBtnStyle, C, errText, mh, msgColor } from "./theme";
 import { DiscardButton } from "./DiscardButton";
-import { deltaSummary } from "./ingest";
+import { decodeXerFile, deltaSummary, quarantineSummary } from "./ingest";
 
 type StatusFilter = "all" | "not_started" | "in_progress" | "complete";
 
 /** The columns the reader may sort by. Absent = the server's schedule order. */
 type SortKey =
-  | "code" | "name" | "order" | "space" | "trade"
+  | "code" | "name" | "order" | "space" | "trade" | "work"
   | "planned" | "exec" | "budget" | "earned" | "status";
+
+/** The column count of the register table — the evidence row spans it. */
+const REGISTER_COLUMNS = 11;
 
 /** Worst first when ascending: the refusals are what sorting this column is for. */
 const EXEC_RANK: Record<string, number> = {
@@ -70,12 +78,13 @@ const fmtWindow = (w: { start: number; end: number } | null): string => {
 };
 
 /** An instant, to the minute — refusals are priced to the minute, not the day. */
-import { fmtDay, fmtDayTime } from "./clock";
+import { fmtDate, fmtDay, fmtDayTime, fmtStamp, fmtTime } from "./clock";
 
 /** The as-of stamp an export's filename carries — a file found on a desktop
- *  next month must say which instant it spoke for. */
+ *  next month must say which instant it spoke for. The yard's wall clock,
+ *  `Z` only under the UTC default: `-asof-20260904-0915`. */
 const stamp = (ms: number | null): string =>
-  ms === null ? "" : `-asof-${new Date(ms).toISOString().slice(0, 16).replace(/[:T]/g, "")}`;
+  ms === null ? "" : `-asof-${fmtDate(ms).replaceAll("-", "")}-${fmtTime(ms).replace(":", "")}`;
 
 /** Client-side CSV download; the blob URL is revoked once clicked. */
 function downloadCsv(lines: string[], filename: string): void {
@@ -110,6 +119,8 @@ export default function SequenceBoard({
   spaces,
   onOpenSpace,
   onOpenJob,
+  zoneFocus = null,
+  onZoneFocus,
 }: {
   identity: Identity;
   vesselId: string;
@@ -120,6 +131,11 @@ export default function SequenceBoard({
   onOpenSpace: (compartment: string) => void;
   /** Opens the job card for a work-order code. */
   onOpenJob: (code: string) => void;
+  /** The zone in focus, shared with the Deck Explorer through the shell:
+   *  the register and the lanes narrow to work located in it (or hinted to
+   *  it by the WBS), and say so. */
+  zoneFocus?: string | null;
+  onZoneFocus?: (zone: string | null) => void;
 }) {
 
   // The day's hot-vs-flammable pairs, served — a schedule that plans flame
@@ -139,18 +155,45 @@ export default function SequenceBoard({
     };
   }, [identity, vesselId, asOf]);
 
-  const [activities, setActivities] = useState<Activity[] | null>(null);
+  const [allActivities, setActivities] = useState<Activity[] | null>(null);
+  // The zone in focus narrows the board to work located in the zone, or
+  // hinted to it by its WBS bucket when unlocated — the same placement rule
+  // the zone lanes use. Said in the header; never silent.
+  const zoneOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of spaces) m.set(r.compartment.compartment_no, r.compartment.zone);
+    return m;
+  }, [spaces]);
+  const activities = useMemo(() => {
+    if (!allActivities || !zoneFocus) return allActivities;
+    return allActivities.filter(
+      (a) =>
+        a.is_milestone ||
+        (a.compartment_no !== null
+          ? zoneOf.get(a.compartment_no) === zoneFocus
+          : a.wbs_area === zoneFocus),
+    );
+  }, [allActivities, zoneFocus, zoneOf]);
   const [asOfMs, setAsOfMs] = useState<number | null>(null);
-  const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes" | "digest">("register");
+  const [boardView, setBoardView] = useState<"register" | "lanes" | "spaceLanes" | "digest" | "proposals">("register");
+  // The proposals in the ledger with where each stands — refetched when one
+  // lands from the inspector, when the register changes, and on a hull switch.
+  const [proposals, setProposals] = useState<ProposalList | null>(null);
+  const [proposalNonce, setProposalNonce] = useState(0);
   const [importMsg, setImportMsg] = useState<string | null>(null);
-  const [pending, setPending] = useState<{ label: string; xer: string; preview: ImportPreview } | null>(null);
+  const [pending, setPending] = useState<{ label: string; xer: string; encoding: XerEncoding; preview: ImportPreview } | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [source, setSource] = useState<string | null>(null);
+  /** Whose rules judged the rows — the seed or a committed table, signed or
+   *  not — as the register serves it. Null = the register did not say. */
+  const [rules, setRules] = useState<NonNullable<ActivityRegister["rules"]> | null>(null);
   const [mismatches, setMismatches] = useState<ReconciliationMismatch[]>([]);
   const [edges, setEdges] = useState<ScheduleEdge[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [trade, setTrade] = useState<string | null>(null);
+  /** The work type in the chip row — what the rule table binds to. */
+  const [workType, setWorkType] = useState<string | null>(null);
   const [space, setSpace] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusFilter>("all");
   const [inWindowOnly, setInWindowOnly] = useState(false);
@@ -161,6 +204,10 @@ export default function SequenceBoard({
   const [altsSettled, setAltsSettled] = useState(false);
   /** The row under inspection — any click on an activity opens it. */
   const [inspect, setInspect] = useState<Activity | null>(null);
+  /** Rows the table renders before it asks: a carrier's register is
+   *  thousands of rows, and a table that mounts them all is the slowest
+   *  screen in the product. The rest are one click away, and counted. */
+  const [tableLimit, setTableLimit] = useState(400);
 
   useEffect(() => {
     setError(null);
@@ -173,6 +220,7 @@ export default function SequenceBoard({
         setActivities(r.activities);
         setAsOfMs(r.as_of);
         setSource(r.schedule_source);
+        setRules(r.rules ?? null);
         setMismatches(r.reconciliation.mismatches);
         setEdges(r.edges);
         // The inspector follows the register: re-point it at the fresh row so
@@ -213,6 +261,20 @@ export default function SequenceBoard({
     };
   }, [identity, vesselId, asOf, reloadNonce]);
 
+  useEffect(() => {
+    let stale = false;
+    listProposals(identity, vesselId)
+      .then((p) => {
+        if (!stale) setProposals(p);
+      })
+      .catch(() => {
+        if (!stale) setProposals(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [identity, vesselId, reloadNonce, proposalNonce]);
+
   // A view switch orphans the inspector: a panel describing one register row
   // must not sit over a heat map it has nothing to say about.
   useEffect(() => {
@@ -228,6 +290,7 @@ export default function SequenceBoard({
     setImportMsg(null);
     setSearch("");
     setTrade(null);
+    setWorkType(null);
     setSpace(null);
     setStatus("all");
     setSort(null);
@@ -241,13 +304,29 @@ export default function SequenceBoard({
   useEffect(() => {
     if (activities === null) return;
     const tradesNow = new Set(activities.map((a) => a.trade));
+    const workNow = new Set(activities.map((a) => a.work_type ?? null));
     const spacesNow = new Set(activities.map((a) => a.compartment_no).filter(Boolean));
     setTrade((t) => (t !== null && !tradesNow.has(t) ? null : t));
+    setWorkType((w) => (w !== null && !workNow.has(w) ? null : w));
     setSpace((sp) => (sp !== null && sp !== "unlocated" && !spacesNow.has(sp) ? null : sp));
   }, [activities]);
 
   const trades = useMemo(
     () => [...new Set((activities ?? []).map((a) => a.trade).filter((t) => t !== "—"))].sort(),
+    [activities],
+  );
+
+  // The work types the field map read — the tokens the rule table binds to.
+  // Empty when the map names no field: the column reads "—" on every row
+  // and the chip row is absent, never a guess from the trade.
+  const workTypes = useMemo(
+    () =>
+      [...new Set(
+        (activities ?? [])
+          .filter((a) => !a.is_milestone)
+          .map((a) => a.work_type ?? null)
+          .filter((w): w is string => w !== null),
+      )].sort(),
     [activities],
   );
 
@@ -271,6 +350,7 @@ export default function SequenceBoard({
     const q = search.trim().toLowerCase();
     const filtered = (activities ?? []).filter((a) => {
       if (trade && a.trade !== trade) return false;
+      if (workType && (a.work_type ?? null) !== workType) return false;
       if (space === "unlocated") {
         if (a.compartment_no !== null || a.is_milestone) return false;
       } else if (space && a.compartment_no !== space) {
@@ -296,6 +376,7 @@ export default function SequenceBoard({
         case "order": return a.work_order_code;
         case "space": return a.compartment_no;
         case "trade": return a.trade === "—" ? null : a.trade;
+        case "work": return a.work_type ?? null;
         case "planned": return a.planned?.start ?? null;
         case "exec": return EXEC_RANK[a.executability.verdict];
         case "budget": return a.is_milestone ? null : a.budget_hours;
@@ -314,7 +395,7 @@ export default function SequenceBoard({
         : String(va).localeCompare(String(vb));
       return cmp * sort.dir;
     });
-  }, [activities, search, trade, space, status, inWindowOnly, notExecOnly, sort]);
+  }, [activities, search, trade, workType, space, status, inWindowOnly, notExecOnly, sort]);
 
   if (error) return <p style={{ color: C.danger }}>Register unavailable ({error}).</p>;
   if (!activities) return <Loading label="Reading the register…" />;
@@ -349,7 +430,9 @@ export default function SequenceBoard({
               ? "The sequence inside each space"
               : boardView === "digest"
                 ? "Where the load sits, week by week"
-                : "The activity register"
+                : boardView === "proposals"
+                  ? "What goes back to P6"
+                  : "The activity register"
         }
         stats={[
           { value: activities.length, label: "activities", title: "Every scheduled activity at the grain a crew is handed — the doing grain the six work orders are made of." },
@@ -369,6 +452,10 @@ export default function SequenceBoard({
           gated > 0 && {
             value: gated, label: "need verification", tone: "#c4b5fd",
             title: "Refused work whose governing hold clears only on a named authority's verification — no date can honestly be promised. The proposal is the action on the space's options panel.",
+          },
+          (proposals?.counts.open ?? 0) > 0 && {
+            value: proposals?.counts.open ?? 0, label: "proposals open", tone: C.accent,
+            title: "Schedule changes proposed from this board and not yet reflected by P6 — engine-checked, in the ledger, exportable as a change request from the Proposals view.",
           },
           unlocated > 0 && {
             value: unlocated, label: "unlocated", tone: C.warn,
@@ -433,11 +520,64 @@ export default function SequenceBoard({
         >
           Load digest
         </button>
+        <button
+          style={{ ...chip(boardView === "proposals"), ...(proposals && proposals.counts.open > 0 ? { borderColor: C.accent } : {}) }}
+          onClick={() => setBoardView("proposals")}
+          title="Every schedule change proposed from this board — engine-checked, ledgered, with where each stands against the schedule served now — and the change request that goes back to P6."
+        >
+          Proposals{proposals && proposals.counts.open > 0 ? ` · ${proposals.counts.open} open` : ""}
+        </button>
+        {/* Whose rules judged every verdict on this board — served with the
+            register, never derived here. Amber until the safety authority
+            signs the table on Data Sources. */}
+        <span
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 9px", borderRadius: 6, fontSize: 11,
+            border: `1px solid ${rules === null ? C.danger : rules.signed ? C.ok : C.warn}66`,
+            background: rules === null ? "rgba(248,113,113,0.06)" : rules.signed ? "rgba(34,197,94,0.06)" : "rgba(245,158,11,0.06)",
+            color: rules === null ? C.danger : C.dim,
+          }}
+          title={
+            rules === null
+              ? "The register did not say whose rules judged it — the API served no rules object."
+              : `${rules.source === "seed" ? "The seed" : `The committed table ${rules.label}`} judged every verdict on this board — each row by the rules bound to its work type in its space. ${rules.signed ? "Signed by the safety authority." : "Unsigned: the safety authority signs it on Data Sources."}`
+          }
+        >
+          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.6, color: C.subtle }}>RULES</span>
+          {rules === null ? (
+            "rules unavailable"
+          ) : (
+            <>
+              <span style={{ fontFamily: "monospace", color: C.bright }}>{rules.label}</span>
+              <span style={{ color: rules.signed ? C.ok : C.warn, fontWeight: 700 }}>{rules.signed ? "signed" : "unsigned"}</span>
+            </>
+          )}
+        </span>
+        {zoneFocus && (
+          <span
+            style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "3px 8px 3px 10px", borderRadius: 6, border: `1px solid ${C.warn}88`, background: "rgba(245,158,11,0.08)", fontSize: 11.5 }}
+            title="The zone in focus, shared with the Deck Explorer. Work located in the zone, or hinted to it by its WBS bucket when unlocated, is on the board; the rest of the register is one click away."
+          >
+            <b style={{ color: C.warn }}>Zone {zoneFocus} in focus</b>
+            <span style={{ color: C.dim }}>
+              {activities.length.toLocaleString()} of {(allActivities?.length ?? 0).toLocaleString()} activities
+            </span>
+            {onZoneFocus && (
+              <button
+                onClick={() => onZoneFocus(null)}
+                title="Leave zone focus — the whole register, on every screen"
+                style={{ font: "inherit", fontSize: 11, cursor: "pointer", padding: "1px 7px", borderRadius: 4, color: C.text, background: "transparent", border: `1px solid ${C.line}` }}
+              >
+                ✕
+              </button>
+            )}
+          </span>
+        )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           {importMsg && (
             <span style={{ fontSize: 11, color: msgColor(importMsg) }}>{importMsg}</span>
           )}
-          <label style={{ ...chip(false), display: "inline-flex", alignItems: "center", gap: 5 }} title="Import a Primavera P6 XER export as this hull's schedule of record. All-or-nothing: one rejected line refuses the file.">
+          <label style={{ ...chip(false), display: "inline-flex", alignItems: "center", gap: 5 }} title="Import a Primavera P6 XER export as this hull's schedule of record, read through the hull's field map. Rows the parser cannot honestly accept are quarantined with their reasons, not silently dropped; the full door — field map, quarantine, run history — is on Data Sources.">
             ⭱ Import XER
             <input
               type="file"
@@ -448,10 +588,10 @@ export default function SequenceBoard({
                 e.target.value = "";
                 if (!file) return;
                 setImportMsg(`⏳ reading ${file.name}…`);
-                void file.text().then((xer) =>
-                  previewSchedule(identity, vesselId, file.name, xer)
+                void decodeXerFile(file).then(({ xer, encoding }) =>
+                  previewSchedule(identity, vesselId, file.name, xer, { encoding })
                     .then((r) => {
-                      setPending({ label: file.name, xer, preview: r });
+                      setPending({ label: file.name, xer, encoding, preview: r });
                       setImportMsg(null);
                     })
                     .catch((err: unknown) => setImportMsg(errText(err))),
@@ -465,13 +605,14 @@ export default function SequenceBoard({
             onClick={() => {
               const esc = (v: string) => `"${v.replaceAll('"', '""')}"`;
               const lines = [
-                "code,name,work_order,compartment,reliability,trade,start,end,budget_mh,earned_mh,status,executability,source",
+                "code,name,work_order,compartment,reliability,trade,work_type,rules_bound,start,end,budget_mh,earned_mh,status,executability,source",
                 ...activities.map((a) =>
                   [
                     a.code, esc(a.name), a.work_order_code ?? "", a.compartment_no ?? "",
-                    a.compartment_reliability, a.trade,
-                    a.planned ? new Date(a.planned.start).toISOString() : "",
-                    a.planned ? new Date(a.planned.end).toISOString() : "",
+                    a.compartment_reliability, a.trade, a.work_type ?? "",
+                    a.rules_bound === undefined ? "" : String(a.rules_bound),
+                    a.planned ? fmtStamp(a.planned.start) : "",
+                    a.planned ? fmtStamp(a.planned.end) : "",
                     String(a.budget_hours), String(a.earned_hours), a.status,
                     a.executability.verdict, esc(a.source_ref),
                   ].join(","),
@@ -531,8 +672,14 @@ export default function SequenceBoard({
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <b style={{ fontSize: 12.5 }}>{pending.label}</b>
               <span style={{ fontSize: 11.5, color: C.dim }}>
-                {p.activities} activities · {p.edges} edges · {m.milestones} key events — previewed,
-                nothing stored.{" "}
+                {p.activities} activities · {p.edges} edges · {m.milestones} key events · {p.run.encoding}
+                {" "}— previewed, nothing stored.{" "}
+                <span
+                  style={{ color: p.quarantine.length > 0 ? C.danger : C.ok }}
+                  title="Rows the parser could not honestly accept are set aside with their line and reason, and the rest is served. The full list, the field map and the run history are on the Data Sources card."
+                >
+                  {quarantineSummary(p.quarantine)}.
+                </span>{" "}
                 <span style={{ color: p.delta.newly_refused.count > 0 ? C.warn : C.ok }}>
                   {deltaSummary(p.delta)}.
                 </span>{" "}
@@ -549,9 +696,9 @@ export default function SequenceBoard({
                     setPending(null);
                     if (!staged) return;
                     setImportMsg(`⏳ ingesting ${staged.label}…`);
-                    void importSchedule(identity, vesselId, staged.label, staged.xer)
+                    void importSchedule(identity, vesselId, staged.label, staged.xer, { encoding: staged.encoding })
                       .then((r) => {
-                        setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges`);
+                        setImportMsg(`✓ ${r.label}: ${r.activities} activities, ${r.edges} edges · run #${r.seq} · ${quarantineSummary(r.quarantine)}`);
                         setReloadNonce((n) => n + 1);
                       })
                       .catch((err: unknown) => setImportMsg(errText(err)));
@@ -624,11 +771,20 @@ export default function SequenceBoard({
         );
       })()}
 
-      {boardView === "digest" && (
+      {/* The lanes and the digest place work by the hull's register — the
+          shell's shared verdict read. Until it lands, every activity would
+          fall into the "no zone" lane and the board would reshuffle a
+          moment later; a short wait is more honest than a wrong first frame. */}
+      {(boardView === "digest" || boardView === "lanes" || boardView === "spaceLanes") &&
+        spaces.length === 0 && (
+          <Loading label="Reading the hull's register…" />
+        )}
+
+      {boardView === "digest" && spaces.length > 0 && (
         <LoadDigest activities={activities} spaces={spaces} asOf={asOfMs} />
       )}
 
-      {(boardView === "lanes" || boardView === "spaceLanes") && (
+      {(boardView === "lanes" || boardView === "spaceLanes") && spaces.length > 0 && (
         <ZoneLanes
           activities={activities}
           spaces={spaces}
@@ -638,6 +794,22 @@ export default function SequenceBoard({
           altWindows={viableWindows}
           onInspect={setInspect}
           onOpenSpace={onOpenSpace}
+        />
+      )}
+
+      {boardView === "proposals" && (
+        <ProposalsPanel
+          identity={identity}
+          vesselId={vesselId}
+          hullLabel={hullLabel}
+          list={proposals}
+          source={source}
+          asOf={asOfMs}
+          onChanged={() => setProposalNonce((n) => n + 1)}
+          onInspect={(code) => {
+            const row = (allActivities ?? []).find((x) => x.code === code);
+            if (row) setInspect(row);
+          }}
         />
       )}
 
@@ -666,6 +838,21 @@ export default function SequenceBoard({
             {t}
           </button>
         ))}
+        {workTypes.length > 0 && (
+          <>
+            <span style={{ width: 1, height: 18, background: C.line }} />
+            {workTypes.map((w) => (
+              <button
+                key={w}
+                style={{ ...chip(workType === w), fontFamily: "monospace" }}
+                onClick={() => setWorkType(workType === w ? null : w)}
+                title={`Show only ${w} work — the work type the field map read, which the rule table binds to · click again to clear`}
+              >
+                {w}
+              </button>
+            ))}
+          </>
+        )}
         <span style={{ width: 1, height: 18, background: C.line }} />
         <select
           value={space ?? ""}
@@ -727,6 +914,7 @@ export default function SequenceBoard({
                   ["Work order", "order", false],
                   ["Space", "space", false],
                   ["Trade", "trade", false],
+                  ["Work type", "work", false],
                   ["Planned", "planned", false],
                   ["Executable?", "exec", false],
                   ["Budget", "budget", true],
@@ -768,7 +956,7 @@ export default function SequenceBoard({
             </tr>
           </thead>
           <tbody>
-            {rows.map((a) => (
+            {rows.slice(0, tableLimit).map((a) => (
               <Fragment key={a.activity_id}>
               <tr
                 onClick={() => setInspect(a)}
@@ -857,6 +1045,25 @@ export default function SequenceBoard({
                   )}
                 </td>
                 <td style={{ ...td, color: C.dim }}>{a.trade}</td>
+                <td style={{ ...td, fontFamily: "monospace", fontSize: 11 }}>
+                  {a.work_type ? (
+                    <span
+                      style={{ color: C.bright }}
+                      title={
+                        `The work type the field map read for this row — what the rule table binds to.` +
+                        (a.rules_bound !== undefined
+                          ? ` Judged by ${a.rules_bound} rule${a.rules_bound === 1 ? "" : "s"} bound to ${a.work_type} in its space.`
+                          : "")
+                      }
+                    >
+                      {a.work_type}
+                    </span>
+                  ) : (
+                    <span style={{ color: C.dim }} title={a.is_milestone ? "A key event carries no work type." : "Not carried by the field map — unknown work is judged by every row in force, never by none."}>
+                      —
+                    </span>
+                  )}
+                </td>
                 <td style={{ ...td, fontFamily: "monospace", fontSize: 10.5, whiteSpace: "nowrap", color: C.dim }}>
                   {fmtWindow(a.planned)}
                   {a.in_window && !a.is_milestone && (
@@ -920,7 +1127,12 @@ export default function SequenceBoard({
                   ) : (
                     <span
                       style={{ color: "rgba(34,197,94,0.65)" }}
-                      title="The space permits work at every instant of the planned window, against the hazards on file."
+                      title={
+                        "The space permits this work at every instant of the planned window, against the hazards on file." +
+                        (a.rules_bound !== undefined
+                          ? ` Judged by ${a.rules_bound} rule${a.rules_bound === 1 ? "" : "s"} bound to ${a.work_type ?? "unknown work"}${a.rules_bound === 0 ? " — no rule binds to this work type" : ""}.`
+                          : "")
+                      }
                     >
                       ✓
                     </span>
@@ -942,7 +1154,7 @@ export default function SequenceBoard({
               </tr>
               {openEvidence === a.activity_id && a.executability.verdict === "not_executable" && (
                 <tr style={{ background: "rgba(239,68,68,0.04)" }}>
-                  <td colSpan={10} style={{ ...td, padding: "6px 12px 10px" }}>
+                  <td colSpan={REGISTER_COLUMNS} style={{ ...td, padding: "6px 12px 10px" }}>
                     {/* The tooltip's facts, in the open: what refuses, where,
                         from when, and how it clears — beside the door to the fix. */}
                     <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center", fontSize: 11 }}>
@@ -988,6 +1200,26 @@ export default function SequenceBoard({
               )}
               </Fragment>
             ))}
+            {rows.length > tableLimit && (
+              <tr>
+                <td colSpan={REGISTER_COLUMNS} style={{ ...td, padding: "8px 12px", color: C.dim }}>
+                  <button
+                    onClick={() => setTableLimit((n) => n + 1000)}
+                    title="Render the next thousand rows. Every row is already counted above and in the exports; only the table is paged."
+                    style={{
+                      font: "inherit", fontSize: 11.5, cursor: "pointer", padding: "3px 10px",
+                      borderRadius: 5, color: C.accent, background: "transparent", border: `1px solid ${C.accent}55`,
+                    }}
+                  >
+                    Show {Math.min(1000, rows.length - tableLimit).toLocaleString()} more
+                  </button>
+                  <span style={{ marginLeft: 10, fontSize: 11 }}>
+                    {tableLimit.toLocaleString()} of {rows.length.toLocaleString()} rows rendered — the
+                    filters, the sort and the exports cover all of them.
+                  </span>
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -1004,6 +1236,7 @@ export default function SequenceBoard({
           asOf={asOf}
           onClose={() => setInspect(null)}
           onOpenSpace={onOpenSpace}
+          onProposed={() => setProposalNonce((n) => n + 1)}
         />
       )}
     </div>

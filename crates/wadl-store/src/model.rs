@@ -23,6 +23,21 @@ pub struct DeckSummary {
     pub compartment_count: usize,
 }
 
+/// The store's own health, as `/health` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StoreHealth {
+    /// `memory` or `postgresql`.
+    pub backend: String,
+    /// Whether a round trip to the store succeeded just now.
+    pub reachable: bool,
+    /// The latest migration applied, when the store has migrations.
+    pub schema_version: Option<String>,
+    /// The document shape version this build writes.
+    pub document_schema_version: u32,
+    /// Why the store is unreachable, when it is.
+    pub detail: Option<String>,
+}
+
 /// A hull as it appears in the portfolio and breadcrumb.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VesselSummary {
@@ -74,6 +89,12 @@ pub struct CompartmentSummary {
     /// cannot be parsed — the plan view must then say so rather than guess a
     /// position.
     pub frame: Option<i32>,
+    /// Surveyed frame extent — forward and aft boundary — from an ingested
+    /// geometry register. `None` until one is loaded; the plan then draws a
+    /// pin, not a band. Overlaid by the API, so both stores serve it alike.
+    pub fwd_frame: Option<i32>,
+    /// See `fwd_frame`.
+    pub aft_frame: Option<i32>,
     /// Athwartships side: `port`, `starboard` or `centreline`.
     pub side: String,
     /// Where the geometry came from — `register` when the class register stores
@@ -81,6 +102,104 @@ pub struct CompartmentSummary {
     /// position is a convenience for a scheme the platform understands, never a
     /// substitute for an authored register, and the surface labels it as such.
     pub geometry_source: String,
+}
+
+/// One space in an ingested compartment register — the yard's own list of
+/// what the hull is made of, which until this document entered only as seed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegisterSpaceSummary {
+    /// Placard number as printed.
+    pub compartment_no: String,
+    /// Human name.
+    pub name: String,
+    /// Deck code — must name a deck the same register carries.
+    pub deck_code: String,
+    /// Zone label.
+    pub zone: String,
+    /// Category (decides secure status and hazard defaults).
+    pub category: String,
+    /// Frame station when the register carries it; otherwise parsed from the
+    /// placard where the numbering scheme allows, and labelled as a parse.
+    #[serde(default)]
+    pub frame: Option<i32>,
+    /// `port`, `starboard` or `centreline` when the register carries it.
+    #[serde(default)]
+    pub side: Option<String>,
+}
+
+/// One deck in an ingested compartment register.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegisterDeckSummary {
+    /// Deck code as printed, e.g. `3rd`, `Main`, `03`.
+    pub code: String,
+    /// Human label.
+    pub label: String,
+    /// Ordering key, ascending downward — what "directly above" is read from.
+    pub ordinal: i32,
+}
+
+/// One coupling in an ingested coupling register: a physical path a hazard
+/// can travel between two spaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CouplingRowSummary {
+    /// The space the path starts in.
+    pub from: String,
+    /// The space it reaches.
+    pub to: String,
+    /// The coupling type's code — what rules bind to (`deck_penetration`, …).
+    pub code: String,
+    /// Store the reverse path too (a shared bulkhead has no preferred sense).
+    #[serde(default)]
+    pub symmetric: bool,
+    /// `authored` when a person listed it, `derived` when the register door
+    /// proposed it from deck order and frame overlap.
+    #[serde(default = "authored")]
+    pub provenance: String,
+}
+
+fn authored() -> String {
+    "authored".to_owned()
+}
+
+/// A coupling type a hull's rules can bind to, as the store knows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CouplingTypeSummary {
+    /// The traversal's type id — distinct per code.
+    pub id: wadl_domain::ids::CouplingTypeId,
+    /// The code rules bind to.
+    pub code: String,
+    /// What the coupling carries: `heat`, `vapour`, `energy`, `load`, `egress`.
+    pub propagates: Vec<String>,
+    /// How many hops the coupling type reaches at most.
+    pub max_reach: u8,
+}
+
+/// One surveyed space in a geometry register: the compartment's true frame
+/// extent, from a Compartment & Access drawing or the general plans. The
+/// placard number encodes the FORWARD boundary, which is what makes a
+/// disagreement between the two a computable finding rather than a mystery.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpaceGeometrySummary {
+    /// The placard number the row claims to survey.
+    pub compartment_no: String,
+    /// Forward boundary frame.
+    pub fwd_frame: i32,
+    /// Aft boundary frame (inclusive; `fwd <= aft`).
+    pub aft_frame: i32,
+}
+
+/// One coverage band of a deck: the frame interval where the deck physically
+/// exists. A deck may carry several bands; a platform that runs frames 60–180
+/// is delineated as exactly that, and the plan shades the rest as "no deck
+/// here" rather than "nothing scheduled".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeckCoverageSummary {
+    /// The register's deck code, e.g. `3rd`.
+    pub deck_code: String,
+    /// Forward end of the band.
+    pub lo_frame: i32,
+    /// Aft end of the band (inclusive; `lo <= hi`).
+    pub hi_frame: i32,
 }
 
 /// A work order with its provenance and, where distributed, its footprint.
@@ -269,6 +388,11 @@ pub struct ActivitySummary {
     pub is_milestone: bool,
     /// Provenance: the document or run this row came from.
     pub source_ref: String,
+    /// The work type the yard's field map reads for the row (the rule table
+    /// binds by it from S14 on); `None` when the map names no field or the
+    /// row carries none. Absent on rows stored before the map existed.
+    #[serde(default)]
+    pub work_type: Option<String>,
 }
 
 impl ActivitySummary {
@@ -320,14 +444,36 @@ pub struct ScheduleEdgeSummary {
 pub struct ZoneBoundSummary {
     /// The zone, e.g. `Z5`.
     pub zone: String,
-    /// The forward-most frame of the zone (inclusive).
+    /// The forward-most frame of the block (inclusive).
     pub lo_frame: i32,
-    /// The aft-most frame of the zone (inclusive).
+    /// The aft-most frame of the block (inclusive).
     pub hi_frame: i32,
+    /// The upper deck of the block, by register deck code. A zone is a
+    /// block of decks as well as a band of frames (docs/zone-scheme.md): the
+    /// flight deck is one zone end to end, the plant is another beneath it.
+    /// Absent, with `bottom_deck`, the block spans every deck.
+    #[serde(default)]
+    pub top_deck: Option<String>,
+    /// The lower deck of the block, by register deck code.
+    #[serde(default)]
+    pub bottom_deck: Option<String>,
 }
 
 /// One work item's budget line from an ingested budget book.
 ///
+/// One line of a manning book: the people a trade actually has for this
+/// availability, per half-shift. The demand side (people a window's scheduled
+/// hours imply) is computed from the register; THIS is the supply side, and it
+/// only enters through the import door — the platform never invents a
+/// headcount.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ManningCrewSummary {
+    /// The trade, spelled the way the schedule spells it.
+    pub trade: String,
+    /// People available per half-shift.
+    pub headcount: i64,
+}
+
 /// The reconciliation target, once a book is ingested: register hours are
 /// compared against THESE budgets instead of the seeded work items'. The book
 /// is the hours authority, not a work-order register — it does not replace
@@ -371,4 +517,426 @@ pub struct AuditRecord {
     pub entry_hash: String,
     /// The previous entry's hash, hex. `None` for the first entry.
     pub prev_hash: Option<String>,
+    /// The person who acted, as the identity hop asserted them. `None` on
+    /// rows written before people were asserted (chain format 1).
+    pub actor_id: Option<String>,
+    /// That person's display name at the time. Hashed with the id from
+    /// format 2 on, so a later rename does not rewrite history.
+    pub actor_name: Option<String>,
+    /// Which chain format hashed this row: 1 before migration 0017, 2 since.
+    pub chain_version: u8,
+}
+
+/// One applied migration as the database records it (`_sqlx_migrations`),
+/// for the support bundle and the runbook's upgrade check.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AppliedMigration {
+    /// The `NNNN` number.
+    pub version: i64,
+    /// The file's description.
+    pub description: String,
+    /// When it was applied, RFC 3339.
+    pub installed_on: String,
+    /// Whether it completed.
+    pub success: bool,
+}
+
+/// One ingested document a hull holds — what, not its content — for the
+/// support bundle.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DocumentInventoryRow {
+    /// The hull number, e.g. `CVN-73`.
+    pub hull_no: String,
+    /// The document kind, e.g. `compartment_register`.
+    pub kind: String,
+    /// The document's label — the file name.
+    pub label: String,
+    /// When it was committed, epoch millis.
+    pub ingested_at_ms: i64,
+}
+
+/// Who imported a schedule run, and through which door.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportedBy {
+    /// The tenant the run was committed under.
+    pub org: wadl_domain::ids::OrgId,
+    /// The person, as the identity hop asserted them (the scope's actor id);
+    /// `None` when the binary acted on its own account.
+    pub person: Option<String>,
+    /// `door`, `boot` or `cli`.
+    pub via: String,
+}
+
+/// What one import counted, at the grain the card and the ledger state it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RunCounts {
+    /// `TASK` rows in the file.
+    pub task_rows: usize,
+    /// Rows served (work plus key events).
+    pub served: usize,
+    /// Rows served as work.
+    pub work: usize,
+    /// Rows served as key events (milestones).
+    pub key_events: usize,
+    /// Rows quarantined with a reason — `TASK` and `TASKPRED` together.
+    pub quarantined: usize,
+    /// Level-of-effort rows excluded from work.
+    pub excluded_loe: usize,
+    /// WBS-summary rows excluded from work.
+    pub excluded_wbs: usize,
+    /// Rows in projects the field map does not serve.
+    pub excluded_project: usize,
+    /// Relationships served.
+    pub edges: usize,
+    /// Relationships quarantined.
+    pub edges_quarantined: usize,
+    /// Material assignments not counted as man-hours.
+    pub material_skipped: usize,
+    /// Equipment assignments not counted as man-hours.
+    pub equipment_skipped: usize,
+}
+
+/// One row the import could not honestly accept, and why — listed with the
+/// run so a scheduler can find it in P6 and fix it there.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QuarantinedRow {
+    /// 1-based line in the export.
+    pub line: usize,
+    /// The section (`TASK`, `TASKPRED`).
+    pub table: String,
+    /// The row's own code when it carried one.
+    pub code: Option<String>,
+    /// The reason's class (`unparseable_date`, `width`, `cross_project_logic`…).
+    pub class: String,
+    /// The reason in words.
+    pub reason: String,
+}
+
+/// A schedule run as the list and the breadcrumb read it: everything about
+/// an import except its rows.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScheduleRunSummary {
+    /// Assigned by the store on commit.
+    pub run_id: uuid::Uuid,
+    /// 1, 2, 3… per hull, assigned by the store on commit.
+    pub seq: i64,
+    /// The source label, e.g. `CVN73-PIA26-full.xer`.
+    pub label: String,
+    /// When it was committed, epoch millis — the caller's clock.
+    pub imported_at_ms: i64,
+    /// Who, and through which door.
+    pub imported_by: ImportedBy,
+    /// `utf-8` or `windows-1252`.
+    pub encoding: String,
+    /// `browser` or `server`.
+    pub decoded_by: String,
+    /// The projects the run served, in file order.
+    pub projects_served: Vec<String>,
+    /// What was counted.
+    pub counts: RunCounts,
+    /// The field map the run was read through, as the document it was.
+    pub field_map: serde_json::Value,
+    /// Whether this run's document is the one currently served. Set by the
+    /// store on every read.
+    pub served: bool,
+    /// The document shape version the run was written in.
+    pub schema_version: u32,
+}
+
+/// What one import found and set aside — the detail behind the counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ScheduleRunReport {
+    /// Every quarantined row with its reason.
+    pub quarantine: Vec<QuarantinedRow>,
+    /// Level-of-effort task codes excluded from work.
+    pub excluded_loe: Vec<String>,
+    /// WBS-summary task codes excluded from work.
+    pub excluded_wbs: Vec<String>,
+    /// `(task_code, project)` for rows in projects the map does not serve.
+    pub excluded_project: Vec<(String, String)>,
+    /// The survey of the file's fields, as the ingest reported it.
+    pub fields_seen: serde_json::Value,
+    /// Findings — the map's and the clock's — none of which refused.
+    pub findings: Vec<String>,
+}
+
+/// One import, whole: its summary, its report, and the schedule of record
+/// it produced.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScheduleRun {
+    /// See [`ScheduleRunSummary`].
+    pub summary: ScheduleRunSummary,
+    /// See [`ScheduleRunReport`].
+    pub report: ScheduleRunReport,
+    /// The run's schedule of record. Required on commit (the store refuses a
+    /// run without one) and always present on a PostgreSQL read; `None` on
+    /// an in-memory read of a run older than the store's document cap
+    /// (`MAX_RUN_DOCS`), which keeps the summary and report of every run but
+    /// the rows of the last twelve — such a run can be listed and inspected
+    /// but not served again or diffed by rows.
+    pub doc: Option<crate::memory::ScheduleOfRecord>,
+}
+
+// ---------------------------------------------------------------------------
+// The hull-row statement (`wadl bootstrap-hull`).
+// ---------------------------------------------------------------------------
+
+/// The organisation block of a [`HullStatement`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OrgStatement {
+    /// The tenant's id — the `x-org-id` the proxy will assert.
+    pub org_id: uuid::Uuid,
+    /// One of migration 0001's `org_kind`: `shipbuilder`, `navy`,
+    /// `class_society`, `regulator`, `vendor`.
+    pub kind: String,
+    /// The organisation's name.
+    pub name: String,
+    /// ISO 3166-1 alpha-3, when known.
+    #[serde(default)]
+    pub country: Option<String>,
+}
+
+/// The ship-class block of a [`HullStatement`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClassStatement {
+    /// The class id.
+    pub class_id: uuid::Uuid,
+    /// The class code, e.g. `CVN-68`; unique per tenant.
+    pub code: String,
+    /// The class name, e.g. `Nimitz class`.
+    pub name: String,
+    /// `CVN`, `DDG`, …
+    #[serde(default)]
+    pub hull_type: Option<String>,
+    /// The lowest frame station on the class.
+    #[serde(default)]
+    pub frame_min: Option<i32>,
+    /// The highest frame station on the class.
+    #[serde(default)]
+    pub frame_max: Option<i32>,
+}
+
+/// The hull block of a [`HullStatement`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VesselStatement {
+    /// The hull's id — the `x-assigned-vessels` entry the proxy will assert
+    /// and the id in every hash route.
+    pub vessel_id: uuid::Uuid,
+    /// The hull number, e.g. `CVN-73`; unique per tenant.
+    pub hull_no: String,
+    /// The ship's name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// The availability block of a [`HullStatement`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AvailabilityStatement {
+    /// The availability's id.
+    pub availability_id: uuid::Uuid,
+    /// The availability code, e.g. `PIA-26`; unique per hull.
+    pub code: String,
+    /// `PIA`, `SRA`, `DPIA`, …
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Where the hull sits for it.
+    #[serde(default)]
+    pub location: Option<String>,
+    /// First day, `YYYY-MM-DD`.
+    pub start_on: String,
+    /// Last day, inclusive, `YYYY-MM-DD`.
+    pub end_on: String,
+}
+
+/// The hull-row statement: the four tenancy rows a pilot hull needs before
+/// its first door opens — organisation, class, hull, availability — as the
+/// document the data-load record files. Ids are **required**, never
+/// generated: this file, the proxy's `x-assigned-vessels` and the data-load
+/// record must name the same hull. Decks are not in it; the register door
+/// supplies them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HullStatement {
+    /// The tenant.
+    pub organization: OrgStatement,
+    /// The class the hull belongs to.
+    pub class: ClassStatement,
+    /// The hull.
+    pub vessel: VesselStatement,
+    /// The availability the pilot runs in.
+    pub availability: AvailabilityStatement,
+}
+
+/// Migration 0001's `org_kind` values.
+pub const ORG_KINDS: [&str; 5] = [
+    "shipbuilder",
+    "navy",
+    "class_society",
+    "regulator",
+    "vendor",
+];
+
+/// `YYYY-MM-DD` as days from the epoch, or `None` when it is not a date.
+fn civil_days(text: &str) -> Option<i64> {
+    let mut parts = text.trim().split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u8 = parts.next()?.parse().ok()?;
+    let day: u8 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = wadl_domain::civil::days_from_civil(year, month, day);
+    // Round-trip: 2026-02-30 is not a date.
+    (wadl_domain::civil::civil_from_days(days) == (year, month, day)).then_some(days)
+}
+
+impl HullStatement {
+    /// Every reason the statement cannot be applied, in yard words; empty
+    /// when it can. Ids nil, an unknown organisation kind, blank codes or
+    /// names, a class whose frames run backwards, an availability that ends
+    /// before it starts or whose bounds are not dates.
+    #[must_use]
+    pub fn validate(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (what, id) in [
+            ("organization.org_id", self.organization.org_id),
+            ("class.class_id", self.class.class_id),
+            ("vessel.vessel_id", self.vessel.vessel_id),
+            (
+                "availability.availability_id",
+                self.availability.availability_id,
+            ),
+        ] {
+            if id.is_nil() {
+                problems.push(format!(
+                    "{what} is the nil UUID — every id is required and named by the yard"
+                ));
+            }
+        }
+        if !ORG_KINDS.contains(&self.organization.kind.as_str()) {
+            problems.push(format!(
+                "organization.kind {:?} is not one of {}",
+                self.organization.kind,
+                ORG_KINDS.join(", ")
+            ));
+        }
+        for (what, text) in [
+            ("organization.name", &self.organization.name),
+            ("class.code", &self.class.code),
+            ("class.name", &self.class.name),
+            ("vessel.hull_no", &self.vessel.hull_no),
+            ("availability.code", &self.availability.code),
+        ] {
+            if text.trim().is_empty() {
+                problems.push(format!("{what} is blank"));
+            }
+        }
+        if let (Some(lo), Some(hi)) = (self.class.frame_min, self.class.frame_max) {
+            if lo > hi {
+                problems.push(format!(
+                    "class.frame_min {lo} is after class.frame_max {hi}"
+                ));
+            }
+        }
+        match (
+            civil_days(&self.availability.start_on),
+            civil_days(&self.availability.end_on),
+        ) {
+            (Some(start), Some(end)) if end <= start => problems.push(format!(
+                "availability.end_on {} is not after availability.start_on {}",
+                self.availability.end_on, self.availability.start_on
+            )),
+            (Some(_), Some(_)) => {}
+            (start, end) => {
+                if start.is_none() {
+                    problems.push(format!(
+                        "availability.start_on {:?} is not a YYYY-MM-DD date",
+                        self.availability.start_on
+                    ));
+                }
+                if end.is_none() {
+                    problems.push(format!(
+                        "availability.end_on {:?} is not a YYYY-MM-DD date",
+                        self.availability.end_on
+                    ));
+                }
+            }
+        }
+        problems
+    }
+}
+
+/// What applying one row of a statement did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowOutcome {
+    /// The row was written.
+    Created,
+    /// A row with this id was already there; nothing written.
+    Existed,
+    /// The rows were there and were brought up to date — the baseline rule
+    /// set after the seed's reading changed (a new version, a rewritten
+    /// payload, a retired id). Counts as a change: the transaction commits
+    /// and the hull's ledger says so.
+    Updated,
+    /// A dry run: the row would be written.
+    WouldCreate,
+}
+
+impl RowOutcome {
+    /// The word the CLI prints.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Existed => "existed",
+            Self::Updated => "updated",
+            Self::WouldCreate => "would create",
+        }
+    }
+}
+
+/// What [`HullStatement`] application did, row by row.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapOutcome {
+    /// The organisation row.
+    pub organization: RowOutcome,
+    /// The class row.
+    pub class: RowOutcome,
+    /// The hull row.
+    pub vessel: RowOutcome,
+    /// The availability row.
+    pub availability: RowOutcome,
+    /// The tenant's baseline coupling types (three rows, reported as one).
+    pub coupling_types: RowOutcome,
+    /// The tenant's baseline rule set (reported as one).
+    pub rules: RowOutcome,
+    /// The `HULL_BOOTSTRAPPED` ledger row's `seq`, when one was written —
+    /// only when something was created and it was not a dry run.
+    pub ledger_seq: Option<i64>,
+    /// Whether this was a dry run (nothing written).
+    pub dry_run: bool,
+}
+
+impl BootstrapOutcome {
+    /// The rows in FK order — the statement's four, then the tenant's two
+    /// baseline sets — for printing.
+    #[must_use]
+    pub fn rows(&self) -> [(&'static str, RowOutcome); 6] {
+        [
+            ("organization", self.organization),
+            ("class", self.class),
+            ("vessel", self.vessel),
+            ("availability", self.availability),
+            ("coupling_types", self.coupling_types),
+            ("rules", self.rules),
+        ]
+    }
+
+    /// Whether any row was, or would be, written.
+    #[must_use]
+    pub fn changes_anything(&self) -> bool {
+        self.rows().iter().any(|(_, o)| *o != RowOutcome::Existed)
+    }
 }

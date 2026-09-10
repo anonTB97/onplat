@@ -1,0 +1,42 @@
+---
+source: crates/wadl-engine/tests/golden_rule_table.rs
+description: hot work across the bulkhead
+info:
+  rule: R06
+  ordinal: "0"
+  scenario: hot work across the bulkhead
+  hazard_kind: coating_open
+  origin: 3-160-2-Q
+  subject: 3-156-2-Q
+  work_type: hot_work
+  at_min: 0
+  ended_min: ~
+  expect_state: WARN
+  expect_clearer: marine_chemist
+  expect_clear_min: 480
+---
+{
+  "state": "WARN",
+  "trace": [
+    {
+      "rule_code": "R06",
+      "rule_version": "00000000-0000-0000-0000-000000000601",
+      "state": "WARN",
+      "source": "3-160-2-Q",
+      "hazard": "CT-3160-4 · final coat, curing",
+      "depth": 1,
+      "path": [
+        "3-160-2-Q",
+        "3-156-2-Q"
+      ],
+      "via": [
+        "shared_bulkhead"
+      ],
+      "authority": "Yard safety standard; NSTM Ch. 074",
+      "clearing_authority": "marine_chemist",
+      "earliest_clear": 1778678100000,
+      "reason": "CT-3160-4 · final coat, curing in 3-160-2-Q — reached via shared_bulkhead (1 hop)."
+    }
+  ],
+  "earliest_clear": 1778678100000
+}

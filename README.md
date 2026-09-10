@@ -28,7 +28,7 @@ crates/
   wadl-store/    Repositories + read models; the tenant scope; the PostgreSQL seam.
   wadl-api/      axum router, the caller/scope extractor, problem+json errors.
   wadl-ingest/   Provenance-stamped P6 ingest.
-  wadl-cli/      wadl {migrate, seed, verify-ledger, support-bundle}.
+  wadl-cli/      wadl {migrate, seed, bootstrap-hull, load-docs, verify-ledger, support-bundle, version}.
 xtask/           gen-leak-tests: generates the cross-tenant leak test from the route inventory.
 scripts/dev.sh   Runs the API and the shell together — the one command to see it working.
 .devcontainer/   Codespaces setup, so the above works with nothing installed locally.
@@ -66,19 +66,50 @@ docs/adr/        Architecture decision records.
 scripts/dev.sh
 ```
 
-That builds and starts the API on `127.0.0.1:8080` (loopback only), waits until it
-is actually healthy, then starts the shell on `5173`. Open
-<http://localhost:5173>. Ctrl-C stops both. No database is needed — the demo runs
-on the seeded in-memory store.
+That builds the API in release (the demo hull is carrier-sized and the debug
+build is noticeably slower on it; `WADL_PROFILE=debug` keeps the fast compile),
+starts it on `127.0.0.1:8080` (loopback only), waits until `/health` answers,
+then starts the shell on `5173`. Open <http://localhost:5173>. Ctrl-C stops
+both. No database is needed — the demo runs on the in-memory store.
+
+The demo boots on the reference hull: the generated CVN-73 documents in
+`reference/cvn73` loaded through the same doors a yard would use, and the
+sample P6 export `reference/p6-sample/CVN73-PIA26-full.xer` as the schedule of
+record (476 spaces, 5,706 activities, six zones — `docs/zone-scheme.md`),
+its wall clock read in the yard's clock from `reference/cvn73/CVN73-clock.csv`
+(Norfolk; the banner names the zone). `WADL_DEMO=seed` serves the small
+24-space seed instead. A scripted,
+role-by-role walk over the hull is in `docs/demo-script.md`.
 
 **In a Codespace:** *Code ▾ → Codespaces → Create codespace*. The devcontainer
 pre-installs the toolchain, the wasm target and the shell's dependencies, so
 `scripts/dev.sh` is the only command you need; click the forwarded **5173** link
 in the Ports tab.
 
-Worth a look once it is up: **Deck Explorer** → Fourth Deck → `4-164-2-Q` for a
-decision trace; **Distributed Packages** for the stranded man-hours; and the hull
-dropdown → an *(unassigned)* hull to see the RBAC refusal.
+Worth a look once it is up: **Zone Manager** → **Deck Explorer** with Z4 in
+focus and the next-door strip; **Sequence Board** → *Not executable* →
+`A51350` → *Propose to P6*; **Conflicts & Risk** for the man-hours at risk;
+and the hull dropdown → a *not assigned · demo* hull to see the RBAC refusal.
+
+The shell runs in **DEMO MODE** on the dev shim (the amber badge on the role
+button): switching role switches the demo person it asserts, so a Foreman's
+clear button is grey with the server's sentence and a Safety clearance lands
+in the ledger under *Demo Safety Officer (Y-1007)*. The same contract by
+hand, straight at the API — the headers the yard's proxy would assert:
+
+```sh
+curl -s -H 'x-org-id: 00000000-0000-0000-0000-000000000001' \
+  -H 'x-assigned-vessels: 00000000-0000-0000-0000-000000000073' \
+  -H 'x-wadl-person: 1234567890' -H 'x-wadl-person-name: R.%20Alvarez' -H 'x-wadl-roles: foreman' \
+  http://127.0.0.1:8080/api/whoami
+# → "person":{"id":"1234567890","name":"R. Alvarez","source":"dev-shim"}, "roles":["foreman"], "capabilities":["read","raise_hazard"]
+```
+
+As that foreman `POST …/hazards/clear` is 403 *Foreman may not record a
+clearance — clear_hazard is held by Ship Super and Safety* and nothing is
+written; with `x-wadl-roles: safety` the clearance lands and `GET …/ledger`
+names `R. Alvarez` on the newest row. The whole contract — six headers,
+refusals, the staging test — is `docs/identity-proxy-contract.md`.
 
 ## Build and check
 

@@ -1,0 +1,22 @@
+# CVN-73 demo geometry register — surveyed frame extents + deck delineation.
+# Format: space,<compartment_no>,<fwd_frame>,<aft_frame>
+#         deck,<deck_code>,<lo_frame>,<hi_frame>
+# ILLUSTRATIVE: extents invented for the demo world; two rows deliberately
+# carry defects so the door's findings are visible (3-160-2-Q disagrees with
+# its placard; 3-184-0-Q runs past the 3rd deck's delineated coverage).
+deck,Main,14,255
+deck,2nd,16,250
+deck,3rd,20,210
+deck,3rd,224,248
+deck,4th,24,200
+space,3-140-0-Q,140,146
+space,3-148-0-L,148,153
+space,3-148-2-E,148,154
+space,3-152-0-Q,152,158
+space,3-156-2-Q,156,161
+space,3-160-2-Q,162,168
+space,3-164-2-Q,164,171
+space,3-172-0-M,172,183
+space,3-184-0-Q,184,214
+space,3-185-0-L,185,191
+space,3-192-2-E,192,199

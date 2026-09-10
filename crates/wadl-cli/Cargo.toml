@@ -15,6 +15,11 @@ path = "src/main.rs"
 wadl-domain.workspace = true
 wadl-engine.workspace = true
 wadl-ingest.workspace = true
+# The document parsers, the loader the boot path uses, and the release stamp
+# live in wadl-api; `load-docs` and `version` are those functions with a
+# command line in front, so the CLI takes the crate rather than copying them.
+# Internal path dependency — no new external crate enters the tree.
+wadl-api.workspace = true
 # The CLI is a deployment tool — it is the thing that opens databases, so it
 # is one of the two places allowed to pull the postgres feature (with tests).
 wadl-store = { workspace = true, features = ["postgres"] }
@@ -23,6 +28,19 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+# `--org`/`--vessel` on `load-docs` are uuids; v7 mints the test hulls the
+# database tests bootstrap. Already in the tree (store, api, ingest).
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+# The database test drives the built `wadl` binary against PostgreSQL and
+# reads the hull back through the API's router in process, as the shell
+# would: axum for the request types, tower for `oneshot`. Test-only.
+axum.workspace = true
+tower = { workspace = true, features = ["util"] }
+# The verify-ledger test alters one ledger row as the owner — the tamper no
+# door can make — to prove the break is reported; test-only.
+sqlx.workspace = true
 
 [lints]
 workspace = true

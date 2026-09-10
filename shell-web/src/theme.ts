@@ -1,13 +1,37 @@
 import type { DecisionState, ReadinessState } from "./api";
+import { fmtStamp } from "./clock";
 
 // One palette for authorization state, shared by every surface, so a colour
 // means exactly one thing across the product.
-export const STATE_STYLE: Record<DecisionState, { fg: string; bg: string; border: string }> = {
-  ALLOW: { fg: "#22c55e", bg: "rgba(34,197,94,0.10)", border: "rgba(34,197,94,0.45)" },
-  WARN: { fg: "#f59e0b", bg: "rgba(245,158,11,0.12)", border: "rgba(245,158,11,0.50)" },
-  SUSPEND: { fg: "#c4b5fd", bg: "rgba(167,139,250,0.14)", border: "rgba(167,139,250,0.55)" },
-  BLOCK: { fg: "#f87171", bg: "rgba(220,38,38,0.14)", border: "rgba(220,38,38,0.55)" },
+//
+// `label` is the word a deckplate reader says; `code` is the engine's own
+// token, kept as a secondary mark so the trace and the API still agree. WARN
+// permits work — its label has to say so, because amber on a plate reads as a
+// hold to anyone who has not been told otherwise.
+export const STATE_STYLE: Record<
+  DecisionState,
+  { fg: string; bg: string; border: string; label: string; gloss: string }
+> = {
+  ALLOW: {
+    fg: "#22c55e", bg: "rgba(34,197,94,0.10)", border: "rgba(34,197,94,0.45)",
+    label: "OPEN", gloss: "work may proceed",
+  },
+  WARN: {
+    fg: "#f59e0b", bg: "rgba(245,158,11,0.12)", border: "rgba(245,158,11,0.50)",
+    label: "OPEN · CONDITIONS", gloss: "work may proceed with the boundary posted — no ignition across it",
+  },
+  SUSPEND: {
+    fg: "#c4b5fd", bg: "rgba(167,139,250,0.14)", border: "rgba(167,139,250,0.55)",
+    label: "SECURED", gloss: "held until the condition clears — on a clock, or on verification",
+  },
+  BLOCK: {
+    fg: "#f87171", bg: "rgba(220,38,38,0.14)", border: "rgba(220,38,38,0.55)",
+    label: "NO ENTRY", gloss: "refused outright for this work until the hazard is cleared",
+  },
 };
+
+/** The four states in the order a legend reads them: least to most restrictive. */
+export const STATE_ORDER: DecisionState[] = ["ALLOW", "WARN", "SUSPEND", "BLOCK"];
 
 // Readiness has its own palette, kept distinct from authorization on purpose.
 // A space can be SUSPEND (authorization) and still cost nothing today because
@@ -231,11 +255,11 @@ export const commitBtnStyle: React.CSSProperties = {
   border: `1px solid ${C.accent}`,
 };
 
-/** A hold time, or an honest statement that there is no clock on it. */
+/** A hold time, or an honest statement that there is no clock on it. The
+ *  time itself is `clock.ts`'s record-grade stamp — the yard's wall clock
+ *  with its offset, or Z under the UTC default. */
 export const fmtClear = (ms: number | null): string =>
-  ms === null
-    ? "on verification, not on a clock"
-    : `${new Date(ms).toISOString().replace("T", " ").slice(0, 16)}Z`;
+  ms === null ? "on verification, not on a clock" : fmtStamp(ms);
 
 /**
  * A stable colour per zone, hashed from the name rather than indexed from a

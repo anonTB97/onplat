@@ -23,6 +23,7 @@ use wadl_domain::units::ManHours;
 use wadl_engine::DecisionState;
 use wadl_mitigate::{triage, World};
 
+use crate::conflicts::{crowding, hot_vs_flammable, ConflictEnd, Conflicts};
 use crate::{executability, Executability, Hull, Refusal};
 
 /// One row of the register, as the derivation needs it. Borrowed, because the
@@ -144,6 +145,45 @@ pub enum Issue {
         /// The successor's remaining hours — what the overlap is betting.
         hours_at_risk: ManHours,
     },
+    /// An ignition-source activity and a flammable-atmosphere activity the
+    /// schedule plans into the same yard day, in one space or across a
+    /// coupling that carries heat or vapour — the work-on-work conflict the
+    /// yard's trade taxonomy classes and the graph joins
+    /// ([`crate::conflicts::hot_vs_flammable`]).
+    HotVsFlammable {
+        /// The ignition-source side.
+        hot: ConflictEnd,
+        /// The flammable-atmosphere side.
+        flammable: ConflictEnd,
+        /// The hot side's space — where the options panel answers.
+        compartment: CompartmentNo,
+        /// `same space`, or the coupling code that joins the two.
+        via: String,
+        /// The two windows' common span inside the day; `None` when either
+        /// is undated or they share the day but not an hour.
+        overlap: Option<Window>,
+        /// The smaller remaining of the pair — the least work that must
+        /// move to separate them.
+        hours_at_risk: ManHours,
+    },
+    /// More people planned into a space that day than its tolerance
+    /// ([`crate::conflicts::crowding`]).
+    Crowding {
+        /// The crowded space.
+        compartment: CompartmentNo,
+        /// Its register category, which set the tolerance.
+        category: Option<String>,
+        /// People planned: `ceil(Σ hours in the day / shift hours)`.
+        people: u32,
+        /// The tolerance from the taxonomy.
+        tolerance: u32,
+        /// The dated activities counted.
+        activities: Vec<String>,
+        /// Undated rows in the space, reported and not counted.
+        undated_rows: usize,
+        /// The hours that do not fit that day.
+        hours_at_risk: ManHours,
+    },
 }
 
 impl Issue {
@@ -155,7 +195,9 @@ impl Issue {
             | Self::HeldWithCrewsBooked { hours_at_risk, .. }
             | Self::CompoundHold { hours_at_risk, .. }
             | Self::StrandingConcentration { hours_at_risk, .. }
-            | Self::NegativeLag { hours_at_risk, .. } => *hours_at_risk,
+            | Self::NegativeLag { hours_at_risk, .. }
+            | Self::HotVsFlammable { hours_at_risk, .. }
+            | Self::Crowding { hours_at_risk, .. } => *hours_at_risk,
         }
     }
 
@@ -178,6 +220,12 @@ impl Issue {
                 format!("issue:stranding:{compartment}")
             }
             Self::NegativeLag { pred, succ, .. } => format!("issue:negative_lag:{pred}->{succ}"),
+            // Named by the pair, never by the day or the hours: a decision
+            // recorded on Monday's pair attaches on Tuesday's.
+            Self::HotVsFlammable { hot, flammable, .. } => {
+                format!("issue:hot_vs_flammable:{}~{}", hot.code, flammable.code)
+            }
+            Self::Crowding { compartment, .. } => format!("issue:crowding:{compartment}"),
         }
     }
 
@@ -189,18 +237,22 @@ impl Issue {
             Self::NotExecutableAsPlanned { compartment, .. }
             | Self::HeldWithCrewsBooked { compartment, .. }
             | Self::CompoundHold { compartment, .. }
-            | Self::StrandingConcentration { compartment, .. } => Some(compartment),
+            | Self::StrandingConcentration { compartment, .. }
+            | Self::HotVsFlammable { compartment, .. }
+            | Self::Crowding { compartment, .. } => Some(compartment),
             Self::NegativeLag { .. } => None,
         }
     }
 
-    /// Tie-break order across kinds: the ones needing a person soonest first.
+    /// Tie-break order across kinds: the ones needing a person soonest
+    /// first. A hot-vs-flammable pair ranks beside held-with-crews (people
+    /// are in the space now); a crowded space beside stranding.
     const fn kind_rank(&self) -> u8 {
         match self {
             Self::CompoundHold { .. } => 0,
-            Self::HeldWithCrewsBooked { .. } => 1,
+            Self::HeldWithCrewsBooked { .. } | Self::HotVsFlammable { .. } => 1,
             Self::NotExecutableAsPlanned { .. } => 2,
-            Self::StrandingConcentration { .. } => 3,
+            Self::StrandingConcentration { .. } | Self::Crowding { .. } => 3,
             Self::NegativeLag { .. } => 4,
         }
     }
@@ -211,10 +263,24 @@ impl Issue {
             Self::NotExecutableAsPlanned { activity, .. } => activity.clone(),
             Self::HeldWithCrewsBooked { compartment, .. }
             | Self::CompoundHold { compartment, .. }
-            | Self::StrandingConcentration { compartment, .. } => compartment.to_string(),
+            | Self::StrandingConcentration { compartment, .. }
+            | Self::Crowding { compartment, .. } => compartment.to_string(),
             Self::NegativeLag { pred, succ, .. } => format!("{pred}->{succ}"),
+            Self::HotVsFlammable { hot, flammable, .. } => {
+                format!("{}~{}", hot.code, flammable.code)
+            }
         }
     }
+}
+
+/// A derived board: the ranked issues and what the conflict pass could not
+/// fit under its cap.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueBoard {
+    /// Every issue, ranked by hours at risk.
+    pub issues: Vec<Issue>,
+    /// Hot-vs-flammable pairs past `pair_cap`, counted rather than served.
+    pub pairs_dropped: usize,
 }
 
 /// The issues on one held space: compound when no single action opens it,
@@ -262,6 +328,9 @@ fn space_issue(world: &World<'_>, compartment: &CompartmentNo, booked: ManHours)
 /// executability (finished work cannot be in trouble), and spaces with nothing
 /// booked are skipped for holds (a held empty space is latent, not an issue —
 /// the readiness taxonomy's distinction, kept).
+///
+/// The same board as [`derive_with`] with no conflict pass — byte-identical
+/// to the board before the conflict kinds existed.
 #[must_use]
 pub fn derive(
     world: &World<'_>,
@@ -269,6 +338,33 @@ pub fn derive(
     stranded: &[Stranding<'_>],
     edges: &[ScheduleEdge<'_>],
 ) -> Vec<Issue> {
+    derive_with(world, register, stranded, edges, None)
+}
+
+/// [`derive`], plus the work-on-work conflicts for the day when `conflicts`
+/// is given: [`crate::conflicts::hot_vs_flammable`] over `world.graph` and
+/// [`crate::conflicts::crowding`], ranked on the same board.
+#[must_use]
+pub fn derive_with(
+    world: &World<'_>,
+    register: &[RegisterRow<'_>],
+    stranded: &[Stranding<'_>],
+    edges: &[ScheduleEdge<'_>],
+    conflicts: Option<&Conflicts<'_>>,
+) -> Vec<Issue> {
+    derive_board(world, register, stranded, edges, conflicts).issues
+}
+
+/// [`derive_with`], keeping the count of pairs the cap dropped — what the
+/// board read serves as `pairs_dropped`.
+#[must_use]
+pub fn derive_board(
+    world: &World<'_>,
+    register: &[RegisterRow<'_>],
+    stranded: &[Stranding<'_>],
+    edges: &[ScheduleEdge<'_>],
+    conflicts: Option<&Conflicts<'_>>,
+) -> IssueBoard {
     let mut issues = Vec::new();
     let hull = Hull {
         graph: world.graph,
@@ -328,6 +424,14 @@ pub fn derive(
         }
     }
 
+    let mut pairs_dropped = 0;
+    if let Some(c) = conflicts {
+        let (pairs, dropped) = hot_vs_flammable(world.graph, c);
+        pairs_dropped = dropped;
+        issues.extend(pairs);
+        issues.extend(crowding(c));
+    }
+
     issues.sort_by_key(|i| {
         (
             Reverse(i.hours_at_risk().get()),
@@ -335,5 +439,8 @@ pub fn derive(
             i.subject_key(),
         )
     });
-    issues
+    IssueBoard {
+        issues,
+        pairs_dropped,
+    }
 }

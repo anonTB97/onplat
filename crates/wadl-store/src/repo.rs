@@ -7,7 +7,8 @@ use wadl_plan::Package;
 use crate::error::StoreError;
 use crate::model::{
     ActivitySummary, AuditRecord, CompartmentSummary, DeckSummary, PackageSummary,
-    ScheduleEdgeSummary, StrandedReport, VesselSummary, WorkOrderSummary,
+    ScheduleEdgeSummary, ScheduleRun, ScheduleRunSummary, StrandedReport, VesselSummary,
+    WorkOrderSummary,
 };
 use crate::scope::TenantScope;
 
@@ -25,6 +26,12 @@ use crate::scope::TenantScope;
 pub trait Repositories: Send + Sync {
     /// The hulls visible to `scope`: in-tenant AND assigned.
     async fn list_vessels(&self, scope: &TenantScope) -> Vec<VesselSummary>;
+
+    /// Whether the store can answer, and at which schema — what `/health`
+    /// reports. A database-backed store round-trips a query and reads the
+    /// migration it is at; the in-memory world is always reachable and says
+    /// so. Never a tenant read: health is answered before any identity is.
+    async fn health(&self) -> crate::model::StoreHealth;
 
     /// One hull, or [`StoreError::NotFound`] if it is out of tenant or not
     /// assigned. A hull in another tenant is `NotFound`, never "forbidden".
@@ -118,6 +125,202 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<(), StoreError>;
 
+    /// Which clock the served schedule of record's wall times were read in
+    /// (`America/New_York · CVN73-clock.csv`), or `None` when no schedule
+    /// is ingested or the record predates the yard clock. The clock door
+    /// compares this with the clock being loaded and says when the schedule
+    /// needs re-importing.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn schedule_parsed_in(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<String>, StoreError>;
+
+    /// The hull's yard clock document — zone, offsets, watch and shifts —
+    /// or `None` when every clock is served in UTC and says so.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::YardClockDoc>, StoreError>;
+
+    /// Replaces a hull's yard clock. All-or-nothing at the caller: the API
+    /// layer refuses a malformed clock whole.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: crate::memory::YardClockDoc,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's yard clock; every clock is UTC again. A no-op when
+    /// none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_yard_clock(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// The hull's P6 field map document, or `None` while the default
+    /// convention (today's hard-wired names) reads its exports.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::FieldMapDoc>, StoreError>;
+
+    /// Replaces a hull's field map. All-or-nothing at the caller: the API
+    /// validates the map and refuses a malformed one whole; the store holds
+    /// it as the JSON value it is.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: crate::memory::FieldMapDoc,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's field map; the default convention reads its
+    /// exports again. A no-op when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_field_map(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// The hull's rule table document — the safety authority's CSV, compiled
+    /// — or `None` while the seed is in force.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::RuleTableDoc>, StoreError>;
+
+    /// Replaces a hull's rule table. All-or-nothing at the caller: the door
+    /// compiles and refuses a malformed table whole. A commit clears any
+    /// signature — the caller passes the document with `signoff: None`.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        doc: crate::memory::RuleTableDoc,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's rule table; the seed is in force again. A no-op
+    /// when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// Records the safety authority's signature on the hull's rule table and
+    /// returns the signed document. The signature is of a hash: the caller
+    /// has already checked `signoff.table_hash` against the document's.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope` or no rule
+    /// table is stored.
+    async fn sign_rule_table(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        signoff: crate::memory::SignOff,
+    ) -> Result<crate::memory::RuleTableDoc, StoreError>;
+
+    /// Records one schedule import AND serves it, as one write: the run
+    /// gets its `run_id` and `seq` here (whatever the caller passed is
+    /// overwritten), its document becomes the schedule of record, and the
+    /// served pointer moves to it. The run must carry its document.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`;
+    /// [`StoreError::Backend`] when the run carries no document.
+    async fn commit_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run: ScheduleRun,
+    ) -> Result<ScheduleRunSummary, StoreError>;
+
+    /// Every run on the hull, newest first, without their documents.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn list_schedule_runs(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<ScheduleRunSummary>, StoreError>;
+
+    /// One run whole — summary, report and document — or `None` when no run
+    /// on this hull carries the id.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: uuid::Uuid,
+    ) -> Result<Option<ScheduleRun>, StoreError>;
+
+    /// Serves a prior run again: its document becomes the schedule of
+    /// record and the served pointer moves to it. History is untouched — no
+    /// new run is recorded; the caller ledgers the change.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope` or no run
+    /// on it carries the id; [`StoreError::Backend`] when the store no
+    /// longer holds the run's document (see [`ScheduleRun::doc`]).
+    async fn serve_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        run_id: uuid::Uuid,
+    ) -> Result<ScheduleRunSummary, StoreError>;
+
+    /// The run whose document is served, or `None` when the served
+    /// schedule is not a run's (the generated register, or a document set
+    /// through [`Self::set_schedule_of_record`] without a run).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn served_schedule_run(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<ScheduleRunSummary>, StoreError>;
+
     /// The hull's ingested zone chart — authored frame bounds per zone —
     /// or `None` when no chart has been ingested and every band a view draws
     /// is inferred from the register.
@@ -189,6 +392,150 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<(), StoreError>;
 
+    /// The hull's ingested geometry register — surveyed compartment extents
+    /// and deck coverage bands — or `None` when every drawn position is a
+    /// placard parse and the surface says so.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::GeometryRegister>, StoreError>;
+
+    /// Replaces a hull's geometry register. All-or-nothing at the caller.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: crate::memory::GeometryRegister,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's geometry register; positions return to placard
+    /// parses. A no-op when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_geometry_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// The hull's ingested compartment register — its own decks and spaces
+    /// — or `None` while the seeded register stands in.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::CompartmentRegister>, StoreError>;
+
+    /// Installs (or replaces) the hull's compartment register. From the next
+    /// read on, `list_compartments` and `list_decks` serve it.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: crate::memory::CompartmentRegister,
+    ) -> Result<(), StoreError>;
+
+    /// Discards the ingested compartment register; the seed is served again.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_compartment_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// The hull's ingested coupling register, or `None` while the seeded
+    /// edges stand in.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::CouplingRegister>, StoreError>;
+
+    /// Installs (or replaces) the hull's coupling register. From the next
+    /// read on, `adjacency_graph` walks it.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        register: crate::memory::CouplingRegister,
+    ) -> Result<(), StoreError>;
+
+    /// Discards the ingested coupling register; the seeded edges are walked again.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_coupling_register(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
+    /// The coupling types a hull's rules bind to — what a coupling register's
+    /// rows are validated against.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn coupling_types(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Vec<crate::model::CouplingTypeSummary>, StoreError>;
+
+    /// The hull's ingested manning book — available people per trade, per
+    /// half-shift — or `None` when the boards can show demand only.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<Option<crate::memory::ManningBook>, StoreError>;
+
+    /// Replaces a hull's manning book. All-or-nothing at the caller.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn set_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        book: crate::memory::ManningBook,
+    ) -> Result<(), StoreError>;
+
+    /// Discards a hull's ingested manning book; the boards return to demand
+    /// only. A no-op when none is loaded.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_manning_book(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+    ) -> Result<(), StoreError>;
+
     /// The stranded man-hours on a hull.
     ///
     /// # Errors
@@ -221,8 +568,15 @@ pub trait Repositories: Send + Sync {
         vessel: VesselId,
     ) -> Result<AdjacencyGraph, StoreError>;
 
-    /// The hazards currently live on the hull — open coating tickets, live hot
-    /// work, unisolated buses, stop-works.
+    /// The hazards live on the hull as of `at` — open coating tickets, live
+    /// hot work, unisolated buses, stop-works — meaning every recorded hazard
+    /// not administratively cleared by that instant.
+    ///
+    /// The instant matters for the past, not the future: a hazard cleared on
+    /// Friday is still served for a Thursday read, so scrubbing the clock back
+    /// past a clearance shows the hold that was really there. (When the hazard
+    /// was *raised* is the engine's business — it carries `since` and decides
+    /// from it — so a hazard raised after `at` is still returned here.)
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.
@@ -230,11 +584,74 @@ pub trait Repositories: Send + Sync {
         &self,
         scope: &TenantScope,
         vessel: VesselId,
+        at: wadl_domain::time::Timestamp,
     ) -> Result<Vec<Hazard>, StoreError>;
 
-    /// The rules in force for the hull at the evaluation instant. Rules are
-    /// versioned data (ADR 0002); the engine is handed them, never hard-codes
-    /// them.
+    /// The hazards that still bear on a decision as of `at`: every recorded
+    /// hazard not cleared by `at`, **plus** those cleared within the last
+    /// `tail` minutes — the fire-watch tail, so an end-anchored hold
+    /// (`HoldFrom::End`) can run from the clearance the row already carries.
+    /// Each hazard carries `ended` = its `cleared_at`, which the engine
+    /// prices from. With `tail = 0` the set equals [`Self::live_hazards`].
+    /// The caller takes the tail from `RuleSet::longest_end_anchored_hold`.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn hazards_bearing_on(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        at: wadl_domain::time::Timestamp,
+        tail: wadl_domain::units::Minutes,
+    ) -> Result<Vec<Hazard>, StoreError>;
+
+    /// Records a field condition raised on the hull — a coating ticket
+    /// opened, a bus energised, hot work started, a stop-work posted — from
+    /// `since_ms`, and returns it as the engine will see it. The caller has
+    /// already checked the space is on the register and that no live hazard
+    /// of the same kind already originates there; the store only records.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn raise_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: wadl_engine::HazardKind,
+        since_ms: i64,
+        label: &str,
+    ) -> Result<Hazard, StoreError>;
+
+    /// Administratively clears the live hazards of `kind` originating in
+    /// `compartment` — the recorded fact verified ended by its clearing
+    /// authority ("tags hung, zero energy confirmed"), as distinct from a
+    /// rule's hold expiring on its own clock. Returns the hazards actually
+    /// closed, as they were, for the caller's ledger entry; an empty return
+    /// means nothing matched and the caller should say so rather than record
+    /// a clearance of nothing.
+    ///
+    /// Closure, not deletion: implementations mark the hazard cleared (the
+    /// PostgreSQL store sets `cleared_at`/`cleared_basis`; nothing is
+    /// deleted) and every live-hazard read stops serving it.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when the hull is outside `scope`.
+    async fn clear_hazard(
+        &self,
+        scope: &TenantScope,
+        vessel: VesselId,
+        compartment: &str,
+        kind: wadl_engine::HazardKind,
+        basis: &str,
+        cleared_at_ms: i64,
+    ) -> Result<Vec<Hazard>, StoreError>;
+
+    /// The rules in force for the hull, whole: the committed rule table's
+    /// entries when one is stored ([`Self::rule_table`]), else the seed.
+    /// Rules are versioned data (ADR 0002); the engine is handed them, never
+    /// hard-codes them. The caller narrows the set to the work in hand with
+    /// `RuleSet::bound_to` — the store does not read work types.
     ///
     /// # Errors
     /// [`StoreError::NotFound`] when the hull is outside `scope`.

@@ -9,8 +9,9 @@
 
 import { useEffect, useState } from "react";
 import { acknowledgeIssue, listIssues, type AsOf, type Identity, type Issue } from "./api";
+import { useIdentity } from "./identity";
 import { Loading } from "./Loading";
-import { chipStyle, C, fmtClear, mh } from "./theme";
+import { chipStyle, C, errText, fmtClear, mh, STATE_STYLE } from "./theme";
 
 /**
  * Persona-shaped cuts of the board. Each lens is the subset of kinds one job
@@ -104,7 +105,7 @@ function evidence(i: Issue): string {
       );
     case "held_with_crews_booked":
       return (
-        `${i.state} · ` +
+        `${STATE_STYLE[i.state].label} (${i.state}) · ` +
         (i.earliest_clear
           ? `clears ${fmtClear(i.earliest_clear)} on its own`
           : `needs ${i.clearing_authority} — never elapses on a clock`)
@@ -146,10 +147,16 @@ export default function IssuesBoard({
   const [error, setError] = useState<string | null>(null);
   const [lens, setLens] = useState<LensId>("all");
   const [openOnly, setOpenOnly] = useState(false);
+  /** Rows rendered before the board asks: a carrier's board runs to hundreds
+   *  of issues, ranked worst first, and the first fifty are the shift's
+   *  work. The rest are counted and one click away. */
+  const [limit, setLimit] = useState(50);
   const [ackFor, setAckFor] = useState<string | null>(null);
   const [ackNote, setAckNote] = useState("");
   const [ackErr, setAckErr] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const { can, refusal } = useIdentity();
+  const mayDecide = can("decide");
 
   useEffect(() => {
     setError(null);
@@ -202,7 +209,7 @@ export default function IssuesBoard({
         setAckNote("");
         setReloadNonce((n) => n + 1);
       })
-      .catch((e: unknown) => setAckErr(String(e)));
+      .catch((e: unknown) => setAckErr(errText(e)));
   };
 
   return (
@@ -233,7 +240,7 @@ export default function IssuesBoard({
       <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 8 }}>
       <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 860 }}>
         <tbody>
-          {shown.map((i, idx) => {
+          {shown.slice(0, limit).map((i, idx) => {
             const k = KIND[i.kind];
             const space = fixSpace(i);
             const done = answered(i);
@@ -332,11 +339,12 @@ export default function IssuesBoard({
                   )}
                   {!i.acknowledged && (
                     <button
+                      disabled={!mayDecide}
                       onClick={() => { setAckFor(ackFor === i.key ? null : i.key); setAckNote(""); setAckErr(null); }}
-                      title="Record in the audit ledger that somebody answered for this issue. Closes and hides nothing — the row stays as long as its facts hold."
+                      title={mayDecide ? "Record in the audit ledger that somebody answered for this issue. Closes and hides nothing — the row stays as long as its facts hold." : refusal("decide")}
                       style={{
-                        font: "inherit", fontSize: 11, cursor: "pointer", padding: "3px 4px", marginLeft: 8,
-                        borderRadius: 5, color: C.dim, background: "transparent",
+                        font: "inherit", fontSize: 11, cursor: mayDecide ? "pointer" : "not-allowed", padding: "3px 4px", marginLeft: 8,
+                        borderRadius: 5, color: mayDecide ? C.dim : C.faint, background: "transparent",
                         border: "1px solid transparent", textDecoration: "underline",
                         textDecorationColor: "#3a3d49", textUnderlineOffset: 3,
                       }}
@@ -348,6 +356,22 @@ export default function IssuesBoard({
               </tr>
             );
           })}
+          {shown.length > limit && (
+            <tr>
+              <td colSpan={6} style={{ padding: "8px 12px", fontSize: 11.5, color: C.dim, borderTop: `1px solid ${C.line}` }}>
+                <button
+                  onClick={() => setLimit((n) => n + 200)}
+                  title="Render the next two hundred rows. Every issue is already counted in the board's totals and the alert bell; only the table is paged."
+                  style={{ font: "inherit", fontSize: 11.5, cursor: "pointer", padding: "3px 10px", borderRadius: 5, color: C.accent, background: "transparent", border: `1px solid ${C.accent}55` }}
+                >
+                  Show {Math.min(200, shown.length - limit)} more
+                </button>
+                <span style={{ marginLeft: 10 }}>
+                  {limit} of {shown.length} rows rendered, worst first — the totals above count all of them.
+                </span>
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
       </div>

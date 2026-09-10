@@ -64,7 +64,7 @@ const gridP = agent(personaPrompt(HULL_GRID, []), { label: 'hull-grid', phase: '
 const passes = []
 // Passes whose documents already landed before a cut-off: skipped on resume,
 // but later personas still read their files.
-const ALREADY_LANDED = ['ato']
+const ALREADY_LANDED = ['ato', 'perf']
 const earlier = []
 for (const p of PERSONAS) {
   if (ALREADY_LANDED.indexOf(p.slug) >= 0) { log('persona ' + p.slug + ' already landed at docs/council/' + p.file + '; skipped'); earlier.push('docs/council/' + p.file); continue }

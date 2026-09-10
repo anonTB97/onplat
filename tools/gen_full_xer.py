@@ -22,26 +22,47 @@ The file exercises every grading path the ingest carries:
 
 Deterministic: same seed, same file, byte for byte. Regenerate with
     python3 tools/gen_full_xer.py
+
+Scale (docs/stress-test.md): the same generator over a scaled register, a
+multi-year availability, and more chains per space —
+    python3 tools/gen_full_xer.py --register /tmp/scale/CVN73-register.csv \
+        --out /tmp/scale/CVN73-PIA26-scale.xer --months 30 --chain-scale 1.3
+`--months` stretches the availability (and its phase waves) from the shipped
+six; `--chain-scale` multiplies the work chains each space attracts. The
+defaults reproduce the shipped file byte for byte.
 """
 
+import argparse
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-random.seed(73)
+ARGS = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+ARGS.add_argument("--register", type=Path, default=None, help="compartment register to locate work to (default reference/cvn73)")
+ARGS.add_argument("--out", type=Path, default=None, help="output .xer (default reference/p6-sample/CVN73-PIA26-full.xer)")
+ARGS.add_argument("--months", type=int, default=6, help="availability length in 30-day months (default 6, the shipped PIA)")
+ARGS.add_argument("--chain-scale", type=float, default=1.0, help="multiplier on the work chains per space (default 1)")
+ARGS.add_argument("--seed", type=int, default=73, help="seed (the shipped file uses 73)")
+OPTS = ARGS.parse_args()
 
-OUT = Path(__file__).resolve().parent.parent / "reference/p6-sample/CVN73-PIA26-full.xer"
+random.seed(OPTS.seed)
+
+OUT = OPTS.out or (Path(__file__).resolve().parent.parent / "reference/p6-sample/CVN73-PIA26-full.xer")
 
 AV_START = datetime(2026, 7, 27, 6, 0)
-AV_END = datetime(2027, 1, 23, 18, 0)
+# Six months is 2027-01-23 18:00 — the shipped PIA's end, exactly.
+AV_END = AV_START + timedelta(days=30 * OPTS.months, hours=12)
 DATA_DATE = datetime(2026, 8, 10, 6, 0)
+# The phase waves stretch with the availability so a multi-year schedule is
+# staged across its whole length, not crammed into its first half-year.
+STRETCH = OPTS.months / 6
 
 # The hull's compartment register — the crosswalk the yard actually holds —
 # read from the generated document so the schedule locates to the spaces the
 # hull serves (tools/gen_cvn73_hull.py, docs/zone-scheme.md). Each entry is
 # (compartment, zone, name, category); the category sets how much work a
 # space attracts and which systems it attracts.
-REGISTER = Path(__file__).resolve().parent.parent / "reference/cvn73/CVN73-register.csv"
+REGISTER = OPTS.register or (Path(__file__).resolve().parent.parent / "reference/cvn73/CVN73-register.csv")
 SPACES = []
 for line in REGISTER.read_text().splitlines():
     if not line or line.startswith("#"):
@@ -272,6 +293,7 @@ def link(pred, succ, kind="PR_FS", lag_hr=0):
 
 def wave_window(phase, dur_days):
     off, spread = WAVES[min(phase, len(WAVES) - 1)]
+    off, spread = off * STRETCH, spread * STRETCH
     start = AV_START + timedelta(days=off + random.uniform(0, spread), hours=random.choice([0, 2, 4]))
     end = start + timedelta(days=dur_days)
     return start, min(end, AV_END - timedelta(days=1))
@@ -283,6 +305,10 @@ SYSTEM_BY_SWLIN = {s[0]: s for s in SYSTEMS}
 for space, zone, space_name, category in SPACES:
     (lo, hi), weights = CATEGORY_PROFILE.get(category, ((1, 3), {"631": 2, "560": 1}))
     n_chains = random.randint(lo, hi)
+    if OPTS.chain_scale != 1.0:
+        # Scaled after the draw, so the shipped file's random sequence is
+        # untouched at the default.
+        n_chains = max(n_chains, round(n_chains * OPTS.chain_scale))
     picks = random.choices(
         [SYSTEM_BY_SWLIN[k] for k in weights], weights=list(weights.values()), k=n_chains,
     )

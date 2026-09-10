@@ -15,14 +15,33 @@ invented for the demo; the arrangement is the class's public one in outline.
 Deterministic: same seed, same files. Regenerate with
     python3 tools/gen_cvn73_hull.py
 then python3 tools/gen_full_xer.py, which reads the register.
+
+Scale (docs/stress-test.md, docs/council/3-data-and-performance.md): the
+same hull filled to carrier density for load measurement, never committed —
+    python3 tools/gen_cvn73_hull.py --scale 7 --hazards 400 --out /tmp/scale
+`--scale N` fills every deck with ~N× the spaces (numbered, in the same
+categories, on the same placard scheme), recomputes the couplings over the
+denser hull and adds cross-side bulkheads so the graph is dense, and
+`--hazards N` raises the morning's log to N live conditions. The default
+run (`--scale 1`, no `--hazards`) is byte-identical to the shipped files:
+the scale additions draw from a second generator seeded apart, after the
+base hull is complete.
 """
 
+import argparse
 import random
 from pathlib import Path
 
-random.seed(1973)
+ARGS = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+ARGS.add_argument("--scale", type=float, default=1.0, help="space multiplier (default 1 = the shipped hull)")
+ARGS.add_argument("--hazards", type=int, default=None, help="total live hazards to log (default: the base morning's ~27)")
+ARGS.add_argument("--out", type=Path, default=None, help="output directory (default reference/cvn73)")
+ARGS.add_argument("--seed", type=int, default=1973, help="base seed (the shipped files use 1973)")
+OPTS = ARGS.parse_args()
 
-OUT = Path(__file__).resolve().parent.parent / "reference/cvn73"
+random.seed(OPTS.seed)
+
+OUT = OPTS.out or (Path(__file__).resolve().parent.parent / "reference/cvn73")
 OUT.mkdir(parents=True, exist_ok=True)
 
 HULL_AFT = 265      # aft-most hull frame (4 ft spacing)
@@ -409,33 +428,61 @@ spaces.sort(key=lambda s: (ORD[s["deck"]], s["frame"], s["no"]))
 # the uptake trunk stack under the island; electrical buses from each
 # switchgear room to the machinery it feeds. Deck penetrations are the
 # door's to derive from deck order and frame overlap.
-couplings = []
-by_deck_side = {}
-for s in spaces:
-    by_deck_side.setdefault((s["deck"], s["side"]), []).append(s)
-for group in by_deck_side.values():
-    group.sort(key=lambda s: s["frame"])
-    for a, b in zip(group, group[1:]):
-        if b["frame"] - a["aft"] <= 2 and a["deck"] != "flight":
-            couplings.append((a["no"], b["no"], "shared_bulkhead", "yes"))
+def build_couplings(spaces, cross_side=False):
+    """The coupling register over `spaces`, deterministic in their order.
+    `cross_side` (scale runs only) also couples frame-overlapping neighbours
+    across the centreline, so the cascade graph is as dense as a real
+    arrangement's — a hazard reaches sideways as well as fore and aft."""
+    couplings = []
+    by_deck_side = {}
+    for s in spaces:
+        by_deck_side.setdefault((s["deck"], s["side"]), []).append(s)
+    for group in by_deck_side.values():
+        group.sort(key=lambda s: s["frame"])
+        for a, b in zip(group, group[1:]):
+            if b["frame"] - a["aft"] <= 2 and a["deck"] != "flight":
+                couplings.append((a["no"], b["no"], "shared_bulkhead", "yes"))
 
-uptakes = [s for s in spaces if "Uptake" in s["name"] or "Main Machinery Room" in s["name"]]
-stack = sorted(uptakes, key=lambda s: ORD[s["deck"]])
-for lower, upper in zip(stack[1:], stack):
-    if ORD[lower["deck"]] > ORD[upper["deck"]]:
-        couplings.append((lower["no"], upper["no"], "exhaust_trunk", "no"))
+    uptakes = [s for s in spaces if "Uptake" in s["name"] or "Main Machinery Room" in s["name"]]
+    stack = sorted(uptakes, key=lambda s: ORD[s["deck"]])
+    for lower, upper in zip(stack[1:], stack):
+        if ORD[lower["deck"]] > ORD[upper["deck"]]:
+            couplings.append((lower["no"], upper["no"], "exhaust_trunk", "no"))
 
-switchgear = [s for s in spaces if "Switchgear" in s["name"] or "Switchboard" in s["name"]]
-for sg in switchgear:
-    fed = [
-        s for s in spaces
-        if s["no"] != sg["no"]
-        and abs(ORD[s["deck"]] - ORD[sg["deck"]]) <= 1
-        and abs(s["frame"] - sg["frame"]) <= 36
-        and s["category"] in ("Machinery / electrical", "Electrical", "Command & surveillance", "Machinery / operational")
-    ]
-    for s in fed[:9]:
-        couplings.append((sg["no"], s["no"], "electrical_bus", "no"))
+    switchgear = [s for s in spaces if "Switchgear" in s["name"] or "Switchboard" in s["name"]]
+    for sg in switchgear:
+        fed = [
+            s for s in spaces
+            if s["no"] != sg["no"]
+            and abs(ORD[s["deck"]] - ORD[sg["deck"]]) <= 1
+            and abs(s["frame"] - sg["frame"]) <= 36
+            and s["category"] in ("Machinery / electrical", "Electrical", "Command & surveillance", "Machinery / operational")
+        ]
+        for s in fed[:9]:
+            couplings.append((sg["no"], s["no"], "electrical_bus", "no"))
+
+    if cross_side:
+        # Centreline spaces share a bulkhead with the port and starboard
+        # spaces their frames overlap on the same deck (one per side, the
+        # nearest), and the two outboard sides do not touch each other.
+        by_deck = {}
+        for s in spaces:
+            by_deck.setdefault(s["deck"], []).append(s)
+        for deck, group in by_deck.items():
+            if deck == "flight":
+                continue
+            centre = [s for s in group if s["side"] == "centreline"]
+            for side in ("starboard", "port"):
+                outboard = sorted((s for s in group if s["side"] == side), key=lambda s: s["frame"])
+                for c in centre:
+                    touching = [o for o in outboard if o["frame"] <= c["aft"] and o["aft"] >= c["fwd"]]
+                    if touching:
+                        nearest = min(touching, key=lambda o: abs(o["frame"] - c["frame"]))
+                        couplings.append((c["no"], nearest["no"], "shared_bulkhead", "yes"))
+    return couplings
+
+
+couplings = build_couplings(spaces)
 
 # --- hazards: a morning's log -------------------------------------------------
 def pick(pred, n):
@@ -462,6 +509,72 @@ for s in pick(lambda s: "Ready Room" in s["name"], 2):
     hazards.append((s["no"], "coating_open", f"CT-RR · overhead coat curing, {s['name']}"))
 for s in pick(lambda s: "Hangar Bay" in s["name"] and "door" not in s["name"], 1):
     hazards.append((s["no"], "hot_work_live", f"HW permit {random.randint(2800, 2899)} · padeye repair, {s['name']}"))
+
+# --- scale: the same hull at carrier density ----------------------------------
+# Everything above is the shipped hull, drawn from the base generator in the
+# base order. The additions below use a second generator so the shipped files
+# are untouched by the flag's existence, and every extra space lands on the
+# same placard scheme, in a category the schedule generator knows.
+SCALE_POOLS = {
+    "gallery": (["Ready storeroom", "Avionics shop", "Aviation storeroom", "Passage"], "Aviation", "Q"),
+    "o2": (["Sponson storeroom", "Fan room", "Hose reel locker", "Passage"], "Stowage", "A"),
+    "o1": (["Tool issue room", "Squadron storeroom", "Fan room", "Passage"], "Stowage", "A"),
+    "Main": (["Hangar deck storeroom", "Fire station", "Workshop", "Tie-down locker"], "Aviation", "Q"),
+    "2nd": (["Crew berthing", "Crew washroom & head", "Division office", "Passage"], "Living", "L"),
+    "3rd": (["Crew berthing", "Division office", "Storeroom", "Fan room"], "Living", "L"),
+    "4th": (["Storeroom", "Fan room", "Electrical distribution room", "Pump room"], "Machinery / electrical", "Q"),
+    "1stplat": (["Storeroom", "Pump room", "Void", "Cofferdam"], "Tanks & voids", "V"),
+    "2ndplat": (["Cofferdam", "Void", "Pump room", "Storeroom"], "Tanks & voids", "V"),
+    "hold": (["Fuel oil tank", "Void", "Potable water tank", "Cofferdam"], "Tanks & voids", "W"),
+    "db": (["Ballast tank", "Inner bottom void", "Cofferdam", "Void"], "Tanks & voids", "V"),
+}
+SCALE_HAZARD_KINDS = [
+    (lambda s: s["category"] in ("Machinery / electrical", "Machinery / operational", "Aviation"), "hot_work_live", "HW permit {n} · weld repair, {name}", 4),
+    (lambda s: s["category"] in ("Living", "Stowage", "Passage / trunk"), "coating_open", "CT-{n} · deck coat curing, {name}", 4),
+    (lambda s: s["category"] in ("Tanks & voids", "Fuel / JP-5"), "flammable_stow", "Tank entry · {name} gas-freed for coating, vapour present", 3),
+    (lambda s: s["category"] in ("Electrical", "Machinery / electrical"), "energised_bus", "Bus live · {name} — no verified zero-energy state", 2),
+    (lambda s: s["category"] in ("Magazine", "Command & surveillance"), "stop_work", "Stop-work · {name} pending inspection", 1),
+]
+
+if OPTS.scale > 1.0:
+    rng = random.Random(OPTS.seed + 1)
+    coverage = {
+        "gallery": (4, 262), "o2": (6, 262), "o1": (8, 262), "Main": (10, 265), "2nd": (10, 262),
+        "3rd": (12, 258), "4th": (12, 256), "1stplat": (16, 252), "2ndplat": (22, 248),
+        "hold": (30, 250), "db": (34, 236),
+    }
+    extra_total = int((OPTS.scale - 1.0) * len(spaces))
+    span_total = sum(hi - lo for lo, hi in coverage.values())
+    counters = {}
+    for deck, (lo, hi) in coverage.items():
+        pool, category, usage = SCALE_POOLS[deck]
+        quota = round(extra_total * (hi - lo) / span_total)
+        sides = [0, 1, 2, 3, 4] if deck not in ("hold", "db") else [1, 2, 3, 4]
+        for _ in range(quota):
+            base = rng.choice(pool)
+            n = counters.get((deck, base), 0) + 1
+            counters[(deck, base)] = n
+            add(deck, rng.randint(lo, hi), rng.choice(sides), usage, f"{base} No. {n}", category,
+                rng.choice([2, 3, 3, 4, 4, 5, 6]))
+    spaces.sort(key=lambda s: (ORD[s["deck"]], s["frame"], s["no"]))
+    couplings = build_couplings(spaces, cross_side=True)
+
+if OPTS.hazards is not None and OPTS.hazards > len(hazards):
+    rng = random.Random(OPTS.seed + 2)
+    taken = {(no, kind) for no, kind, _ in hazards}
+    weights = [w for _, _, _, w in SCALE_HAZARD_KINDS]
+    guard = 0
+    while len(hazards) < OPTS.hazards and guard < OPTS.hazards * 50:
+        guard += 1
+        pred, kind, tmpl, _ = rng.choices(SCALE_HAZARD_KINDS, weights=weights)[0]
+        pool = [s for s in spaces if pred(s)]
+        if not pool:
+            continue
+        s = rng.choice(pool)
+        if (s["no"], kind) in taken:
+            continue
+        taken.add((s["no"], kind))
+        hazards.append((s["no"], kind, tmpl.format(n=rng.randint(1000, 9999), name=s["name"])))
 
 # --- emit --------------------------------------------------------------------
 def esc(v):

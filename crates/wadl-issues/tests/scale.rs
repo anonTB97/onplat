@@ -36,10 +36,11 @@ use std::time::Instant;
 use wadl_domain::compartment::CompartmentNo;
 use wadl_domain::ids::CouplingTypeId;
 use wadl_domain::time::{Timestamp, Window};
+use wadl_domain::trades::WorkFlags;
 use wadl_domain::units::{HopDepth, ManHours};
 use wadl_engine::coupling::{CouplingCode, CouplingEdge, Propagation};
 use wadl_engine::{AdjacencyGraph, Hazard, HazardKind, RuleSet};
-use wadl_issues::{derive, RegisterRow};
+use wadl_issues::{derive, derive_board, Conflicts, Issue, RegisterRow, SpaceRow, WorkRow};
 use wadl_mitigate::{assess, leverage, SpaceLoad, World};
 
 const T0: i64 = 1_778_649_300_000;
@@ -213,6 +214,8 @@ fn the_boards_hold_up_at_register_scale() {
     );
     assert!(!issues.is_empty());
 
+    conflicts_pass(&world, &rows_data, &rows, derive_ms);
+
     // The tripwire, not a benchmark: an accidental O(spaces³) blows through
     // this by an order of magnitude; a loaded CI runner does not.
     let total = leverage_ms + assess_ms + derive_ms;
@@ -220,5 +223,84 @@ fn the_boards_hold_up_at_register_scale() {
         total < 15_000,
         "the boards took {total} ms at register scale — roughly 4x the \
          bounded measurement; something regressed the reach bounding"
+    );
+}
+
+/// The conflict pass over the same register: every third row an ignition
+/// source, every fourth a flammable atmosphere (every fifth is finished), every space a tolerance of
+/// three — denser in conflicts than a real hull, on purpose. Trips when it
+/// costs more than a few seconds over the plain derivation.
+fn conflicts_pass(world: &World<'_>, rows_data: &[Row], rows: &[RegisterRow<'_>], derive_ms: u128) {
+    let ignition = WorkFlags {
+        ignition_source: true,
+        ..WorkFlags::default()
+    };
+    let vapour = WorkFlags {
+        flammable_atmosphere: true,
+        ..WorkFlags::default()
+    };
+    let work: Vec<WorkRow<'_>> = rows_data
+        .iter()
+        .enumerate()
+        .map(|(i, r)| WorkRow {
+            code: &r.code,
+            name: &r.name,
+            trade: "SYN",
+            work_type: None,
+            flags: if i % 3 == 0 {
+                ignition
+            } else if i % 4 == 0 {
+                vapour
+            } else {
+                WorkFlags::default()
+            },
+            compartment: &r.compartment,
+            planned: Some(r.planned),
+            remaining: r.remaining,
+        })
+        .collect();
+    let space_nos: Vec<CompartmentNo> = (0..DECKS)
+        .flat_map(|d| (0..FRAMES).map(move |f| space_no(d, f)))
+        .collect();
+    let space_rows: Vec<SpaceRow<'_>> = space_nos
+        .iter()
+        .map(|no| SpaceRow {
+            compartment: no,
+            category: Some("Tanks & voids"),
+            tolerance: 3,
+        })
+        .collect();
+    let conflicts = Conflicts {
+        rows: &work,
+        spaces: &space_rows,
+        day: Window::new(
+            Timestamp::from_epoch_millis(T0),
+            Timestamp::from_epoch_millis(T0 + 24 * HOUR),
+        ),
+        shift_hours: 8,
+        pair_cap: 200,
+    };
+    let t = Instant::now();
+    let board = derive_board(world, rows, &[], &[], Some(&conflicts));
+    let conflicts_ms = t.elapsed().as_millis();
+    let pairs = board
+        .issues
+        .iter()
+        .filter(|i| matches!(i, Issue::HotVsFlammable { .. }))
+        .count();
+    let crowded = board
+        .issues
+        .iter()
+        .filter(|i| matches!(i, Issue::Crowding { .. }))
+        .count();
+    eprintln!(
+        "derive with conflicts: {conflicts_ms} ms ({pairs} pairs, {} dropped, {crowded} crowded)",
+        board.pairs_dropped
+    );
+    assert!(pairs > 0 && crowded > 0, "a grid this dense has both kinds");
+    assert!(
+        conflicts_ms < derive_ms + 3_000,
+        "the conflict pass added {} ms over the plain derivation",
+        conflicts_ms.saturating_sub(derive_ms)
     );
 }
